@@ -9,9 +9,9 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerMount "github.com/docker/docker/api/types/mount"
-	dockerNat "github.com/docker/go-connections/nat"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerMount "github.com/moby/moby/api/types/mount"
+	dockerNetwork "github.com/moby/moby/api/types/network"
 
 	"github.com/nicholas-fedor/watchtower/pkg/compose"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -70,53 +70,61 @@ var _ = ginkgo.Describe("Container", func() {
 
 		ginkgo.It("succeeds with non-nil exposed ports and port bindings", func() {
 			c := MockContainer(WithPortBindings("80/tcp"))
-			c.containerInfo.Config.ExposedPorts = map[dockerNat.Port]struct{}{"80/tcp": {}}
+			c.containerInfo.Config.ExposedPorts = map[dockerNetwork.Port]struct{}{
+				dockerNetwork.MustParsePort("80/tcp"): {},
+			}
 			err := c.VerifyConfiguration()
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 
 		ginkgo.It("removes port bindings with empty port string", func() {
 			c := MockContainer(WithPortBindings("80/tcp"))
-			c.containerInfo.HostConfig.PortBindings[""] = []dockerNat.PortBinding{}
-			c.containerInfo.Config.ExposedPorts = map[dockerNat.Port]struct{}{
-				"":       {},
-				"80/tcp": {},
+
+			var emptyPort dockerNetwork.Port
+
+			c.containerInfo.HostConfig.PortBindings[emptyPort] = []dockerNetwork.PortBinding{}
+			c.containerInfo.Config.ExposedPorts = map[dockerNetwork.Port]struct{}{
+				emptyPort:                             {},
+				dockerNetwork.MustParsePort("80/tcp"): {},
 			}
 			err := c.VerifyConfiguration()
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-			_, exists := c.containerInfo.HostConfig.PortBindings[""]
+			_, exists := c.containerInfo.HostConfig.PortBindings[emptyPort]
 			gomega.Expect(exists).To(gomega.BeFalse())
-			_, exists = c.containerInfo.HostConfig.PortBindings["80/tcp"]
+			_, exists = c.containerInfo.HostConfig.PortBindings[dockerNetwork.MustParsePort("80/tcp")]
 			gomega.Expect(exists).To(gomega.BeTrue())
-			_, exists = c.containerInfo.Config.ExposedPorts[""]
+			_, exists = c.containerInfo.Config.ExposedPorts[emptyPort]
 			gomega.Expect(exists).To(gomega.BeFalse())
-			_, exists = c.containerInfo.Config.ExposedPorts["80/tcp"]
+			_, exists = c.containerInfo.Config.ExposedPorts[dockerNetwork.MustParsePort("80/tcp")]
 			gomega.Expect(exists).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("removes port bindings with empty port number", func() {
 			c := MockContainer(WithPortBindings("80/tcp"))
-			c.containerInfo.HostConfig.PortBindings["/tcp"] = []dockerNat.PortBinding{}
-			c.containerInfo.Config.ExposedPorts = map[dockerNat.Port]struct{}{
-				"/tcp": {},
+
+			var malformedPort dockerNetwork.Port
+
+			c.containerInfo.HostConfig.PortBindings[malformedPort] = []dockerNetwork.PortBinding{}
+			c.containerInfo.Config.ExposedPorts = map[dockerNetwork.Port]struct{}{
+				malformedPort: {},
 			}
 			err := c.VerifyConfiguration()
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-			_, exists := c.containerInfo.HostConfig.PortBindings["/tcp"]
+			_, exists := c.containerInfo.HostConfig.PortBindings[malformedPort]
 			gomega.Expect(exists).To(gomega.BeFalse())
-			_, exists = c.containerInfo.Config.ExposedPorts["/tcp"]
+			_, exists = c.containerInfo.Config.ExposedPorts[malformedPort]
 			gomega.Expect(exists).To(gomega.BeFalse())
-			_, exists = c.containerInfo.HostConfig.PortBindings["80/tcp"]
+			_, exists = c.containerInfo.HostConfig.PortBindings[dockerNetwork.MustParsePort("80/tcp")]
 			gomega.Expect(exists).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("preserves valid port bindings unchanged", func() {
 			c := MockContainer(WithPortBindings("8080/tcp", "443/tcp"))
-			c.containerInfo.Config.ExposedPorts = map[dockerNat.Port]struct{}{
-				"8080/tcp": {},
-				"443/tcp":  {},
+			c.containerInfo.Config.ExposedPorts = map[dockerNetwork.Port]struct{}{
+				dockerNetwork.MustParsePort("8080/tcp"): {},
+				dockerNetwork.MustParsePort("443/tcp"):  {},
 			}
 			err := c.VerifyConfiguration()
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -1109,6 +1117,36 @@ var _ = ginkgo.Describe("Container", func() {
 			gomega.Expect(mount.VolumeOptions).ToNot(gomega.BeNil(), "VolumeOptions should be set")
 			gomega.Expect(mount.VolumeOptions.Subpath).
 				To(gomega.Equal("ha/nest"), "Subpath should be preserved")
+		})
+
+		ginkgo.It("defaults empty device CgroupPermissions to 'rwm' for Podman compatibility", func() {
+			devices := []dockerContainer.DeviceMapping{
+				{
+					PathOnHost:        "/dev/net/tun",
+					PathInContainer:   "/dev/net/tun",
+					CgroupPermissions: "", // empty, as returned by Podman inspect
+				},
+				{
+					PathOnHost:        "/dev/dri/renderD128",
+					PathInContainer:   "/dev/dri/renderD128",
+					CgroupPermissions: "rw", // explicit value should be preserved
+				},
+			}
+
+			container := MockContainer(WithDevices(devices))
+			hostConfig := container.GetCreateHostConfig()
+
+			gomega.Expect(hostConfig.Devices).To(gomega.HaveLen(2))
+
+			// Empty permissions must be defaulted (this fixes the Podman "empty device mode" error)
+			gomega.Expect(hostConfig.Devices[0].PathOnHost).To(gomega.Equal("/dev/net/tun"))
+			gomega.Expect(hostConfig.Devices[0].CgroupPermissions).
+				To(gomega.Equal("rwm"), "empty CgroupPermissions should default to 'rwm'")
+
+			// Explicit permissions must be left untouched
+			gomega.Expect(hostConfig.Devices[1].PathOnHost).To(gomega.Equal("/dev/dri/renderD128"))
+			gomega.Expect(hostConfig.Devices[1].CgroupPermissions).
+				To(gomega.Equal("rw"), "explicit CgroupPermissions must be preserved")
 		})
 	})
 })

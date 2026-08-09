@@ -2,6 +2,7 @@ package actions_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+
+	dockerContainer "github.com/moby/moby/api/types/container"
 
 	"github.com/nicholas-fedor/watchtower/internal/actions"
 	mockActions "github.com/nicholas-fedor/watchtower/internal/actions/mocks"
@@ -29,7 +32,7 @@ var _ = ginkgo.Describe("the update action", func() {
 			)
 
 			gomega.Expect(err).To(gomega.HaveOccurred())
-			gomega.Expect(err.Error()).To(gomega.ContainSubstring("update canceled"))
+			gomega.Expect(errors.Is(err, context.Canceled)).To(gomega.BeTrue())
 			gomega.Expect(report).To(gomega.BeNil())
 			gomega.Expect(cleanupImageInfos).To(gomega.BeEmpty())
 		})
@@ -45,12 +48,12 @@ var _ = ginkgo.Describe("the update action", func() {
 				types.UpdateParams{Cleanup: true, CPUCopyMode: "auto"},
 			)
 
-			// Update continues but marks containers as skipped due to staleness check failure
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(report).NotTo(gomega.BeNil())
-			gomega.Expect(report.Skipped()).
-				To(gomega.HaveLen(3))
-				// All containers skipped due to error
+			// Context cancellation from IsContainerStale is propagated as the
+			// final Update error rather than being swallowed.
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			gomega.Expect(errors.Is(err, context.Canceled)).To(gomega.BeTrue())
+			// Workers returning context.Canceled do not add partial results to progress.
+			gomega.Expect(report.Skipped()).To(gomega.BeEmpty())
 			gomega.Expect(cleanupImageInfos).To(gomega.BeEmpty())
 		})
 
@@ -83,10 +86,127 @@ var _ = ginkgo.Describe("the update action", func() {
 				gomega.Expect(report).NotTo(gomega.BeNil())
 				gomega.Expect(report.Failed()).To(gomega.HaveLen(1)) // One container failed to stop
 				// Cleanup should still be attempted for successful operations.
-				// 2 of 3 containers succeeded; each gets its own entry for split notifications.
+				// 2 of 3 containers succeeded and each gets its own entry for split notifications.
 				gomega.Expect(cleanupImageInfos).To(gomega.HaveLen(2))
 			},
 		)
+	})
+
+	ginkgo.When("the current container is an old Watchtower container", func() {
+		ginkgo.It("should detect self as old and return error without updating", func() {
+			config := &dockerContainer.Config{
+				Image:  "watchtower:latest",
+				Labels: map[string]string{"com.centurylinklabs.watchtower": "true"},
+			}
+			oldContainer := mockActions.CreateMockContainerWithConfig(
+				"old-container-id",
+				"watchtower-old-abc123",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				config,
+			)
+			testData := &mockActions.TestData{
+				Containers: []types.Container{oldContainer},
+			}
+			client := mockActions.CreateMockClient(testData, false, false)
+
+			report, cleanupImageInfos, err := actions.Update(
+				context.Background(),
+				client,
+				types.UpdateParams{
+					Cleanup:            true,
+					CPUCopyMode:        "auto",
+					CurrentContainerID: "old-container-id",
+				},
+			)
+
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			gomega.Expect(err.Error()).To(gomega.ContainSubstring("old Watchtower container"))
+			gomega.Expect(report).To(gomega.BeNil())
+			gomega.Expect(cleanupImageInfos).To(gomega.BeEmpty())
+		})
+
+		ginkgo.It("should update restart policy to no when detecting self as old", func() {
+			config := &dockerContainer.Config{
+				Image:  "watchtower:latest",
+				Labels: map[string]string{"com.centurylinklabs.watchtower": "true"},
+			}
+			oldContainer := mockActions.CreateMockContainerWithConfig(
+				"old-container-id",
+				"watchtower-old-abc123",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				config,
+			)
+			testData := &mockActions.TestData{
+				Containers: []types.Container{oldContainer},
+			}
+			client := mockActions.CreateMockClient(testData, false, false)
+
+			_, _, err := actions.Update(
+				context.Background(),
+				client,
+				types.UpdateParams{
+					Cleanup:            true,
+					CPUCopyMode:        "auto",
+					CurrentContainerID: "old-container-id",
+				},
+			)
+
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			gomega.Expect(client.TestData.SetNoRestartPolicyCount.Load()).To(gomega.Equal(int32(1)))
+			gomega.Expect(client.TestData.SetNoRestartPolicyContainer).NotTo(gomega.BeNil())
+			gomega.Expect(client.TestData.SetNoRestartPolicyContainer.ID()).To(gomega.Equal(types.ContainerID("old-container-id")))
+		})
+
+		ginkgo.It("should proceed normally when current container is not old", func() {
+			normalContainer := mockActions.CreateMockContainer(
+				"current-id",
+				"watchtower",
+				"watchtower:latest",
+				time.Now(),
+			)
+			testData := &mockActions.TestData{
+				Containers: []types.Container{normalContainer},
+			}
+			client := mockActions.CreateMockClient(testData, false, false)
+
+			report, _, err := actions.Update(
+				context.Background(),
+				client,
+				types.UpdateParams{
+					Cleanup:            true,
+					CPUCopyMode:        "auto",
+					CurrentContainerID: "current-id",
+				},
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(report).NotTo(gomega.BeNil())
+		})
+
+		ginkgo.It("should proceed normally when current container ID is empty", func() {
+			testData := &mockActions.TestData{
+				Containers: []types.Container{},
+			}
+			client := mockActions.CreateMockClient(testData, false, false)
+
+			report, _, err := actions.Update(
+				context.Background(),
+				client,
+				types.UpdateParams{
+					Cleanup:     true,
+					CPUCopyMode: "auto",
+				},
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(report).NotTo(gomega.BeNil())
+		})
 	})
 })
 
@@ -534,6 +654,53 @@ func TestUpdateAction_ContextEdgeCases(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestUpdateAction_ParallelStalenessCheckCancellationPropagation tests that context
+// cancellation during parallel staleness checks is propagated as the final Update
+// error rather than being swallowed by workers.
+func TestUpdateAction_ParallelStalenessCheckCancellationPropagation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		testData := getCommonTestData()
+		testData.Staleness = map[string]bool{
+			"test-container-01": true,
+			"test-container-02": true,
+			"test-container-03": true,
+		}
+		testData.SimulatedLatency = 10 * time.Millisecond
+
+		ctx, cancel := context.WithCancel(context.Background())
+		client := mockActions.CreateMockClientWithContext(ctx, testData, false, false)
+
+		done := make(chan struct{})
+
+		var err error
+
+		go func() {
+			defer close(done)
+
+			_, _, err = actions.Update(
+				ctx,
+				client,
+				types.UpdateParams{Cleanup: true, CPUCopyMode: "auto"},
+			)
+		}()
+
+		synctest.Wait()
+		cancel()
+
+		<-done
+
+		synctest.Wait()
+
+		if err == nil {
+			t.Fatal("expected error when context is canceled during parallel staleness checks")
+		}
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context canceled error, got: %s", err.Error())
+		}
+	})
 }
 
 // TestEarlyCancellationStopContainers tests that context cancellation is properly handled

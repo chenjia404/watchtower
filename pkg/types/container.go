@@ -1,15 +1,19 @@
 package types
 
 import (
-	"context"
 	"strings"
 	"time"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
 )
 
-// Container defines a docker container’s interface in Watchtower.
+// WatchtowerOldPrefix is the prefix used when renaming Watchtower containers
+// during self-update. It is the single source of truth for both rename
+// generation and old-name detection to prevent cross-file protocol drift.
+const WatchtowerOldPrefix = "watchtower-old-"
+
+// Container defines a docker container's interface in Watchtower.
 type Container interface {
 	ContainerInfo() *dockerContainer.InspectResponse  // Container metadata.
 	ID() ContainerID                                  // Container ID.
@@ -21,6 +25,7 @@ type Container interface {
 	IsMonitorOnly(params UpdateParams) bool           // Monitor-only check.
 	Scope() (string, bool)                            // Scope value and presence.
 	Links(useComposeDependsOn bool) []string          // Dependency links.
+	GetLabel(key string) (string, bool)               // Arbitrary label value lookup.
 	ToRestart() bool                                  // Needs restart check.
 	IsWatchtower() bool                               // Watchtower instance check.
 	StopSignal() string                               // Custom stop signal.
@@ -43,18 +48,11 @@ type Container interface {
 	PreUpdateTimeout() int                            // Pre-update timeout.
 	PostUpdateTimeout() int                           // Post-update timeout.
 	IsRestarting() bool                               // Restarting status check.
+	IsCreated() bool                                  // Created-state check.
 	GetCreateConfig() *dockerContainer.Config         // Creation config.
 	GetCreateHostConfig() *dockerContainer.HostConfig // Host creation config.
 	GetContainerChain() (string, bool)                // Container chain label value and presence.
 	HasExposedPorts() bool                            // Exposed ports presence check.
-}
-
-// ImageInspector defines the interface for inspecting Docker images.
-type ImageInspector interface {
-	ImageInspectWithRaw(
-		ctx context.Context,
-		image string,
-	) (dockerImage.InspectResponse, []byte, error)
 }
 
 // ImageID is a hash string for a container image.

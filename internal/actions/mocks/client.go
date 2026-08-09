@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
+	dockerContainer "github.com/moby/moby/api/types/container"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
@@ -31,8 +31,15 @@ type TestData struct {
 	TriedToRemoveImageCount      atomic.Int32                          // Number of times RemoveImageByID was called.
 	RenameContainerCount         atomic.Int32                          // Number of times RenameContainer was called.
 	StopContainerCount           atomic.Int32                          // Number of times StopContainer was called.
+	StopAndRemoveContainerCount  atomic.Int32                          // Number of times StopAndRemoveContainer was called.
 	StartContainerCount          atomic.Int32                          // Number of times StartContainer was called.
+	CreateContainerCount         atomic.Int32                          // Number of times CreateContainer was called.
+	LastStopAndRemoveID          types.ContainerID                     // ID of the last container passed to StopAndRemoveContainer.
+	LastCreatedContainerID       types.ContainerID                     // ID returned by the last successful CreateContainer call.
+	LastRenameTarget             string                                // Last new name passed to RenameContainer.
+	RenameTargets                []string                              // Ordered list of rename targets.
 	UpdateContainerCount         atomic.Int32                          // Number of times UpdateContainer was called.
+	SetNoRestartPolicyCount      atomic.Int32                          // Number of times SetNoRestartPolicy was called.
 	IsContainerStaleCount        atomic.Int32                          // Number of times IsContainerStale was called.
 	WaitForContainerHealthyCount atomic.Int32                          // Number of times WaitForContainerHealthy was called.
 	ListContainersCount          atomic.Int32                          // Number of times ListContainers was called.
@@ -45,14 +52,42 @@ type TestData struct {
 	ListContainersFailCount      int                                   // Number of times ListContainers should fail before succeeding.
 	StopContainerError           error                                 // Error to return from StopContainer (for testing).
 	StartContainerError          error                                 // Error to return from StartContainer (for testing).
+	StartContainerByIDError      error                                 // Error to return from StartContainerByID (for testing).
+	CreateContainerError         error                                 // Error to return from CreateContainer (for testing).
 	UpdateContainerError         error                                 // Error to return from UpdateContainer (for testing).
 	StopContainerFailCount       int                                   // Number of times StopContainer should fail before succeeding.
 	RemoveImageError             error                                 // Error to return from RemoveImageByID (for testing).
 	FailedImageIDs               []types.ImageID                       // List of image IDs that should fail removal.
 	StopOrder                    []string                              // Order in which containers were stopped.
+	CreateOrder                  []string                              // Order in which containers were created.
 	StartOrder                   []string                              // Order in which containers were started.
-	SimulatedLatency             time.Duration                         // Simulated latency for operations (default 0 for fast tests, set for context cancellation tests).
-	LastContainerChain           string                                // Last container chain passed to CreateEphemeralOrchestrator.
+	// OperationOrder records client method names in call order for handoff sequencing assertions.
+	OperationOrder              []string
+	RemoveContainerCount        atomic.Int32                  // Number of times RemoveContainer was called.
+	SimulatedLatency            time.Duration                 // Simulated latency for operations (default 0 for fast tests, set for context cancellation tests).
+	LastContainerChain          string                        // Last container chain passed to CreateEphemeralOrchestrator.
+	LastUpdateConfig            *dockerContainer.UpdateConfig // Last UpdateContainer config received.
+	LastStartedContainer        types.Container               // Last container passed to StartContainer.
+	LastStartedContainerID      types.ContainerID             // ID returned by the last successful StartContainer call.
+	SetNoRestartPolicyContainer types.Container               // Last container passed to SetNoRestartPolicy.
+	SetNoRestartPolicyCtx       context.Context               // Last context passed to SetNoRestartPolicy.
+	CreateContainerCtx          context.Context               // Last context passed to CreateContainer.
+	RenameContainerCtx          context.Context               // Last context passed to RenameContainer.
+	StartContainerByIDCtx       context.Context               // Last context passed to StartContainerByID.
+	GetContainerCtx             context.Context               // Last context passed to GetContainer.
+	StopAndRemoveContainerCtx   context.Context               // Last context passed to StopAndRemoveContainer.
+}
+
+// recordOperation appends an operation name to OperationOrder for sequencing tests.
+//
+// Parameters:
+//   - name: Client method name to record (for example, "StopContainer").
+func (testdata *TestData) recordOperation(name string) {
+	if testdata == nil {
+		return
+	}
+
+	testdata.OperationOrder = append(testdata.OperationOrder, name)
 }
 
 // TriedToRemoveImage checks if RemoveImageByID has been invoked.
@@ -163,6 +198,7 @@ func (client MockClient) ListContainers(ctx context.Context, filter ...types.Fil
 // and returns nil for simplicity.
 func (client MockClient) StopContainer(ctx context.Context, c types.Container, _ time.Duration) error {
 	client.TestData.StopContainerCount.Add(1)
+	client.TestData.recordOperation("StopContainer")
 
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return err
@@ -182,6 +218,11 @@ func (client MockClient) StopContainer(ctx context.Context, c types.Container, _
 // StopAndRemoveContainer simulates stopping and removing a container by calling StopContainer followed by RemoveContainer.
 // It properly simulates the stop-and-remove operation sequence while respecting error conditions.
 func (client MockClient) StopAndRemoveContainer(ctx context.Context, c types.Container, timeout time.Duration) error {
+	client.TestData.StopAndRemoveContainerCount.Add(1)
+	client.TestData.LastStopAndRemoveID = c.ID()
+	client.TestData.StopAndRemoveContainerCtx = ctx
+	client.TestData.recordOperation("StopAndRemoveContainer")
+
 	err := client.StopContainer(ctx, c, timeout)
 	if err != nil {
 		return err
@@ -196,11 +237,53 @@ func (client MockClient) IsContainerRunning(c types.Container) bool {
 	return !client.Stopped[string(c.ID())]
 }
 
+// CreateContainer simulates creating a new container from a source container's
+// configuration without starting it.
+// It provides a minimal implementation for testing purposes.
+// Returns the configured CreateContainerError if set.
+// On success it returns a distinct container ID so callers can distinguish the
+// new instance from the source (required for self-update failure cleanup tests).
+func (client MockClient) CreateContainer(ctx context.Context, c types.Container) (types.ContainerID, error) {
+	client.TestData.CreateContainerCount.Add(1)
+	client.TestData.CreateContainerCtx = ctx
+
+	if err := client.checkContextCancellation(ctx); err != nil {
+		return "", err
+	}
+
+	if client.TestData.CreateContainerError != nil {
+		return "", client.TestData.CreateContainerError
+	}
+
+	client.TestData.CreateOrder = append(client.TestData.CreateOrder, c.Name())
+
+	newID := types.ContainerID(string(c.ID()) + "-recreated")
+	client.TestData.LastCreatedContainerID = newID
+
+	// Register a lookup entry so GetContainer(newID) succeeds for cleanup paths.
+	if client.TestData.ContainersByID == nil {
+		client.TestData.ContainersByID = make(map[types.ContainerID]types.Container)
+	}
+
+	if _, exists := client.TestData.ContainersByID[newID]; !exists {
+		client.TestData.ContainersByID[newID] = CreateMockContainer(
+			string(newID),
+			c.Name(),
+			c.ImageName(),
+			time.Now(),
+		)
+	}
+
+	return newID, nil
+}
+
 // StartContainer simulates starting a container, returning the container's ID.
 // It provides a minimal implementation for testing purposes.
 // Returns the configured StartContainerError if set.
 func (client MockClient) StartContainer(ctx context.Context, c types.Container) (types.ContainerID, error) {
 	client.TestData.StartContainerCount.Add(1)
+	client.TestData.recordOperation("StartContainer")
+	client.TestData.LastStartedContainer = c
 
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return "", err
@@ -212,33 +295,77 @@ func (client MockClient) StartContainer(ctx context.Context, c types.Container) 
 
 	client.TestData.StartOrder = append(client.TestData.StartOrder, c.Name())
 
-	return c.ID(), nil
+	// Return a distinct ID so handoff verification can distinguish the replacement
+	// instance from the source, matching real Docker create+start behavior.
+	newID := types.ContainerID(string(c.ID()) + "-started")
+	client.TestData.LastStartedContainerID = newID
+
+	if client.TestData.ContainersByID == nil {
+		client.TestData.ContainersByID = make(map[types.ContainerID]types.Container)
+	}
+
+	if _, exists := client.TestData.ContainersByID[newID]; !exists {
+		// Register as running so ensureContainerRunning accepts the handoff.
+		labels := map[string]string{}
+		if info := c.ContainerInfo(); info != nil && info.Config != nil && info.Config.Labels != nil {
+			for k, v := range info.Config.Labels {
+				labels[k] = v
+			}
+		}
+
+		client.TestData.ContainersByID[newID] = CreateMockContainerWithConfig(
+			string(newID),
+			c.Name(),
+			c.ImageName(),
+			true,
+			false,
+			time.Now(),
+			&dockerContainer.Config{
+				Image:  c.ImageName(),
+				Labels: labels,
+			},
+		)
+	}
+
+	return newID, nil
 }
 
 // StartContainerByID simulates starting a container by its ID directly.
 // It provides a minimal implementation for testing purposes.
-// Returns the configured StartContainerError if set.
+// Returns the configured StartContainerByIDError if set.
 func (client MockClient) StartContainerByID(ctx context.Context, containerID types.ContainerID) error {
 	client.TestData.StartContainerCount.Add(1)
+	client.TestData.recordOperation("StartContainerByID")
+	client.TestData.StartContainerByIDCtx = ctx
 
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return err
 	}
 
-	if client.TestData.StartContainerError != nil {
-		return client.TestData.StartContainerError
+	if client.TestData.StartContainerByIDError != nil {
+		return client.TestData.StartContainerByIDError
 	}
 
-	client.TestData.StartOrder = append(client.TestData.StartOrder, string(containerID))
-	client.Stopped[string(containerID)] = false
+	// Mark the container running when present so re-inspect after start succeeds.
+	delete(client.Stopped, string(containerID))
+
+	if c, ok := client.TestData.ContainersByID[containerID]; ok {
+		if info := c.ContainerInfo(); info != nil && info.State != nil {
+			info.State.Running = true
+		}
+	}
 
 	return nil
 }
 
 // RenameContainer simulates renaming a container, incrementing the RenameContainerCount.
 // It returns nil to indicate success without modifying any state.
-func (client MockClient) RenameContainer(ctx context.Context, _ types.Container, _ string) error {
+func (client MockClient) RenameContainer(ctx context.Context, _ types.Container, newName string) error {
 	client.TestData.RenameContainerCount.Add(1)
+	client.TestData.LastRenameTarget = newName
+	client.TestData.RenameTargets = append(client.TestData.RenameTargets, newName)
+	client.TestData.recordOperation("RenameContainer")
+	client.TestData.RenameContainerCtx = ctx
 
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return err
@@ -249,14 +376,24 @@ func (client MockClient) RenameContainer(ctx context.Context, _ types.Container,
 
 // UpdateContainer simulates updating a container's configuration.
 // It increments the UpdateContainerCount and returns the configured error if set.
-func (client MockClient) UpdateContainer(ctx context.Context, _ types.Container, _ dockerContainer.UpdateConfig) error {
+func (client MockClient) UpdateContainer(ctx context.Context, _ types.Container, config dockerContainer.UpdateConfig) error {
 	client.TestData.UpdateContainerCount.Add(1)
+	client.TestData.LastUpdateConfig = &config
 
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return err
 	}
 
 	return client.TestData.UpdateContainerError
+}
+
+// SetNoRestartPolicy simulates setting a container's restart policy to "no".
+// It increments the SetNoRestartPolicyCount and records the container and context for test assertions.
+func (client MockClient) SetNoRestartPolicy(ctx context.Context, container types.Container) {
+	client.TestData.SetNoRestartPolicyCount.Add(1)
+	client.TestData.SetNoRestartPolicyContainer = container
+	client.TestData.SetNoRestartPolicyCtx = ctx
+	client.TestData.recordOperation("SetNoRestartPolicy")
 }
 
 // RemoveImageByID increments the count of image removal attempts in TestData.
@@ -277,10 +414,14 @@ func (client MockClient) RemoveImageByID(ctx context.Context, imageID types.Imag
 
 // GetContainer returns the container with the specified ID from TestData.
 // It provides a mock response for testing container retrieval.
-func (client MockClient) GetContainer(_ context.Context, containerID types.ContainerID) (types.Container, error) {
+func (client MockClient) GetContainer(ctx context.Context, containerID types.ContainerID) (types.Container, error) {
+	client.TestData.GetContainerCtx = ctx
+	client.TestData.recordOperation("GetContainer")
+
 	if c, ok := client.TestData.ContainersByID[containerID]; ok {
 		return c, nil
 	}
+
 	return nil, fmt.Errorf("container not found: %s", containerID)
 }
 
@@ -343,16 +484,16 @@ func (client MockClient) IsContainerStale(
 	ctx context.Context,
 	container types.Container,
 	_ types.UpdateParams,
-) (bool, types.ImageID, error) {
+) (bool, types.ImageID, string, error) {
 	client.TestData.IsContainerStaleCount.Add(1)
 
 	if err := client.checkContextCancellation(ctx); err != nil {
-		return false, "", err
+		return false, "", "", err
 	}
 
 	// Return configured error if set (for testing error conditions)
 	if client.TestData.IsContainerStaleError != nil {
-		return false, "", client.TestData.IsContainerStaleError
+		return false, "", "", client.TestData.IsContainerStaleError
 	}
 
 	stale, found := client.TestData.Staleness[container.Name()]
@@ -360,7 +501,16 @@ func (client MockClient) IsContainerStale(
 		stale = true // Default to stale if not specified.
 	}
 
-	return stale, "", nil
+	return stale, "", "", nil
+}
+
+// CheckContainerUpdate reports update availability using the same staleness map as IsContainerStale.
+func (client MockClient) CheckContainerUpdate(
+	ctx context.Context,
+	container types.Container,
+	params types.UpdateParams,
+) (bool, types.ImageID, string, error) {
+	return client.IsContainerStale(ctx, container, params)
 }
 
 // WarnOnHeadPullFailed always returns true for the mock client.
@@ -384,6 +534,9 @@ func (client MockClient) WaitForContainerHealthy(ctx context.Context, _ types.Co
 // RemoveContainer simulates removing a container.
 // It returns nil to indicate success.
 func (client MockClient) RemoveContainer(ctx context.Context, _ types.Container) error {
+	client.TestData.RemoveContainerCount.Add(1)
+	client.TestData.recordOperation("RemoveContainer")
+
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return err
 	}
@@ -421,4 +574,9 @@ func (client MockClient) GetInfo(ctx context.Context) (map[string]any, error) {
 		"ServerVersion": "1.50",
 		"OSType":        "linux",
 	}, nil
+}
+
+// Ping returns nil to simulate a healthy Docker daemon.
+func (client MockClient) Ping(ctx context.Context) error {
+	return client.checkContextCancellation(ctx)
 }

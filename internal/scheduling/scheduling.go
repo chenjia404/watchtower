@@ -8,17 +8,17 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/robfig/cron/v3"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
+	"github.com/nicholas-fedor/watchtower/internal/logging"
+	"github.com/nicholas-fedor/watchtower/internal/metrics"
 	"github.com/nicholas-fedor/watchtower/pkg/container"
-	"github.com/nicholas-fedor/watchtower/pkg/metrics"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
@@ -50,58 +50,68 @@ func WaitForRunningUpdate(ctx context.Context, lock chan bool) {
 	logrus.Debug("Lock check completed.")
 }
 
+// ScheduleDeps holds dependencies for scheduled update runs.
+//
+// BaseParams must be a complete types.UpdateParams snapshot from config.UpdateParams
+// (or an equivalent full construction).
+// Each tick copies BaseParams and applies only per-run fields such as SkipSelfUpdate.
+type ScheduleDeps struct {
+	// Filter determines which containers are updated.
+	Filter types.Filter
+	// FilterDesc is a human-readable description of the filter for startup messaging.
+	FilterDesc string
+	// Lock ensures only one update runs at a time, or nil to create a new one.
+	Lock chan bool
+	// ScheduleSpec is the cron-formatted schedule string for periodic updates.
+	ScheduleSpec string
+	// Startup holds resolved values for startup messaging (no flag reads).
+	// Callers must set Filtering, Scope, Client, Notifier, and Version on Startup.
+	// RunUpgradesOnSchedule only applies Sched and UpdateOnStart at send time.
+	Startup logging.StartupParams
+	// WriteStartupMessage writes the startup message with scheduling information.
+	WriteStartupMessage func(logging.StartupParams)
+	// RunUpdate performs container updates and sends notifications.
+	RunUpdate func(context.Context, types.Filter, types.UpdateParams) *metrics.Metric
+	// Client is retained for callers. Prefer Startup.Client for messaging.
+	Client container.Client
+	// Scope is retained for callers. Prefer Startup.Scope for messaging.
+	Scope string
+	// Notifier is closed on schedule shutdown. Prefer Startup.Notifier for messaging.
+	Notifier types.Notifier
+	// MetaVersion is retained for callers. Prefer Startup.Version for messaging.
+	MetaVersion string
+	// UpdateOnStart triggers an immediate update before the scheduler starts.
+	UpdateOnStart bool
+	// SkipFirstRun skips Watchtower self-update on the first scheduled run
+	// (useful after self-update cleanup of old instances).
+	SkipFirstRun bool
+	// CurrentWatchtowerContainer is the running Watchtower container for parent checking.
+	CurrentWatchtowerContainer types.Container
+	// StartupMessageSent is true when the startup message was already sent
+	// (for example by the HTTP API in blocking mode).
+	StartupMessageSent bool
+	// BaseParams is the complete update policy snapshot for every scheduled tick.
+	// Must include Cleanup, MonitorOnly, UseComposeDependsOn, ReviveStopped, and
+	// all other process-wide UpdateParams fields.
+	BaseParams types.UpdateParams
+}
+
 // RunUpgradesOnSchedule schedules and executes periodic container updates according to the cron specification.
 //
 // It sets up a cron scheduler, runs updates at specified intervals, and ensures graceful shutdown on interrupt
 // signals (SIGINT, SIGTERM) or context cancellation, handling concurrency with a lock channel.
 // If update-on-start is enabled, it triggers the first update immediately before starting the scheduler.
-// If skipFirstRun is true, it skips the first scheduled run (useful after self-update cleanup).
+// If SkipFirstRun is true, it skips Watchtower self-update on the first scheduled run (useful after self-update cleanup).
 //
 // Parameters:
 //   - ctx: The context controlling the scheduler's lifecycle, enabling shutdown on cancellation.
-//   - c: The cobra.Command instance, providing access to flags for startup messaging.
-//   - filter: The types.Filter determining which containers are updated.
-//   - filtering: A string describing the filter, used in startup messaging.
-//   - lock: A channel ensuring only one update runs at a time, or nil to create a new one.
-//   - cleanup: Boolean indicating whether to remove old images after updates.
-//   - scheduleSpec: The cron-formatted schedule string that dictates when periodic container updates occur.
-//   - writeStartupMessage: Function to write the startup message with scheduling information.
-//   - runUpdatesWithNotifications: Function to perform container updates and send notifications.
-//   - client: The Docker client instance used for container operations.
-//   - scope: Defines a specific operational scope for Watchtower, limiting updates to containers matching this scope.
-//   - notifier: The notification system instance responsible for sending update status messages.
-//   - metaVersion: The version string for Watchtower, used in startup messaging.
-//   - monitorOnly: Boolean indicating whether to monitor only without updating.
-//   - updateOnStart: Boolean indicating whether to perform an update immediately on startup.
-//   - skipFirstRun: Boolean indicating whether to skip the first scheduled run.
-//   - currentWatchtowerContainer: The current Watchtower container for parent checking.
-//   - startupMessageSent: Whether the startup message was already sent (e.g., by the HTTP API in blocking mode).
-//   - ephemeralSelfUpdate: Whether the self-update uses ephemeral mode (removes old container before creating new one).
+//   - deps: Schedule dependencies including a complete BaseParams policy snapshot.
 //
 // Returns:
 //   - error: An error if scheduling fails (e.g., invalid cron spec), nil on successful shutdown.
-func RunUpgradesOnSchedule(
-	ctx context.Context,
-	c *cobra.Command,
-	filter types.Filter,
-	filtering string,
-	lock chan bool,
-	cleanup bool,
-	scheduleSpec string,
-	writeStartupMessage func(*cobra.Command, time.Time, string, string, container.Client, types.Notifier, string, *bool),
-	runUpdatesWithNotifications func(context.Context, types.Filter, types.UpdateParams) *metrics.Metric,
-	client container.Client,
-	scope string,
-	notifier types.Notifier,
-	metaVersion string,
-	monitorOnly bool,
-	updateOnStart bool,
-	skipFirstRun bool,
-	currentWatchtowerContainer types.Container,
-	startupMessageSent bool,
-	ephemeralSelfUpdate bool,
-) error {
+func RunUpgradesOnSchedule(ctx context.Context, deps ScheduleDeps) error {
 	// Initialize lock if not provided, ensuring single-update concurrency.
+	lock := deps.Lock
 	if lock == nil {
 		lock = make(chan bool, 1)
 		lock <- true
@@ -126,9 +136,9 @@ func RunUpgradesOnSchedule(
 	// while the new container tries to bind it, resulting in both containers being stopped.
 	// Ephemeral self-updates are exempt from this restriction because they remove
 	// the old container before creating the new one, avoiding port conflicts.
-	skipSelfUpdateForPorts := currentWatchtowerContainer != nil &&
-		currentWatchtowerContainer.HasExposedPorts() &&
-		!ephemeralSelfUpdate
+	skipSelfUpdateForPorts := deps.CurrentWatchtowerContainer != nil &&
+		deps.CurrentWatchtowerContainer.HasExposedPorts() &&
+		!deps.BaseParams.EphemeralSelfUpdate
 
 	// Define the update function to be used both for scheduled runs and immediate execution.
 	// skipWatchtowerSelfUpdate: whether to skip updating the Watchtower container itself
@@ -139,14 +149,14 @@ func RunUpgradesOnSchedule(
 		if skipSelfUpdateForPorts {
 			skipWatchtowerSelfUpdate = true
 
-			logrus.Debug("Skipping self-update to prevent port conflict")
+			logrus.Debug("Published ports detected - self-update skipped.")
 		}
 
 		// Skip update if this is a Watchtower parent container (from self-update chain)
-		if currentWatchtowerContainer != nil {
-			chain, _ := currentWatchtowerContainer.GetContainerChain()
+		if deps.CurrentWatchtowerContainer != nil {
+			chain, _ := deps.CurrentWatchtowerContainer.GetContainerChain()
 
-			if container.IsWatchtowerParent(currentWatchtowerContainer.ID(), chain) {
+			if container.IsWatchtowerParent(deps.CurrentWatchtowerContainer.ID(), chain) {
 				logrus.Debug("Skipping scheduled update for Watchtower parent container")
 
 				nextRuns := scheduler.Entries()
@@ -178,14 +188,27 @@ func RunUpgradesOnSchedule(
 			}
 		}
 
-		params := types.UpdateParams{
-			Cleanup:        cleanup,
-			RunOnce:        false,
-			MonitorOnly:    monitorOnly,
-			SkipSelfUpdate: skipWatchtowerSelfUpdate,
+		params := deps.BaseParams
+		params.RunOnce = false
+		params.SkipSelfUpdate = skipWatchtowerSelfUpdate
+
+		// One filter for this tick: schedule filter when set, else BaseParams.
+		// Keep params.Filter and the positional argument identical so
+		// runUpdatesWithNotifications cannot prefer a divergent source.
+		updateFilter := deps.Filter
+		if updateFilter == nil {
+			updateFilter = params.Filter
 		}
 
-		metric := runUpdatesWithNotifications(ctx, filter, params)
+		params.Filter = updateFilter
+
+		if deps.RunUpdate == nil {
+			logrus.Debug("Update skipped: RunUpdate hook is not configured")
+
+			return
+		}
+
+		metric := deps.RunUpdate(ctx, updateFilter, params)
 		if metric != nil {
 			metrics.Default().RegisterScan(metric)
 		}
@@ -203,7 +226,7 @@ func RunUpgradesOnSchedule(
 
 	// If Watchtower has performed a self-cleanup, then prevent Watchtower
 	// from self-updating during the first update cycle.
-	if skipFirstRun {
+	if deps.SkipFirstRun {
 		var firstRun atomic.Uint32 // atomic flag to track if this is the first run
 
 		scheduledUpdateFunc = func() {
@@ -222,6 +245,7 @@ func RunUpgradesOnSchedule(
 	}
 
 	// Add the update function to the cron schedule, handling concurrency and metrics.
+	scheduleSpec := strings.Trim(deps.ScheduleSpec, `"'`)
 	if scheduleSpec != "" {
 		_, err := scheduler.AddFunc(
 			scheduleSpec,
@@ -238,12 +262,19 @@ func RunUpgradesOnSchedule(
 		nextRun = scheduler.Entries()[0].Schedule.Next(time.Now())
 	}
 
-	if !startupMessageSent {
-		writeStartupMessage(c, nextRun, filtering, scope, client, notifier, metaVersion, &updateOnStart)
+	// Log startup message with the first scheduled run time.
+	// Skip if the startup message was already sent (for example by the HTTP API in blocking mode).
+	// Startup is the single source of truth for messaging fields (Filtering, Scope, Client,
+	// Notifier, Version). Only apply scheduler-owned runtime values here.
+	if !deps.StartupMessageSent && deps.WriteStartupMessage != nil {
+		startup := deps.Startup
+		startup.Sched = nextRun
+		startup.UpdateOnStart = &deps.UpdateOnStart
+		deps.WriteStartupMessage(startup)
 	}
 
 	// Check if update-on-start is enabled and trigger immediate update if so.
-	if updateOnStart {
+	if deps.UpdateOnStart {
 		updateFunc(false, false)
 	}
 
@@ -273,8 +304,8 @@ func RunUpgradesOnSchedule(
 	WaitForRunningUpdate(ctx, lock)
 
 	// Close the notification system to clean up resources during shutdown.
-	if notifier != nil {
-		notifier.Close()
+	if deps.Notifier != nil {
+		deps.Notifier.Close()
 	}
 
 	logrus.Debug("Scheduler stopped and update completed.")
@@ -284,42 +315,34 @@ func RunUpgradesOnSchedule(
 
 // ShouldExitDueToInvalidRestart determines if the program should exit due to an invalid restart of an old Watchtower container.
 //
-// This function checks if the current container is present in the container chain.
-// If it is and the run-once flag is not set, then it indicates an invalid restart scenario
-// and returns true to signal program exit, preventing potential issues with container updates.
+// This function checks two conditions:
+//  1. The current container's name matches the watchtower-old-* prefix, indicating it is
+//     a predecessor renamed during self-update that should not run.
+//  2. The current container is present in the container chain label, indicating it is
+//     an ancestor in the self-update lineage.
+//
+// If either condition is true and runOnce is false, the program should exit
+// to prevent an old Watchtower container from running.
 //
 // Parameters:
 //   - c: The current Watchtower container to check.
-//   - flags: The flag set to check for the run-once option.
+//   - runOnce: Whether the process is in run-once mode.
 //
 // Returns:
 //   - bool: True if the program should exit due to an invalid restart, false otherwise.
-func ShouldExitDueToInvalidRestart(
-	c types.Container,
-	flags *pflag.FlagSet,
-) bool {
-	// If the container is nil, return false to avoid unnecessary checks.
+func ShouldExitDueToInvalidRestart(c types.Container, runOnce bool) bool {
 	if c == nil {
 		return false
 	}
 
-	// Get the value of the com.centurylinklabs.watchtower.container-chain label.
-	chain, present := c.GetContainerChain()
+	if container.IsOldContainer(c.Name()) && !runOnce {
+		return true
+	}
 
-	// If the label is not present, return false.
+	chain, present := c.GetContainerChain()
 	if !present {
 		return false
 	}
 
-	// Check if the current container is present in the container chain.
-	if container.IsWatchtowerParent(c.ID(), chain) {
-		runOnce, _ := flags.GetBool("run-once")
-		if !runOnce {
-			// If the current container is in the chain and run-once is not set, exit.
-			return true
-		}
-	}
-
-	// If the current container is not in the chain, or run-once is set, continue normal operation.
-	return false
+	return container.IsWatchtowerParent(c.ID(), chain) && !runOnce
 }

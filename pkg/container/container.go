@@ -6,13 +6,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/sirupsen/logrus"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
-	dockerNetwork "github.com/docker/docker/api/types/network"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	dockerNetwork "github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/internal/util"
 	"github.com/nicholas-fedor/watchtower/pkg/compose"
@@ -28,31 +27,33 @@ const (
 type Operations interface {
 	ContainerCreate(
 		ctx context.Context,
-		config *dockerContainer.Config,
-		hostConfig *dockerContainer.HostConfig,
-		networkingConfig *dockerNetwork.NetworkingConfig,
-		platform *ocispec.Platform,
-		containerName string,
-	) (dockerContainer.CreateResponse, error)
+		options dockerClient.ContainerCreateOptions,
+	) (dockerClient.ContainerCreateResult, error)
 	ContainerStart(
 		ctx context.Context,
 		containerID string,
-		options dockerContainer.StartOptions,
-	) error
+		options dockerClient.ContainerStartOptions,
+	) (dockerClient.ContainerStartResult, error)
+	ContainerInspect(
+		ctx context.Context,
+		containerID string,
+		options dockerClient.ContainerInspectOptions,
+	) (dockerClient.ContainerInspectResult, error)
 	ContainerRemove(
 		ctx context.Context,
 		containerID string,
-		options dockerContainer.RemoveOptions,
-	) error
+		options dockerClient.ContainerRemoveOptions,
+	) (dockerClient.ContainerRemoveResult, error)
 	NetworkConnect(
 		ctx context.Context,
-		networkID, containerID string,
-		config *dockerNetwork.EndpointSettings,
-	) error
+		networkID string,
+		options dockerClient.NetworkConnectOptions,
+	) (dockerClient.NetworkConnectResult, error)
 	ContainerRename(
 		ctx context.Context,
-		containerID, newContainerName string,
-	) error
+		containerID string,
+		options dockerClient.ContainerRenameOptions,
+	) (dockerClient.ContainerRenameResult, error)
 }
 
 // Container represents a running Docker container managed by Watchtower.
@@ -127,7 +128,7 @@ func (c *Container) SetLinkedToRestarting(value bool) {
 	c.LinkedToRestarting = value
 }
 
-// IsStale returns whether the container’s image is outdated.
+// IsStale returns whether the container's image is outdated.
 //
 // Returns:
 //   - bool: True if stale, false otherwise.
@@ -218,6 +219,19 @@ func (c *Container) IsRestarting() bool {
 	return c.containerInfo.State.Restarting
 }
 
+// IsCreated checks if the container is in the Docker "created" state,
+// meaning it was successfully created but never started.
+//
+// Returns:
+//   - bool: True if the container is in created state, false otherwise.
+func (c *Container) IsCreated() bool {
+	if c.containerInfo == nil || c.containerInfo.State == nil {
+		return false
+	}
+
+	return c.containerInfo.State.Status == dockerContainer.StateCreated
+}
+
 // Name returns the normalized name of the container.
 //
 // Returns:
@@ -226,7 +240,7 @@ func (c *Container) Name() string {
 	return c.normalizedName
 }
 
-// ImageID returns the ID of the container’s image.
+// ImageID returns the ID of the container's image.
 //
 // Returns:
 //   - types.ImageID: Image ID or empty string if imageInfo is nil.
@@ -238,7 +252,7 @@ func (c *Container) ImageID() types.ImageID {
 	return types.ImageID(c.imageInfo.ID)
 }
 
-// ImageName returns the name of the container’s image.
+// ImageName returns the name of the container's image.
 //
 // It uses the Zodiac label if present, otherwise Config.Image, appending ":latest" if untagged.
 //
@@ -382,9 +396,15 @@ func (c *Container) GetCreateConfig() *dockerContainer.Config {
 
 	config.Volumes = util.StructMapSubtract(config.Volumes, imageConfig.Volumes)
 
-	for k := range config.ExposedPorts {
-		if _, ok := imageConfig.ExposedPorts[string(k)]; ok {
-			delete(config.ExposedPorts, k) // Remove ports exposed by image.
+	// Ensure ExposedPorts is initialized before removing image-exposed ports
+	// and adding ports from host config bindings.
+	if config.ExposedPorts == nil {
+		config.ExposedPorts = dockerNetwork.PortSet{}
+	}
+
+	for port := range config.ExposedPorts {
+		if _, ok := imageConfig.ExposedPorts[port.String()]; ok {
+			delete(config.ExposedPorts, port) // Remove ports exposed by image.
 		}
 	}
 
@@ -419,6 +439,14 @@ func (c *Container) GetCreateHostConfig() *dockerContainer.HostConfig {
 	hostConfigCopy := *c.containerInfo.HostConfig
 	hostConfig := &hostConfigCopy
 
+	// Deep copy slices that will be mutated to avoid modifying the original
+	// under a read lock.
+	if len(hostConfig.Devices) > 0 {
+		devicesCopy := make([]dockerContainer.DeviceMapping, len(hostConfig.Devices))
+		copy(devicesCopy, hostConfig.Devices)
+		hostConfig.Devices = devicesCopy
+	}
+
 	// Adjust link format for each entry (and drop invalid ones).
 	adjusted := make([]string, 0, len(hostConfig.Links))
 	for _, link := range hostConfig.Links {
@@ -445,10 +473,24 @@ func (c *Container) GetCreateHostConfig() *dockerContainer.HostConfig {
 
 	hostConfig.Links = adjusted
 
+	// Normalize device CgroupPermissions for Podman compatibility.
+	//
+	// Podman leaves CgroupPermissions empty in Docker API inspect responses.
+	// Both Docker and Podman treat bare device specifications (without explicit
+	// permissions) as "rwm". Defaulting here prevents "empty device mode"
+	// errors when recreating containers.
+	for i := range hostConfig.Devices {
+		if hostConfig.Devices[i].CgroupPermissions == "" {
+			hostConfig.Devices[i].CgroupPermissions = "rwm"
+			clog.WithField("device", hostConfig.Devices[i].PathOnHost).
+				Debug("Defaulted empty device CgroupPermissions to 'rwm'")
+		}
+	}
+
 	return hostConfig
 }
 
-// VerifyConfiguration validates the container’s metadata for recreation.
+// VerifyConfiguration validates the container's metadata for recreation.
 //
 // Returns:
 //   - error: Non-nil if metadata is missing or invalid, nil on success.
@@ -481,7 +523,7 @@ func (c *Container) VerifyConfiguration() error {
 	// Ensure ExposedPorts is initialized if PortBindings exist.
 	if len(c.containerInfo.HostConfig.PortBindings) > 0 &&
 		c.containerInfo.Config.ExposedPorts == nil {
-		c.containerInfo.Config.ExposedPorts = make(map[nat.Port]struct{})
+		c.containerInfo.Config.ExposedPorts = dockerNetwork.PortSet{}
 
 		clog.Debug("Initialized ExposedPorts due to PortBindings")
 	}
@@ -490,7 +532,7 @@ func (c *Container) VerifyConfiguration() error {
 	// Docker rejects ports with empty port numbers (e.g., "/tcp") with
 	// "invalid port range: value is empty" during ContainerCreate.
 	for port := range c.containerInfo.HostConfig.PortBindings {
-		portStr := string(port)
+		portStr := port.Port()
 
 		// Skip and remove completely empty port entries.
 		if portStr == "" {
@@ -500,16 +542,6 @@ func (c *Container) VerifyConfiguration() error {
 			delete(c.containerInfo.Config.ExposedPorts, port)
 
 			continue
-		}
-
-		// nat.Port format is "port/protocol"; validate the port part is non-empty.
-		portPart, _, _ := strings.Cut(portStr, "/")
-		if portPart == "" {
-			clog.WithField("port", portStr).
-				Warn("Skipping port binding with empty port number")
-
-			delete(c.containerInfo.HostConfig.PortBindings, port)
-			delete(c.containerInfo.Config.ExposedPorts, port)
 		}
 	}
 

@@ -8,8 +8,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
 
 	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -483,6 +483,41 @@ var _ = ginkgo.Describe("GetContainerIDFromHostname", func() {
 				ListContainers(context.Background()).
 				Return([]types.Container{nonWatchtowerContainer, watchtowerContainer}, nil)
 		}, types.ContainerID("watchtower-container-id"), false, ""),
+
+		ginkgo.Entry("when multiple Watchtower containers share hostname, prefer the non-old one", func() {
+			hostname := testHostname
+
+			// Set HOSTNAME environment variable
+			os.Setenv("HOSTNAME", hostname)
+
+			// Old first in list (simulates arbitrary daemon order)
+			oldContainer := MockContainer(
+				WithHostname(hostname),
+				WithName("watchtower-old-6bfdffce0700"),
+				WithLabels(map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				}),
+				func(c *dockerContainer.InspectResponse, _ *dockerImage.InspectResponse) {
+					c.ID = "old-watchtower-id"
+				},
+			)
+
+			// Main (non-old) Watchtower
+			mainNamed := MockContainer(
+				WithHostname(hostname),
+				WithName("watchtower"),
+				WithLabels(map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				}),
+				func(c *dockerContainer.InspectResponse, _ *dockerImage.InspectResponse) {
+					c.ID = "main-watchtower-id"
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(context.Background()).
+				Return([]types.Container{oldContainer, mainNamed}, nil)
+		}, types.ContainerID("main-watchtower-id"), false, ""),
 	)
 })
 

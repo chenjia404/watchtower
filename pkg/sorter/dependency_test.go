@@ -7,7 +7,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
+	dockerContainer "github.com/moby/moby/api/types/container"
 
 	"github.com/nicholas-fedor/watchtower/pkg/container"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -24,7 +24,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -33,7 +33,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().IsWatchtower().Return(false)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c3 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c3.EXPECT().Name().Return("c3")
@@ -42,7 +42,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c3.EXPECT().IsWatchtower().Return(false)
 			c3.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c3"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c3", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2, c3}
 			ds := DependencySorter{}
 			err := ds.Sort(containers, true)
@@ -59,7 +59,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -68,7 +68,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().IsWatchtower().Return(false)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			ds := DependencySorter{}
 			err := ds.Sort(containers, true)
@@ -86,7 +86,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -95,7 +95,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().IsWatchtower().Return(false)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c3 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c3.EXPECT().Name().Return("c3")
@@ -104,7 +104,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c3.EXPECT().IsWatchtower().Return(false)
 			c3.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c3"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c3", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2, c3}
 			ds := DependencySorter{}
 			err := ds.Sort(containers, true)
@@ -123,7 +123,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -131,7 +131,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().IsWatchtower().Return(false)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			ds := DependencySorter{}
 			err := ds.Sort(containers, true)
@@ -151,7 +151,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			// c2 has no dependencies.
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -161,7 +161,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().IsWatchtower().Return(false)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
 			ds := DependencySorter{}
@@ -185,7 +185,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -194,7 +194,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().IsWatchtower().Return(false)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{watchtower, c1, c2}
 			ds := DependencySorter{}
 			err := ds.Sort(containers, true)
@@ -221,7 +221,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().IsWatchtower().Return(false)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1}
 			ds := DependencySorter{}
 			err := ds.Sort(containers, true)
@@ -239,7 +239,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return(nil)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -247,7 +247,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -261,7 +261,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return([]string{"c2"})
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
@@ -269,7 +269,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -285,7 +285,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			a.EXPECT().Links(true).Return([]string{"b"})
 			a.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/a"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/a", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			b := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			b.EXPECT().Name().Return("b")
@@ -293,7 +293,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			b.EXPECT().Links(true).Return([]string{"c"})
 			b.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/b"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/b", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c.EXPECT().Name().Return("c")
@@ -301,7 +301,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c.EXPECT().Links(true).Return(nil)
 			c.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{a, b, c}
 			result, err := sortByDependencies(containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -318,14 +318,14 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return([]string{"c2"})
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("c2")
 			c2.EXPECT().Links(true).Return([]string{"c1"})
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			_, err := sortByDependencies(containers, true)
 			gomega.Expect(err).To(gomega.HaveOccurred())
@@ -347,7 +347,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return(nil)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1}
 			result, err := sortByDependencies(containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -363,7 +363,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			a.EXPECT().Links(true).Return([]string{"b"})
 			a.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/a"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/a", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			b := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			b.EXPECT().Name().Return("b")
@@ -371,7 +371,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			b.EXPECT().Links(true).Return(nil)
 			b.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/b"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/b", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			// Component 2: C -> D
 			c := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -380,7 +380,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c.EXPECT().Links(true).Return([]string{"d"})
 			c.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			d := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			d.EXPECT().Name().Return("d")
@@ -388,7 +388,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			d.EXPECT().Links(true).Return(nil)
 			d.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/d"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/d", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{a, b, c, d}
 			result, err := sortByDependencies(containers, true)
@@ -411,7 +411,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return([]string{"c1"}) // Self-reference
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1}
 			result, err := sortByDependencies(containers, true)
@@ -435,8 +435,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				myapp.EXPECT().
 					ContainerInfo().
 					Return(&dockerContainer.InspectResponse{
-						ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myapp-1"},
-						Config:            &dockerContainer.Config{Labels: map[string]string{}},
+						Name:   "/myapp-1",
+						Config: &dockerContainer.Config{Labels: map[string]string{}},
 					})
 
 				containers := []types.Container{myapp}
@@ -464,8 +464,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				db.EXPECT().
 					ContainerInfo().
 					Return(&dockerContainer.InspectResponse{
-						ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/db-1"},
-						Config:            &dockerContainer.Config{Labels: map[string]string{}},
+						Name:   "/db-1",
+						Config: &dockerContainer.Config{Labels: map[string]string{}},
 					})
 
 				containers := []types.Container{db}
@@ -489,7 +489,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			db.EXPECT().Links(true).Return(nil)
 			db.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/test-db-1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/test-db-1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			// app-1 depends on "db"
 			app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -498,7 +498,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			app.EXPECT().Links(true).Return([]string{"db"})
 			app.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app-1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/app-1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			// test-web-1 depends on "app"
 			web := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -507,7 +507,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			web.EXPECT().Links(true).Return([]string{"app"})
 			web.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/test-web-1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/test-web-1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{web, app, db} // Unsorted order
 			result, err := sortByDependencies(containers, true)
@@ -526,7 +526,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return([]string{"web"}) // Link to service name
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/container1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("container2")
@@ -534,7 +534,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container2"}, Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web"}}})
+				Return(&dockerContainer.InspectResponse{Name: "/container2", Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web"}}})
 
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
@@ -551,7 +551,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return(nil)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myproject-web-1"}, Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web", "com.docker.compose.project": "myproject"}}})
+				Return(&dockerContainer.InspectResponse{Name: "/myproject-web-1", Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web", "com.docker.compose.project": "myproject"}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("myproject-web-2")
@@ -559,7 +559,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myproject-web-2"}, Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web", "com.docker.compose.project": "myproject"}}})
+				Return(&dockerContainer.InspectResponse{Name: "/myproject-web-2", Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web", "com.docker.compose.project": "myproject"}}})
 
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
@@ -578,7 +578,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				app.EXPECT().Links(true).Return([]string{"db"})
 				app.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/app", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				// Multiple db replicas
 				db1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -587,7 +587,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				db1.EXPECT().Links(true).Return(nil)
 				db1.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/db-1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/db-1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				db2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db2.EXPECT().Name().Return("db-2").Maybe()
@@ -595,7 +595,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				db2.EXPECT().Links(true).Return(nil)
 				db2.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/db-2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/db-2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				db3 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db3.EXPECT().Name().Return("db-3").Maybe()
@@ -603,7 +603,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				db3.EXPECT().Links(true).Return(nil)
 				db3.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/db-3"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/db-3", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				containers := []types.Container{app, db1, db2, db3}
 				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
@@ -631,7 +631,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return([]string{"web-service"}) // Link to normalized service name
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/container1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("container2").Maybe()
@@ -639,7 +639,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container2"}, Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "/web-service"}}})
+				Return(&dockerContainer.InspectResponse{Name: "/container2", Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "/web-service"}}})
 
 				// Malformed service name with leading slash
 
@@ -663,7 +663,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				c1.EXPECT().Links(true).Return([]string{"/web"}) // Link with leading slash
 				c1.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/container1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				c2.EXPECT().Name().Return("web").Maybe()
@@ -671,7 +671,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				c2.EXPECT().Links(true).Return(nil)
 				c2.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/web"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/web", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 					// Container name with leading slash
 
@@ -694,7 +694,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return([]string{"id-c2"}) // Link to other container's ID
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: ""}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("").Maybe() // Empty name
@@ -702,7 +702,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: ""}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
@@ -727,7 +727,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				// Links to non-existent containers
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/container1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("container2").Maybe()
@@ -735,7 +735,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container2"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "/container2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
@@ -753,8 +753,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container1"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/container1",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -764,8 +764,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/web"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/web",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			containers := []types.Container{c1, c2}
@@ -788,8 +788,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/app",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -799,8 +799,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/db"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/db",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			c3 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -810,8 +810,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c3.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/cache"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/cache",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			c4 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -821,8 +821,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c4.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/redis"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/redis",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			c5 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -832,8 +832,8 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c5.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/proxy"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/proxy",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
 			containers := []types.Container{c1, c2, c3, c4, c5}
@@ -859,7 +859,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				c1.EXPECT().Links(true).Return([]string{"container1"}) // Self-reference
 				c1.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/container1"}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: "/container1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				containers := []types.Container{c1}
 				result, err := sortByDependencies(containers, true)
@@ -882,7 +882,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				c.EXPECT().Links(true).Return(nil)
 				c.EXPECT().
 					ContainerInfo().
-					Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: fmt.Sprintf("/container%d", i)}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+					Return(&dockerContainer.InspectResponse{Name: fmt.Sprintf("/container%d", i), Config: &dockerContainer.Config{Labels: map[string]string{}}})
 				containers[i] = c
 			}
 
@@ -899,7 +899,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c1.EXPECT().Links(true).Return(nil)
 			c1.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: ""}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().Name().Return("") // Empty name
@@ -907,7 +907,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			c2.EXPECT().Links(true).Return(nil)
 			c2.EXPECT().
 				ContainerInfo().
-				Return(&dockerContainer.InspectResponse{ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: ""}, Config: &dockerContainer.Config{Labels: map[string]string{}}})
+				Return(&dockerContainer.InspectResponse{Name: "", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
 			result, err := sortByDependencies(containers, true)
@@ -919,7 +919,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			// app depending on "db"
 			app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
+				Name: "/app",
 				Config: &dockerContainer.Config{
 					Labels: map[string]string{"com.centurylinklabs.watchtower.depends-on": "db"},
 				},
@@ -931,7 +931,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			// db1 from project1
 			db1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			db1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project1_db_1"},
+				Name: "/project1_db_1",
 				Config: &dockerContainer.Config{Labels: map[string]string{
 					"com.docker.compose.service": "db",
 					"com.docker.compose.project": "project1",
@@ -944,7 +944,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			// db2 from project2
 			db2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			db2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project2_db_1"},
+				Name: "/project2_db_1",
 				Config: &dockerContainer.Config{Labels: map[string]string{
 					"com.docker.compose.service": "db",
 					"com.docker.compose.project": "project2",
@@ -968,7 +968,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 		ginkgo.It("should detect circular dependencies via watchtower labels", func() {
 			c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"},
+				Name: "/c1",
 				Config: &dockerContainer.Config{
 					Labels: map[string]string{"com.centurylinklabs.watchtower.depends-on": "c2"},
 				},
@@ -979,7 +979,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"},
+				Name: "/c2",
 				Config: &dockerContainer.Config{
 					Labels: map[string]string{"com.centurylinklabs.watchtower.depends-on": "c1"},
 				},
@@ -998,7 +998,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 		ginkgo.It("should handle dependencies to filtered containers", func() {
 			app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
+				Name: "/app",
 				Config: &dockerContainer.Config{
 					Labels: map[string]string{"com.centurylinklabs.watchtower.depends-on": "db"},
 				},
@@ -1079,9 +1079,7 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 			app.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-						Name: "/watchtower-test-app1",
-					},
+					Name:   "/watchtower-test-app1",
 					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
@@ -1093,9 +1091,7 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 			db1.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-						Name: "/watchtower-test-database",
-					},
+					Name:   "/watchtower-test-database",
 					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
@@ -1107,9 +1103,7 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 			db2.EXPECT().
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-						Name: "/watchtower-test-database2",
-					},
+					Name:   "/watchtower-test-database2",
 					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 
@@ -1139,8 +1133,8 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 		app.EXPECT().
 			ContainerInfo().
 			Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myapp-app1"},
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/myapp-app1",
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 
 		// Database replicas with numeric suffixes (should be matched)
@@ -1151,8 +1145,8 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 		db1.EXPECT().
 			ContainerInfo().
 			Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myapp-db-1"},
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/myapp-db-1",
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 
 		db2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
@@ -1162,8 +1156,8 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 		db2.EXPECT().
 			ContainerInfo().
 			Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myapp-db-2"},
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/myapp-db-2",
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 
 		containers := []types.Container{app, db1, db2}
@@ -1229,7 +1223,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 				// Create two containers from different projects with same service name
 				c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				c1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app1_web_1"},
+					Name: "/app1_web_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "web",
@@ -1242,7 +1236,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 				c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				c2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app2_web_1"},
+					Name: "/app2_web_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "web",
@@ -1309,8 +1303,8 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 				// Container that links to exact container name
 				app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/app",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				app.EXPECT().Name().Return("app").Maybe()
 				app.EXPECT().ID().Return(types.ContainerID("id-app")).Maybe()
@@ -1319,7 +1313,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 				// DB container from project1
 				db1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project1_db_1"},
+					Name: "/project1_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1387,16 +1381,16 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 			func() {
 				c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				c1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/c1",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				c1.EXPECT().Name().Return("c1").Maybe()
 				c1.EXPECT().ID().Return(types.ContainerID("id1")).Maybe()
 
 				c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				c2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, // Same name
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/c1", // Same name
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				c2.EXPECT().Name().Return("c1").Maybe()
 				c2.EXPECT().ID().Return(types.ContainerID("id2")).Maybe()
@@ -1431,8 +1425,8 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 		ginkgo.It("should succeed when containers have different identifiers", func() {
 			c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"},
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/c1",
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 			c1.EXPECT().Name().Return("c1").Maybe()
 			c1.EXPECT().ID().Return(types.ContainerID("id1")).Maybe()
@@ -1440,8 +1434,8 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c2"},
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/c2",
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 			c2.EXPECT().Name().Return("c2").Maybe()
 			c2.EXPECT().ID().Return(types.ContainerID("id2")).Maybe()
@@ -1466,16 +1460,16 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 		ginkgo.It("should propagate IdentifierCollisionError from buildDependencyGraph", func() {
 			c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"},
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/c1",
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 			c1.EXPECT().Name().Return("c1").Maybe()
 			c1.EXPECT().ID().Return(types.ContainerID("id1")).Maybe()
 
 			c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-				ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/c1"}, // Same name
-				Config:            &dockerContainer.Config{Labels: map[string]string{}},
+				Name:   "/c1", // Same name
+				Config: &dockerContainer.Config{Labels: map[string]string{}},
 			})
 			c2.EXPECT().Name().Return("c1").Maybe()
 			c2.EXPECT().ID().Return(types.ContainerID("id2")).Maybe()
@@ -1495,7 +1489,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 var _ = ginkgo.Describe("isPositiveInteger", func() {
 	ginkgo.DescribeTable("validates positive integers correctly",
 		func(input string, expected bool) {
-			result := isPositiveInteger(input)
+			result := IsPositiveInteger(input)
 			gomega.Expect(result).To(gomega.Equal(expected))
 		},
 		ginkgo.Entry("should return true for single digit positive integer", "1", true),
@@ -1514,7 +1508,7 @@ var _ = ginkgo.Describe("isPositiveInteger", func() {
 var _ = ginkgo.Describe("extractServiceName", func() {
 	ginkgo.DescribeTable("extracts service name from container identifier",
 		func(input, expected string) {
-			result := extractServiceName(input)
+			result := ExtractServiceName(input)
 			gomega.Expect(result).To(gomega.Equal(expected))
 		},
 		ginkgo.Entry(
@@ -1588,7 +1582,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// App container from project1 that depends on "db" service
 				app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project1_app_1"},
+					Name: "/project1_app_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "app",
@@ -1603,7 +1597,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB container from project2 (different project, but only one "db" service)
 				db := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project2_db_1"},
+					Name: "/project2_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1637,7 +1631,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// App container with watchtower depends-on label referencing just "postgres"
 				app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/myapp"},
+					Name: "/myapp",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.centurylinklabs.watchtower.depends-on": "postgres",
@@ -1651,9 +1645,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// Postgres container with project prefix in identifier
 				postgres := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				postgres.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-						Name: "/postgresql_postgres_1",
-					},
+					Name: "/postgresql_postgres_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "postgres",
@@ -1687,8 +1679,8 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// App container that depends on "db" service
 				app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/app",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				app.EXPECT().Name().Return("app").Maybe()
 				app.EXPECT().ID().Return(types.ContainerID("id-app")).Maybe()
@@ -1697,7 +1689,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB container from project1
 				db1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project1_db_1"},
+					Name: "/project1_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1712,7 +1704,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB container from project2 (same service name, different project)
 				db2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project2_db_1"},
+					Name: "/project2_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1747,8 +1739,8 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// App container that links to exact identifier "project1-db"
 				app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/app",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				app.EXPECT().Name().Return("app").Maybe()
 				app.EXPECT().ID().Return(types.ContainerID("id-app")).Maybe()
@@ -1757,7 +1749,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB container from project1
 				db1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db1.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project1_db_1"},
+					Name: "/project1_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1772,7 +1764,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB container from project2 (should NOT be matched)
 				db2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				db2.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project2_db_1"},
+					Name: "/project2_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1807,8 +1799,8 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// App container that links to "db" (should match db-1 replica, not project1-db)
 				app := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				app.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/app"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/app",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				app.EXPECT().Name().Return("app").Maybe()
 				app.EXPECT().ID().Return(types.ContainerID("id-app")).Maybe()
@@ -1817,8 +1809,8 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB replica container (db-1 pattern)
 				dbReplica := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				dbReplica.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/db-1"},
-					Config:            &dockerContainer.Config{Labels: map[string]string{}},
+					Name:   "/db-1",
+					Config: &dockerContainer.Config{Labels: map[string]string{}},
 				})
 				dbReplica.EXPECT().Name().Return("db-1").Maybe()
 				dbReplica.EXPECT().ID().Return(types.ContainerID("id-dbreplica")).Maybe()
@@ -1827,7 +1819,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 				// DB container with project prefix (service name also "db")
 				dbProject := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 				dbProject.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: "/project_db_1"},
+					Name: "/project_db_1",
 					Config: &dockerContainer.Config{
 						Labels: map[string]string{
 							"com.docker.compose.service": "db",
@@ -1870,3 +1862,565 @@ func indexOf(names []string, target string) int {
 
 	return -1
 }
+
+// mockLinkedContainer builds a mock with Compose labels and fixed Links() output.
+// useComposeLinks selects Links(true) vs Links(false) for the useComposeDependsOn path.
+func mockLinkedContainer(
+	name, id, project, service string,
+	links []string,
+	useComposeLinks bool,
+) *mockTypes.MockContainer {
+	c := mockTypes.NewMockContainer(ginkgo.GinkgoT())
+	c.EXPECT().Name().Return(name).Maybe()
+	c.EXPECT().ID().Return(types.ContainerID(id)).Maybe()
+	c.EXPECT().IsWatchtower().Return(false).Maybe()
+
+	if useComposeLinks {
+		c.EXPECT().Links(true).Return(links).Maybe()
+	} else {
+		c.EXPECT().Links(false).Return(links).Maybe()
+	}
+
+	labels := map[string]string{}
+	if project != "" {
+		labels["com.docker.compose.project"] = project
+	}
+
+	if service != "" {
+		labels["com.docker.compose.service"] = service
+	}
+
+	c.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
+		Name:   "/" + name,
+		Config: &dockerContainer.Config{Labels: labels},
+	}).Maybe()
+
+	return c
+}
+
+var _ = ginkgo.Describe("FindMatchingIdentifiers", func() {
+	// Exhaustive link × identifier permutations across Compose stacks, multi-segment
+	// services, replicas, bare container names, and ambiguous cross-project cases.
+	ginkgo.DescribeTable(
+		"matches identifiers for each link form",
+		func(link string, identifiers, expected []string) {
+			matches := FindMatchingIdentifiers(link, identifiers)
+			if expected == nil {
+				gomega.Expect(matches).To(gomega.BeEmpty())
+
+				return
+			}
+
+			gomega.Expect(matches).To(gomega.Equal(expected))
+		},
+		// Exact
+		ginkgo.Entry("exact project-service key",
+			"project-db", []string{"project-db", "other-db"}, []string{"project-db"}),
+		ginkgo.Entry("exact bare container name",
+			"net-proxy", []string{"net-proxy", "web-app"}, []string{"net-proxy"}),
+		// Replicas
+		ginkgo.Entry("replica suffixes from project-service link",
+			"project-db", []string{"project-db-1", "project-db-2", "other"},
+			[]string{"project-db-1", "project-db-2"}),
+		ginkgo.Entry("non-numeric hyphen suffix is not a replica",
+			"project-db", []string{"project-db-backup"}, nil),
+		ginkgo.Entry("numeric-looking middle segment is not a replica of shorter prefix",
+			"project", []string{"project-db-1"}, nil),
+		// Unhyphenated service-only (ExtractServiceName)
+		ginkgo.Entry("unhyphenated service against single project-service key",
+			"db", []string{"project1-db"}, []string{"project1-db"}),
+		ginkgo.Entry("unhyphenated service against multi-segment project-service key",
+			"proxy", []string{"myproject-net-proxy"}, []string{"myproject-net-proxy"}),
+		ginkgo.Entry("unhyphenated service ambiguous across two projects",
+			"db", []string{"project1-db", "project2-db"}, nil),
+		ginkgo.Entry("unhyphenated service with three projects still ambiguous",
+			"cache", []string{"a-cache", "b-cache", "c-cache"}, nil),
+		// Multi-segment link → project-service suffix
+		ginkgo.Entry("multi-segment link against project-service key",
+			"net-proxy", []string{"myproject-net-proxy", "myproject-web"},
+			[]string{"myproject-net-proxy"}),
+		ginkgo.Entry("multi-segment link sole candidate",
+			"net-proxy", []string{"myproject-net-proxy"}, []string{"myproject-net-proxy"}),
+		ginkgo.Entry("multi-segment link must not match trailing-token-only peer",
+			"net-proxy", []string{"myproject-other-proxy"}, nil),
+		ginkgo.Entry("multi-segment link must not match substring service",
+			"net-proxy", []string{"myproject-net"}, nil),
+		ginkgo.Entry("multi-segment link must not match longer multi-segment sibling",
+			"net-proxy", []string{"myproject-net-proxy-extra"}, nil),
+		ginkgo.Entry("multi-segment link ambiguous across two projects",
+			"net-proxy", []string{"stack-a-net-proxy", "stack-b-net-proxy"}, nil),
+		ginkgo.Entry("multi-segment link prefers exact over suffix when both present",
+			"net-proxy", []string{"net-proxy", "myproject-net-proxy"}, []string{"net-proxy"}),
+		// Mixed multi-stack identifier pools
+		ginkgo.Entry("unhyphenated db among multi-stack unrelated services",
+			"db", []string{"frontend-web", "backend-api", "data-db"}, []string{"data-db"}),
+		ginkgo.Entry("hyphenated link among multi-stack noise",
+			"net-proxy",
+			[]string{"frontend-web", "backend-api", "infra-net-proxy", "infra-other-proxy"},
+			[]string{"infra-net-proxy"}),
+		ginkgo.Entry("hyphenated link with same trailing token in another stack",
+			"auth-gateway",
+			[]string{"stack-a-auth-gateway", "stack-b-edge-gateway"},
+			[]string{"stack-a-auth-gateway"}),
+		// Empty / edge
+		ginkgo.Entry("empty link",
+			"", []string{"db"}, nil),
+		ginkgo.Entry("empty identifiers",
+			"db", []string{}, nil),
+		ginkgo.Entry("no candidates at all",
+			"missing", []string{"a", "b"}, nil),
+	)
+})
+
+// identifierSet builds a bool set from identifier strings for resolveLinkToCanonicalKeys tests.
+func identifierSet(ids ...string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+
+	return set
+}
+
+var _ = ginkgo.Describe("buildLinkMatchIndexes", func() {
+	ginkgo.It("should map unique bare names to canonical identifiers", func() {
+		dep := mockLinkedContainer("net-proxy", "id-proxy", "myproject", "net-proxy", nil, true)
+		app := mockLinkedContainer("web-app", "id-web", "myproject", "web", nil, true)
+
+		containerMap := map[string]types.Container{
+			"myproject-net-proxy": dep,
+			"myproject-web":       app,
+		}
+
+		idSet, aliasToCanonical := buildLinkMatchIndexes(containerMap)
+		gomega.Expect(aliasToCanonical["myproject-net-proxy"]).To(gomega.Equal("myproject-net-proxy"))
+		gomega.Expect(aliasToCanonical["net-proxy"]).To(gomega.Equal("myproject-net-proxy"))
+		gomega.Expect(aliasToCanonical["web-app"]).To(gomega.Equal("myproject-web"))
+		gomega.Expect(idSet).To(gomega.HaveKey("myproject-net-proxy"))
+		gomega.Expect(idSet).To(gomega.HaveKey("myproject-web"))
+		gomega.Expect(idSet).To(gomega.HaveKey("net-proxy"))
+		gomega.Expect(idSet).To(gomega.HaveKey("web-app"))
+	})
+
+	ginkgo.It("should omit bare name alias when it collides across containers", func() {
+		c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
+		c1.EXPECT().Name().Return("shared").Maybe()
+
+		c2 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
+		c2.EXPECT().Name().Return("shared").Maybe()
+
+		containerMap := map[string]types.Container{
+			"project1-service": c1,
+			"project2-service": c2,
+		}
+
+		_, aliasToCanonical := buildLinkMatchIndexes(containerMap)
+		_, hasBare := aliasToCanonical["shared"]
+		gomega.Expect(hasBare).To(gomega.BeFalse())
+		gomega.Expect(aliasToCanonical["project1-service"]).To(gomega.Equal("project1-service"))
+		gomega.Expect(aliasToCanonical["project2-service"]).To(gomega.Equal("project2-service"))
+	})
+
+	ginkgo.It("should preserve canonical self-mapping when bare name equals another canonical key", func() {
+		// Container A is keyed by "shared"; container B's bare name is also "shared".
+		// B must not overwrite or delete A's canonical self-mapping.
+		canonicalOwner := mockTypes.NewMockContainer(ginkgo.GinkgoT())
+		canonicalOwner.EXPECT().Name().Return("shared").Maybe()
+
+		bareClaimant := mockTypes.NewMockContainer(ginkgo.GinkgoT())
+		bareClaimant.EXPECT().Name().Return("shared").Maybe()
+
+		containerMap := map[string]types.Container{
+			"shared":          canonicalOwner,
+			"project-service": bareClaimant,
+		}
+
+		idSet, aliasToCanonical := buildLinkMatchIndexes(containerMap)
+		gomega.Expect(aliasToCanonical["shared"]).To(gomega.Equal("shared"))
+		gomega.Expect(aliasToCanonical["project-service"]).To(gomega.Equal("project-service"))
+		gomega.Expect(idSet).To(gomega.HaveKey("shared"))
+		gomega.Expect(idSet).To(gomega.HaveKey("project-service"))
+		gomega.Expect(idSet).To(gomega.HaveLen(2))
+	})
+})
+
+var _ = ginkgo.Describe("resolveLinkToCanonicalKeys", func() {
+	ginkgo.It("should resolve bare multi-segment container name to project-service key", func() {
+		idSet := identifierSet("myproject-net-proxy", "myproject-web", "net-proxy", "web-app")
+		alias := map[string]string{
+			"myproject-net-proxy": "myproject-net-proxy",
+			"myproject-web":       "myproject-web",
+			"net-proxy":           "myproject-net-proxy",
+			"web-app":             "myproject-web",
+		}
+
+		keys := resolveLinkToCanonicalKeys("net-proxy", idSet, alias)
+		gomega.Expect(keys).To(gomega.Equal([]string{"myproject-net-proxy"}))
+	})
+
+	ginkgo.It("should resolve project-service suffix match without bare-name alias", func() {
+		idSet := identifierSet("myproject-net-proxy")
+		alias := map[string]string{"myproject-net-proxy": "myproject-net-proxy"}
+
+		keys := resolveLinkToCanonicalKeys("net-proxy", idSet, alias)
+		gomega.Expect(keys).To(gomega.Equal([]string{"myproject-net-proxy"}))
+	})
+
+	ginkgo.It("should return nil for empty or unmatched links", func() {
+		idSet := identifierSet("myproject-db")
+		alias := map[string]string{"myproject-db": "myproject-db"}
+
+		gomega.Expect(resolveLinkToCanonicalKeys("", idSet, alias)).To(gomega.BeNil())
+		gomega.Expect(resolveLinkToCanonicalKeys("missing", idSet, alias)).To(gomega.BeNil())
+	})
+
+	ginkgo.It("should dedupe when bare alias and canonical both match", func() {
+		idSet := identifierSet("myproject-db", "db")
+		alias := map[string]string{
+			"myproject-db": "myproject-db",
+			"db":           "myproject-db",
+		}
+
+		keys := resolveLinkToCanonicalKeys("db", idSet, alias)
+		gomega.Expect(keys).To(gomega.Equal([]string{"myproject-db"}))
+	})
+})
+
+var _ = ginkgo.Describe("dependency link form permutations", func() {
+	// Links() values from Watchtower depends-on, Compose depends_on, Docker links,
+	// and network_mode must resolve against ResolveContainerIdentifier graph keys.
+	ginkgo.DescribeTable(
+		"sorts dependency before dependent for each link form",
+		func(depName, depProject, depService, dependentName, dependentProject, dependentService string, links []string, useCompose bool) {
+			dep := mockLinkedContainer(depName, "id-dep", depProject, depService, nil, useCompose)
+			dependent := mockLinkedContainer(
+				dependentName,
+				"id-dependent",
+				dependentProject,
+				dependentService,
+				links,
+				useCompose,
+			)
+
+			containers := []types.Container{dependent, dep}
+			err := DependencySorter{}.Sort(containers, useCompose)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			gomega.Expect(containers[0].Name()).To(gomega.Equal(depName),
+				"dependency must sort before dependent")
+			gomega.Expect(containers[1].Name()).To(gomega.Equal(dependentName))
+		},
+		ginkgo.Entry(
+			"Watchtower depends-on bare container_name against project-service key",
+			"net-proxy", "myproject", "net-proxy",
+			"web-app", "myproject", "web",
+			[]string{"net-proxy"}, true,
+		),
+		ginkgo.Entry(
+			"Watchtower depends-on bare name without Compose labels",
+			"database", "", "",
+			"web", "", "",
+			[]string{"database"}, true,
+		),
+		ginkgo.Entry(
+			"Watchtower depends-on with useComposeDependsOn false",
+			"postgres", "stack", "postgres",
+			"api", "stack", "api",
+			[]string{"postgres"}, false,
+		),
+		ginkgo.Entry(
+			"Compose depends_on project-qualified service link",
+			"myproject-database", "myproject", "database",
+			"myproject-web", "myproject", "web",
+			[]string{"myproject-database"}, true,
+		),
+		ginkgo.Entry(
+			"Compose depends_on bare service name against project-service key",
+			"myproject-database", "myproject", "database",
+			"myproject-web", "myproject", "web",
+			[]string{"database"}, true,
+		),
+		ginkgo.Entry(
+			"Compose depends_on multi-segment service under project prefix",
+			"myproject-net-proxy", "myproject", "net-proxy",
+			"myproject-web", "myproject", "web",
+			[]string{"net-proxy"}, true,
+		),
+		ginkgo.Entry(
+			"network_mode HostConfig bare container name",
+			"vpn", "stack", "vpn",
+			"client", "stack", "client",
+			[]string{"vpn"}, true,
+		),
+		ginkgo.Entry(
+			"network_mode with useComposeDependsOn false",
+			"vpn", "stack", "vpn",
+			"client", "stack", "client",
+			[]string{"vpn"}, false,
+		),
+		ginkgo.Entry(
+			"legacy Docker link bare container name",
+			"db", "", "",
+			"app", "", "",
+			[]string{"db"}, true,
+		),
+		ginkgo.Entry(
+			"cross-project Watchtower depends-on by container name",
+			"app1-database", "app1", "database",
+			"app2-web", "app2", "web",
+			[]string{"app1-database"}, true,
+		),
+		ginkgo.Entry(
+			"Compose service name without container_name override",
+			"stack-cache", "stack", "cache",
+			"stack-worker", "stack", "worker",
+			[]string{"cache"}, true,
+		),
+		ginkgo.Entry(
+			"normalized bare service name after Links processing",
+			"redis", "cache", "redis",
+			"app", "cache", "app",
+			[]string{"redis"}, true,
+		),
+	)
+
+	ginkgo.It("should order multiple dependents after a shared network provider", func() {
+		vpn := mockLinkedContainer("vpn", "id-vpn", "stack", "vpn", nil, true)
+		clientA := mockLinkedContainer("client-a", "id-a", "stack", "client-a", []string{"vpn"}, true)
+		clientB := mockLinkedContainer("client-b", "id-b", "stack", "client-b", []string{"vpn"}, true)
+
+		containers := []types.Container{clientA, clientB, vpn}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		gomega.Expect(containers[0].Name()).To(gomega.Equal("vpn"))
+		names := []string{containers[1].Name(), containers[2].Name()}
+		gomega.Expect(names).To(gomega.ConsistOf("client-a", "client-b"))
+	})
+
+	ginkgo.It("should order when dependent has multiple dependencies", func() {
+		db := mockLinkedContainer("db", "id-db", "app", "db", nil, true)
+		cache := mockLinkedContainer("cache", "id-cache", "app", "cache", nil, true)
+		web := mockLinkedContainer("web", "id-web", "app", "web", []string{"db", "cache"}, true)
+
+		containers := []types.Container{web, db, cache}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		gomega.Expect(containers[2].Name()).To(gomega.Equal("web"))
+
+		ordered := []string{containers[0].Name(), containers[1].Name(), containers[2].Name()}
+		assertOrderBefore(ordered, "db", "web")
+		assertOrderBefore(ordered, "cache", "web")
+	})
+
+	ginkgo.It("should match Compose replica identifiers from a service link", func() {
+		db1 := mockLinkedContainer("myproject-db-1", "id-db1", "myproject", "db", nil, true)
+		db2 := mockLinkedContainer("myproject-db-2", "id-db2", "myproject", "db", nil, true)
+		app := mockLinkedContainer("myproject-app", "id-app", "myproject", "app", []string{"myproject-db"}, true)
+
+		containers := []types.Container{app, db1, db2}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		gomega.Expect(containers[2].Name()).To(gomega.Equal("myproject-app"))
+		gomega.Expect([]string{containers[0].Name(), containers[1].Name()}).
+			To(gomega.ConsistOf("myproject-db-1", "myproject-db-2"))
+	})
+
+	ginkgo.It("should not create edges for ambiguous same service name across projects", func() {
+		db1 := mockLinkedContainer("project1-db", "id-1", "project1", "db", nil, true)
+		db2 := mockLinkedContainer("project2-db", "id-2", "project2", "db", nil, true)
+		app := mockLinkedContainer("project3-app", "id-3", "project3", "app", []string{"db"}, true)
+
+		containers := []types.Container{app, db1, db2}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+		names := []string{containers[0].Name(), containers[1].Name(), containers[2].Name()}
+		gomega.Expect(names).To(gomega.ConsistOf("project1-db", "project2-db", "project3-app"))
+	})
+
+	ginkgo.It("should ignore missing dependency targets without failing sort", func() {
+		app := mockLinkedContainer("app", "id-app", "myproject", "app", []string{"missing-dep"}, true)
+		standalone := mockLinkedContainer("other", "id-other", "myproject", "other", nil, true)
+
+		containers := []types.Container{app, standalone}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		gomega.Expect([]string{containers[0].Name(), containers[1].Name()}).
+			To(gomega.ConsistOf("app", "other"))
+	})
+
+	ginkgo.It("should keep Watchtower last when linked non-Watchtower containers sort first", func() {
+		db := mockLinkedContainer("db", "id-db", "myproject", "db", nil, true)
+		web := mockLinkedContainer("web", "id-web", "myproject", "web", []string{"db"}, true)
+
+		wt := mockTypes.NewMockContainer(ginkgo.GinkgoT())
+		wt.EXPECT().Name().Return("watchtower").Maybe()
+		wt.EXPECT().ID().Return(types.ContainerID("id-wt")).Maybe()
+		wt.EXPECT().IsWatchtower().Return(true).Maybe()
+		wt.EXPECT().Links(true).Return(nil).Maybe()
+		wt.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
+			Name:   "/watchtower",
+			Config: &dockerContainer.Config{Labels: map[string]string{}},
+		}).Maybe()
+
+		containers := []types.Container{wt, web, db}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		gomega.Expect(containers[0].Name()).To(gomega.Equal("db"))
+		gomega.Expect(containers[1].Name()).To(gomega.Equal("web"))
+		gomega.Expect(containers[2].Name()).To(gomega.Equal("watchtower"))
+	})
+
+	ginkgo.It("should order independent stacks without cross-linking same service names", func() {
+		// Two Compose projects each have db→web. Bare link "db" is ambiguous and
+		// must not couple stacks; each web only orders relative to its own db when
+		// links use project-qualified or unique names.
+		dbA := mockLinkedContainer("stack-a-db", "id-da", "stack-a", "db", nil, true)
+		webA := mockLinkedContainer(
+			"stack-a-web", "id-wa", "stack-a", "web", []string{"stack-a-db"}, true,
+		)
+		dbB := mockLinkedContainer("stack-b-db", "id-db", "stack-b", "db", nil, true)
+		webB := mockLinkedContainer(
+			"stack-b-web", "id-wb", "stack-b", "web", []string{"stack-b-db"}, true,
+		)
+
+		containers := []types.Container{webA, webB, dbA, dbB}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+		ordered := make([]string, len(containers))
+		for i, c := range containers {
+			ordered[i] = c.Name()
+		}
+
+		assertOrderBefore(ordered, "stack-a-db", "stack-a-web")
+		assertOrderBefore(ordered, "stack-b-db", "stack-b-web")
+	})
+
+	ginkgo.It("should order cross-stack Watchtower depends-on by foreign container_name", func() {
+		// Provider stack owns the named network peer; consumer stack depends on it
+		// via Watchtower depends-on / network_mode container name.
+		provider := mockLinkedContainer(
+			"shared-net-proxy", "id-prov", "infra", "net-proxy", nil, true,
+		)
+		consumer := mockLinkedContainer(
+			"app-web", "id-cons", "app", "web", []string{"shared-net-proxy"}, true,
+		)
+		unrelated := mockLinkedContainer(
+			"other-db", "id-other", "other", "db", nil, true,
+		)
+
+		containers := []types.Container{consumer, unrelated, provider}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+		ordered := make([]string, len(containers))
+		for i, c := range containers {
+			ordered[i] = c.Name()
+		}
+
+		assertOrderBefore(ordered, "shared-net-proxy", "app-web")
+		gomega.Expect(ordered).To(gomega.ConsistOf("shared-net-proxy", "app-web", "other-db"))
+	})
+
+	ginkgo.It("should not couple stacks when multi-segment services share a trailing token", func() {
+		// stack-a has service net-proxy; stack-b has service other-proxy. A dependent
+		// linking to net-proxy must only wait on stack-a's peer, not other-proxy.
+		proxyA := mockLinkedContainer(
+			"stack-a-net-proxy", "id-pa", "stack-a", "net-proxy", nil, true,
+		)
+		proxyB := mockLinkedContainer(
+			"stack-b-other-proxy", "id-pb", "stack-b", "other-proxy", nil, true,
+		)
+		client := mockLinkedContainer(
+			"stack-a-client", "id-cl", "stack-a", "client", []string{"net-proxy"}, true,
+		)
+
+		containers := []types.Container{client, proxyB, proxyA}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+		ordered := make([]string, len(containers))
+		for i, c := range containers {
+			ordered[i] = c.Name()
+		}
+
+		assertOrderBefore(ordered, "stack-a-net-proxy", "stack-a-client")
+		// other-proxy must not become a dependency of client (no edge).
+		// If wrongly linked, client would have indegree 2 and sort after both proxies
+		// with a fixed relative order; assert client is not forced after proxyB only
+		// when proxyA is already before client.
+		gomega.Expect(indexOf(ordered, "stack-a-client")).
+			To(gomega.BeNumerically(">", indexOf(ordered, "stack-a-net-proxy")))
+	})
+
+	ginkgo.It("should order multi-segment container_name dependency among multi-stack peers", func() {
+		// Explicit container_name equals multi-segment service; Compose keys differ.
+		provider := mockLinkedContainer(
+			"net-proxy", "id-np", "media", "net-proxy", nil, true,
+		)
+		dependent := mockLinkedContainer(
+			"web-app", "id-wa", "media", "web", []string{"net-proxy"}, true,
+		)
+		foreign := mockLinkedContainer(
+			"net-proxy-other", "id-fo", "other", "net-proxy-other", nil, true,
+		)
+		// Same trailing token in another stack must not steal the edge.
+		decoy := mockLinkedContainer(
+			"edge-proxy", "id-de", "edge", "edge-proxy", nil, true,
+		)
+
+		containers := []types.Container{dependent, foreign, decoy, provider}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+		ordered := make([]string, len(containers))
+		for i, c := range containers {
+			ordered[i] = c.Name()
+		}
+
+		assertOrderBefore(ordered, "net-proxy", "web-app")
+	})
+
+	ginkgo.It("should order chain across three stacks with mixed link forms", func() {
+		// data.db ← (compose service) app.worker ← (watchtower container_name) edge.client
+		db := mockLinkedContainer("data-db", "id-db", "data", "db", nil, true)
+		worker := mockLinkedContainer(
+			"app-worker", "id-wk", "app", "worker", []string{"db"}, true,
+		)
+		// Watchtower depends-on uses worker's container_name.
+		client := mockLinkedContainer(
+			"edge-client", "id-cl", "edge", "client", []string{"app-worker"}, true,
+		)
+
+		containers := []types.Container{client, worker, db}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+		ordered := make([]string, len(containers))
+		for i, c := range containers {
+			ordered[i] = c.Name()
+		}
+
+		assertOrderBefore(ordered, "data-db", "app-worker")
+		assertOrderBefore(ordered, "app-worker", "edge-client")
+		assertOrderBefore(ordered, "data-db", "edge-client")
+	})
+
+	ginkgo.It("should not create edge for hyphenated link against trailing-token-only peer", func() {
+		// Regression: ExtractServiceName("net-proxy") and ExtractServiceName("other-proxy")
+		// both yield "proxy"; matching must not treat them as the same dependency.
+		decoy := mockLinkedContainer(
+			"other-proxy", "id-decoy", "other", "other-proxy", nil, true,
+		)
+		dependent := mockLinkedContainer(
+			"web", "id-web", "app", "web", []string{"net-proxy"}, true,
+		)
+
+		containers := []types.Container{dependent, decoy}
+		err := DependencySorter{}.Sort(containers, true)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		// No dependency edge: both indegree 0. Order is reverse-alpha among keys.
+		gomega.Expect([]string{containers[0].Name(), containers[1].Name()}).
+			To(gomega.ConsistOf("web", "other-proxy"))
+	})
+})

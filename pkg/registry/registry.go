@@ -8,7 +8,7 @@ import (
 	"github.com/distribution/reference"
 	"github.com/sirupsen/logrus"
 
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/pkg/registry/auth"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -30,7 +30,7 @@ var (
 // Returns:
 //   - image.PullOptions: Configured pull options if successful.
 //   - error: Non-nil if auth retrieval fails, nil on success.
-func GetPullOptions(imageName string) (dockerImage.PullOptions, error) {
+func GetPullOptions(imageName string) (dockerClient.ImagePullOptions, error) {
 	// Set up logging fields for consistent tracking.
 	fields := logrus.Fields{
 		"image": imageName,
@@ -43,14 +43,14 @@ func GetPullOptions(imageName string) (dockerImage.PullOptions, error) {
 	if err != nil {
 		logrus.WithError(err).WithFields(fields).Debug("Failed to get authentication credentials")
 
-		return dockerImage.PullOptions{}, fmt.Errorf("%w: %w", errFailedGetAuth, err)
+		return dockerClient.ImagePullOptions{}, fmt.Errorf("%w: %w", errFailedGetAuth, err)
 	}
 
 	// Return empty options if no auth is available.
 	if registryCredentials == "" {
 		logrus.WithFields(fields).Debug("No authentication credentials retrieved")
 
-		return dockerImage.PullOptions{}, nil
+		return dockerClient.ImagePullOptions{}, nil
 	}
 
 	// Log auth details only in trace mode to protect sensitive data.
@@ -61,7 +61,7 @@ func GetPullOptions(imageName string) (dockerImage.PullOptions, error) {
 	}
 
 	// Configure pull options with auth and a default privilege handler.
-	pullOptions := dockerImage.PullOptions{
+	pullOptions := dockerClient.ImagePullOptions{
 		RegistryAuth:  registryCredentials,
 		PrivilegeFunc: DefaultAuthHandler,
 	}
@@ -88,7 +88,7 @@ func DefaultAuthHandler(_ context.Context) (string, error) {
 	return "", nil
 }
 
-// WarnOnAPIConsumption determines whether to warn about API consumption for a container’s registry.
+// WarnOnAPIConsumption determines whether to warn about API consumption for a container's registry.
 //
 // It returns true for registries supporting HEAD requests (e.g., Docker Hub, GHCR) or if parsing fails.
 //
@@ -125,7 +125,7 @@ func WarnOnAPIConsumption(container types.Container) bool {
 	}
 
 	// Check if the registry is known to support HEAD requests.
-	if containerHost == auth.DockerRegistryHost || containerHost == "ghcr.io" {
+	if containerHost == auth.DockerRegistryHost || containerHost == auth.GitHubRegistryDomain {
 		logrus.WithFields(fields).WithFields(logrus.Fields{
 			"host": containerHost,
 		}).Debug("Registry supports HEAD requests, warning on API consumption")

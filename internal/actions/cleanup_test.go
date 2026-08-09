@@ -6,14 +6,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/mock"
 
 	cerrdefs "github.com/containerd/errdefs"
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	dockerNetwork "github.com/moby/moby/api/types/network"
 
 	"github.com/nicholas-fedor/watchtower/pkg/container"
 	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
@@ -716,6 +716,139 @@ var _ = ginkgo.Describe("CheckForMultipleWatchtowerInstances", func() {
 				"",
 				&cleanupImageInfos,
 				newContainer,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(cleanupOccurred).To(gomega.Equal(1))
+			gomega.Expect(cleanupImageInfos).To(gomega.BeEmpty())
+		})
+
+		ginkgo.It("should cleanup old container via name belt even when current detection points to the old one", func() {
+			oldID := types.ContainerID("old123")
+
+			oldContainer := createMockContainer(
+				string(oldID),
+				"watchtower-old-old123",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now().Add(-time.Hour),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			newID := types.ContainerID("new456")
+
+			newContainer := createMockContainer(
+				string(newID),
+				"watchtower",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":                 "true",
+					"com.centurylinklabs.watchtower.container-chain": string(oldID),
+				},
+			)
+
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer, newContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(context.Background(), oldContainer, 10*time.Minute).
+				Return(nil).
+				Times(1)
+
+			var cleanupImageInfos []types.RemovedImageInfo
+
+			// Belt case: current detection selected the old predecessor.
+			cleanupOccurred, err := RemoveExcessWatchtowerInstances(
+				context.Background(),
+				mockClient,
+				true,
+				"",
+				&cleanupImageInfos,
+				oldContainer,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(cleanupOccurred).To(gomega.Equal(1))
+			gomega.Expect(cleanupImageInfos).To(gomega.BeEmpty())
+		})
+
+		ginkgo.It("should select same-scope successor when resolving old current container", func() {
+			// Old current in scope-a with two non-old successors in different scopes.
+			// Must pick the scope-a successor, not the scope-b one.
+			oldID := types.ContainerID("old-scoped-a")
+
+			oldContainer := createMockContainer(
+				string(oldID),
+				"watchtower-old-scoped-a",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now().Add(-2*time.Hour),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "scope-a",
+				},
+			)
+
+			scopeANewID := types.ContainerID("new-scoped-a")
+
+			scopeANewContainer := createMockContainer(
+				string(scopeANewID),
+				"watchtower",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":                 "true",
+					"com.centurylinklabs.watchtower.scope":           "scope-a",
+					"com.centurylinklabs.watchtower.container-chain": string(oldID),
+				},
+			)
+
+			scopeBNewID := types.ContainerID("new-scoped-b")
+
+			scopeBNewContainer := createMockContainer(
+				string(scopeBNewID),
+				"watchtower",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now().Add(-time.Hour),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "scope-b",
+				},
+			)
+
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			// scope-b container appears first in the list to test that it is skipped
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{scopeBNewContainer, oldContainer, scopeANewContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(context.Background(), oldContainer, 10*time.Minute).
+				Return(nil).
+				Times(1)
+
+			var cleanupImageInfos []types.RemovedImageInfo
+
+			cleanupOccurred, err := RemoveExcessWatchtowerInstances(
+				context.Background(),
+				mockClient,
+				true,
+				"scope-a",
+				&cleanupImageInfos,
+				oldContainer,
 			)
 
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1796,23 +1929,21 @@ func createMockContainer(
 	}
 
 	content := dockerContainer.InspectResponse{
-		ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-			ID:    id,
-			Image: image,
-			Name:  name,
-			State: &dockerContainer.State{
-				Running:    running,
-				Restarting: restarting,
-			},
-			Created: created.Format(time.RFC3339Nano),
-			HostConfig: &dockerContainer.HostConfig{
-				PortBindings: map[nat.Port][]nat.PortBinding{},
-			},
+		ID:    id,
+		Image: image,
+		Name:  name,
+		State: &dockerContainer.State{
+			Running:    running,
+			Restarting: restarting,
+		},
+		Created: created.Format(time.RFC3339Nano),
+		HostConfig: &dockerContainer.HostConfig{
+			PortBindings: dockerNetwork.PortMap{},
 		},
 		Config: &dockerContainer.Config{
 			Image:        image,
 			Labels:       labels,
-			ExposedPorts: map[nat.Port]struct{}{},
+			ExposedPorts: dockerNetwork.PortSet{},
 		},
 	}
 
@@ -1825,3 +1956,692 @@ func createMockContainer(
 
 	return container.NewContainer(&content, imageInfo)
 }
+
+// createMockCreatedContainer creates a Watchtower container in the "created" state,
+// simulating a container that was created but never started during a failed self-update.
+func createMockCreatedContainer(
+	id, name, image string,
+	created time.Time,
+	labels map[string]string,
+) types.Container {
+	c := createMockContainer(id, name, image, false, false, created, labels)
+
+	info := c.ContainerInfo()
+	if info != nil && info.State != nil {
+		info.State.Status = dockerContainer.StateCreated
+	}
+
+	return c
+}
+
+var _ = ginkgo.Describe("CleanupOldWatchtowerContainers", func() {
+	ginkgo.When("no old containers exist", func() {
+		ginkgo.It("should return nil when no containers exist", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+
+		ginkgo.It("should return nil when only non-Watchtower containers exist", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			nonWT := createMockContainer(
+				"other-id",
+				"other-app",
+				"other:latest",
+				true,
+				false,
+				time.Now(),
+				map[string]string{},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{nonWT}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+
+		ginkgo.It("should return nil when only current non-old Watchtower exists", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			current := createMockContainer(
+				"current-id",
+				"watchtower",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{current}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+	})
+
+	ginkgo.When("scope normalization applies", func() {
+		ginkgo.It("should match unscoped old containers when scope is empty", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(1))
+		})
+	})
+
+	ginkgo.When("scope filtering applies", func() {
+		ginkgo.It("should skip old containers in different scope", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldScopedContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "other-scope",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldScopedContainer}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"my-scope",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+
+		ginkgo.It("should skip old containers with explicit scope when current is unscoped", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldScopedContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "some-scope",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldScopedContainer}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+	})
+
+	ginkgo.When("old containers are found and removed", func() {
+		ginkgo.It("should remove old container in same scope", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(1))
+		})
+
+		ginkgo.It("should remove old container with matching explicit scope", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "prod",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"prod",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(1))
+		})
+
+		ginkgo.It("should skip old container with same ID as current container", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"current-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+
+		ginkgo.It("should remove multiple old containers in same scope", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			old1 := createMockContainer(
+				"old-1",
+				"watchtower-old-aaa",
+				"watchtower:old1",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "prod",
+				},
+			)
+			old2 := createMockContainer(
+				"old-2",
+				"watchtower-old-bbb",
+				"watchtower:old2",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "prod",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{old1, old2}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, old1, 10*time.Minute).
+				Return(nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, old2, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"prod",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(2))
+		})
+	})
+
+	ginkgo.When("cleanup images is enabled", func() {
+		ginkgo.It("should remove old container and its image", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			currentContainer := createMockContainer(
+				"current-id",
+				"watchtower",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{currentContainer, oldContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(nil)
+			mockClient.EXPECT().
+				RemoveImageByID(
+					mock.Anything,
+					types.ImageID("watchtower:old"),
+					"watchtower:old",
+				).
+				Return(nil)
+
+			var imageInfos []types.RemovedImageInfo
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				true,
+				"none",
+				"current-id",
+				&imageInfos,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(1))
+			gomega.Expect(imageInfos).To(gomega.HaveLen(1))
+		})
+
+		ginkgo.It("should handle removal failure and return partial count", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(errors.New("stop container failed")).
+				Times(maxRemovalAttempts)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+	})
+
+	ginkgo.When("list containers fails", func() {
+		ginkgo.It("should return an error", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return(nil, errors.New("docker daemon unreachable"))
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to list containers"))
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+	})
+
+	ginkgo.When("current container not found in list", func() {
+		ginkgo.It("should still remove old containers with nil current", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"nonexistent-current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(1))
+		})
+	})
+
+	ginkgo.When("orphaned created-state containers exist", func() {
+		ginkgo.It("should remove Watchtower containers stuck in created state", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			orphaned := createMockCreatedContainer(
+				"orphaned-id",
+				"watchtower-abc123",
+				"watchtower:latest",
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{orphaned}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, orphaned, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(1))
+		})
+
+		ginkgo.It("should skip created-state containers that are not Watchtower", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			nonWT := createMockCreatedContainer(
+				"non-wt-id",
+				"other-app",
+				"other:latest",
+				time.Now(),
+				map[string]string{},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{nonWT}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+
+		ginkgo.It("should skip the current container even if it is in created state", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			current := createMockCreatedContainer(
+				"current-id",
+				"watchtower",
+				"watchtower:latest",
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{current}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+
+		ginkgo.It("should remove both old and orphaned created-state containers together", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			oldContainer := createMockContainer(
+				"old-id",
+				"watchtower-old-abc123",
+				"watchtower:old",
+				true,
+				false,
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+			orphaned := createMockCreatedContainer(
+				"orphaned-id",
+				"watchtower-xyz789",
+				"watchtower:latest",
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower": "true",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{oldContainer, orphaned}, nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, oldContainer, 10*time.Minute).
+				Return(nil)
+			mockClient.EXPECT().
+				StopAndRemoveContainer(mock.Anything, orphaned, 10*time.Minute).
+				Return(nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(2))
+		})
+
+		ginkgo.It("should skip created-state containers from a different scope", func() {
+			mockClient := mockContainer.NewMockClient(ginkgo.GinkgoT())
+
+			differentScopeOrphaned := createMockCreatedContainer(
+				"orphaned-scoped-id",
+				"watchtower-scoped",
+				"watchtower:latest",
+				time.Now(),
+				map[string]string{
+					"com.centurylinklabs.watchtower":       "true",
+					"com.centurylinklabs.watchtower.scope": "prod",
+				},
+			)
+
+			mockClient.EXPECT().
+				ListContainers(mock.Anything, mock.Anything).
+				Return([]types.Container{differentScopeOrphaned}, nil)
+
+			removed, err := CleanupOldWatchtowerContainers(
+				context.Background(),
+				mockClient,
+				false,
+				"none",
+				"current-id",
+				nil,
+			)
+
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(removed).To(gomega.Equal(0))
+		})
+	})
+})

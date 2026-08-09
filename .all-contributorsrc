@@ -954,6 +954,36 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "barnabasbusa",
+      "name": "Barnabas Busa",
+      "avatar_url": "https://avatars.githubusercontent.com/u/21987084?v=4",
+      "profile": "https://github.com/barnabasbusa",
+      "contributions": [
+        "code",
+        "doc"
+      ]
+    },
+    {
+      "login": "Thubo",
+      "name": "Matthias Thubauville",
+      "avatar_url": "https://avatars.githubusercontent.com/u/4083975?v=4",
+      "profile": "https://github.com/Thubo",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "Greite",
+      "name": "Gauthier Painteaux",
+      "avatar_url": "https://avatars.githubusercontent.com/u/32100821?v=4",
+      "profile": "https://gauthierpainteaux.fr",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

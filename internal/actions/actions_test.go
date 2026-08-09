@@ -10,14 +10,31 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/mock"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
+	dockerContainer "github.com/moby/moby/api/types/container"
 
 	mockActions "github.com/nicholas-fedor/watchtower/internal/actions/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/metrics"
 	"github.com/nicholas-fedor/watchtower/pkg/filters"
-	"github.com/nicholas-fedor/watchtower/pkg/metrics"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
 )
+
+// defaultTestUpdateParams returns a complete UpdateParams snapshot for tests.
+//
+// Parameters:
+//   - filter: Container filter for the update session.
+//
+// Returns:
+//   - types.UpdateParams: Policy values matching the previous test defaults.
+func defaultTestUpdateParams(filter types.Filter) types.UpdateParams {
+	return types.UpdateParams{
+		Filter:       filter,
+		Timeout:      time.Minute,
+		LifecycleUID: 1000,
+		LifecycleGID: 1001,
+		CPUCopyMode:  "auto",
+	}
+}
 
 var _ = ginkgo.Describe("Actions", func() {
 	ginkgo.Describe("handleUpdateResult", func() {
@@ -79,19 +96,7 @@ var _ = ginkgo.Describe("Actions", func() {
 					Notifier:                     nil,
 					NotificationSplitByContainer: false,
 					NotificationReport:           false,
-					Filter:                       filters.NoFilter,
-					Cleanup:                      false,
-					NoRestart:                    false,
-					MonitorOnly:                  false,
-					LifecycleHooks:               false,
-					RollingRestart:               false,
-					LabelPrecedence:              false,
-					NoPull:                       false,
-					Timeout:                      time.Minute,
-					LifecycleUID:                 1000,
-					LifecycleGID:                 1001,
-					CPUCopyMode:                  "auto",
-					PullFailureDelay:             time.Duration(0),
+					Update:                       defaultTestUpdateParams(filters.NoFilter),
 				}
 				metric := RunUpdatesWithNotifications(context.Background(), params)
 
@@ -130,19 +135,7 @@ var _ = ginkgo.Describe("Actions", func() {
 					Notifier:                     notifier,
 					NotificationSplitByContainer: true,
 					NotificationReport:           false,
-					Filter:                       filters.NoFilter,
-					Cleanup:                      false,
-					NoRestart:                    false,
-					MonitorOnly:                  false,
-					LifecycleHooks:               false,
-					RollingRestart:               false,
-					LabelPrecedence:              false,
-					NoPull:                       false,
-					Timeout:                      time.Minute,
-					LifecycleUID:                 1000,
-					LifecycleGID:                 1001,
-					CPUCopyMode:                  "auto",
-					PullFailureDelay:             time.Duration(0),
+					Update:                       defaultTestUpdateParams(filters.NoFilter),
 				}
 				metric := RunUpdatesWithNotifications(context.Background(), params)
 
@@ -167,19 +160,7 @@ var _ = ginkgo.Describe("Actions", func() {
 					Notifier:                     nil,
 					NotificationSplitByContainer: false,
 					NotificationReport:           false,
-					Filter:                       filters.NoFilter,
-					Cleanup:                      false,
-					NoRestart:                    false,
-					MonitorOnly:                  false,
-					LifecycleHooks:               false,
-					RollingRestart:               false,
-					LabelPrecedence:              false,
-					NoPull:                       false,
-					Timeout:                      time.Minute,
-					LifecycleUID:                 1000,
-					LifecycleGID:                 1001,
-					CPUCopyMode:                  "auto",
-					PullFailureDelay:             time.Duration(0),
+					Update:                       defaultTestUpdateParams(filters.NoFilter),
 				}
 
 				// Empty container list results in zero metrics
@@ -234,37 +215,25 @@ var _ = ginkgo.Describe("Actions", func() {
 						false,
 					)
 
+					update := defaultTestUpdateParams(filters.NoFilter)
+					update.CurrentContainerID = types.ContainerID("container1-id")
+
 					params := RunUpdatesWithNotificationsParams{
 						Client:                       client,
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter:                       filters.NoFilter,
-						Cleanup:                      false,
-						NoRestart:                    false,
-						MonitorOnly:                  false,
-						LifecycleHooks:               false,
-						RollingRestart:               false,
-						LabelPrecedence:              false,
-						NoPull:                       false,
-						Timeout:                      time.Minute,
-						LifecycleUID:                 1000,
-						LifecycleGID:                 1001,
-						CPUCopyMode:                  "auto",
-						PullFailureDelay:             time.Duration(0),
-						CurrentContainerID: types.ContainerID(
-							"container1-id",
-						), // Set to first container
+						Update:                       update,
 					}
 
 					metric := RunUpdatesWithNotifications(context.Background(), params)
 
 					gomega.Expect(metric).NotTo(gomega.BeNil())
 					// Only container1 should be updated, container2 should be skipped due to CurrentContainerID
-					gomega.Expect(client.TestData.StartOrder).To(gomega.HaveLen(1))
-					gomega.Expect(client.TestData.StartOrder).
+					gomega.Expect(client.TestData.CreateOrder).To(gomega.HaveLen(1))
+					gomega.Expect(client.TestData.CreateOrder).
 						To(gomega.ContainElement("watchtower-1"))
-					gomega.Expect(client.TestData.StartOrder).
+					gomega.Expect(client.TestData.CreateOrder).
 						To(gomega.Not(gomega.ContainElement("watchtower-2")))
 				},
 			)
@@ -967,22 +936,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"scope-a",
-							filters.NoFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("scope-a", filters.NoFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 
 					metric := RunUpdatesWithNotifications(context.Background(), params)
@@ -997,22 +953,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"scope-b",
-							filters.NoFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("scope-b", filters.NoFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 
 					metric := RunUpdatesWithNotifications(context.Background(), params)
@@ -1112,22 +1055,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"scope1",
-							filters.WatchtowerContainersFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("scope1", filters.WatchtowerContainersFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 					RunUpdatesWithNotifications(context.Background(), params)
 				}()
@@ -1140,22 +1070,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"scope2",
-							filters.WatchtowerContainersFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("scope2", filters.WatchtowerContainersFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 					RunUpdatesWithNotifications(context.Background(), params)
 				}()
@@ -1163,16 +1080,16 @@ var _ = ginkgo.Describe("Actions", func() {
 				wg.Wait()
 
 				// Verify scope isolation through separate TestData tracking
-				// client1 should only start scope1-watchtower
-				gomega.Expect(client1.TestData.StartOrder).
+				// client1 should only create scope1-watchtower
+				gomega.Expect(client1.TestData.CreateOrder).
 					To(gomega.ContainElement("scope1-watchtower"))
-				gomega.Expect(client1.TestData.StartOrder).
+				gomega.Expect(client1.TestData.CreateOrder).
 					NotTo(gomega.ContainElement("scope2-watchtower"))
 
-				// client2 should only start scope2-watchtower
-				gomega.Expect(client2.TestData.StartOrder).
+				// client2 should only create scope2-watchtower
+				gomega.Expect(client2.TestData.CreateOrder).
 					To(gomega.ContainElement("scope2-watchtower"))
-				gomega.Expect(client2.TestData.StartOrder).
+				gomega.Expect(client2.TestData.CreateOrder).
 					NotTo(gomega.ContainElement("scope1-watchtower"))
 			},
 		)
@@ -1238,27 +1155,17 @@ var _ = ginkgo.Describe("Actions", func() {
 			go func() {
 				defer wg.Done()
 
+				updateA := defaultTestUpdateParams(
+					filters.FilterByScope("scope-a", filters.WatchtowerContainersFilter),
+				)
+				updateA.Cleanup = true
+
 				params := RunUpdatesWithNotificationsParams{
 					Client:                       clientA,
 					Notifier:                     nil,
 					NotificationSplitByContainer: false,
 					NotificationReport:           false,
-					Filter: filters.FilterByScope(
-						"scope-a",
-						filters.WatchtowerContainersFilter,
-					),
-					Cleanup:          true, // Enable cleanup
-					NoRestart:        false,
-					MonitorOnly:      false,
-					LifecycleHooks:   false,
-					RollingRestart:   false,
-					LabelPrecedence:  false,
-					NoPull:           false,
-					Timeout:          time.Minute,
-					LifecycleUID:     1000,
-					LifecycleGID:     1001,
-					CPUCopyMode:      "auto",
-					PullFailureDelay: time.Duration(0),
+					Update:                       updateA,
 				}
 				RunUpdatesWithNotifications(context.Background(), params)
 			}()
@@ -1266,27 +1173,17 @@ var _ = ginkgo.Describe("Actions", func() {
 			go func() {
 				defer wg.Done()
 
+				updateB := defaultTestUpdateParams(
+					filters.FilterByScope("scope-b", filters.WatchtowerContainersFilter),
+				)
+				updateB.Cleanup = true
+
 				params := RunUpdatesWithNotificationsParams{
 					Client:                       clientB,
 					Notifier:                     nil,
 					NotificationSplitByContainer: false,
 					NotificationReport:           false,
-					Filter: filters.FilterByScope(
-						"scope-b",
-						filters.WatchtowerContainersFilter,
-					),
-					Cleanup:          true, // Enable cleanup
-					NoRestart:        false,
-					MonitorOnly:      false,
-					LifecycleHooks:   false,
-					RollingRestart:   false,
-					LabelPrecedence:  false,
-					NoPull:           false,
-					Timeout:          time.Minute,
-					LifecycleUID:     1000,
-					LifecycleGID:     1001,
-					CPUCopyMode:      "auto",
-					PullFailureDelay: time.Duration(0),
+					Update:                       updateB,
 				}
 				RunUpdatesWithNotifications(context.Background(), params)
 			}()
@@ -1387,22 +1284,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"prod",
-							filters.NoFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("prod", filters.NoFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 
 					metric := RunUpdatesWithNotifications(context.Background(), params)
@@ -1417,22 +1301,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil,
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"dev",
-							filters.NoFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("dev", filters.NoFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 
 					metric := RunUpdatesWithNotifications(context.Background(), params)
@@ -1530,22 +1401,9 @@ var _ = ginkgo.Describe("Actions", func() {
 						Notifier:                     nil, // No notifications for this test
 						NotificationSplitByContainer: false,
 						NotificationReport:           false,
-						Filter: filters.FilterByScope(
-							"scope-a",
-							filters.NoFilter,
+						Update: defaultTestUpdateParams(
+							filters.FilterByScope("scope-a", filters.NoFilter),
 						),
-						Cleanup:          false,
-						NoRestart:        false,
-						MonitorOnly:      false,
-						LifecycleHooks:   false,
-						RollingRestart:   false,
-						LabelPrecedence:  false,
-						NoPull:           false,
-						Timeout:          time.Minute,
-						LifecycleUID:     1000,
-						LifecycleGID:     1001,
-						CPUCopyMode:      "auto",
-						PullFailureDelay: time.Duration(0),
 					}
 
 					metric := RunUpdatesWithNotifications(context.Background(), params)
@@ -1617,51 +1475,31 @@ var _ = ginkgo.Describe("Actions", func() {
 				clientB := mockActions.CreateMockClient(testDataB, false, false)
 
 				// Run scope-a operation (cleanup should fail)
+				updateA := defaultTestUpdateParams(
+					filters.FilterByScope("scope-a", filters.NoFilter),
+				)
+				updateA.Cleanup = true
+
 				paramsA := RunUpdatesWithNotificationsParams{
 					Client:                       clientA,
 					Notifier:                     nil,
 					NotificationSplitByContainer: false,
 					NotificationReport:           false,
-					Filter: filters.FilterByScope(
-						"scope-a",
-						filters.NoFilter,
-					),
-					Cleanup:          true,
-					NoRestart:        false,
-					MonitorOnly:      false,
-					LifecycleHooks:   false,
-					RollingRestart:   false,
-					LabelPrecedence:  false,
-					NoPull:           false,
-					Timeout:          time.Minute,
-					LifecycleUID:     1000,
-					LifecycleGID:     1001,
-					CPUCopyMode:      "auto",
-					PullFailureDelay: time.Duration(0),
+					Update:                       updateA,
 				}
 
 				// Run scope-b operation (cleanup should succeed)
+				updateB := defaultTestUpdateParams(
+					filters.FilterByScope("scope-b", filters.NoFilter),
+				)
+				updateB.Cleanup = true
+
 				paramsB := RunUpdatesWithNotificationsParams{
 					Client:                       clientB,
 					Notifier:                     nil,
 					NotificationSplitByContainer: false,
 					NotificationReport:           false,
-					Filter: filters.FilterByScope(
-						"scope-b",
-						filters.NoFilter,
-					),
-					Cleanup:          true,
-					NoRestart:        false,
-					MonitorOnly:      false,
-					LifecycleHooks:   false,
-					RollingRestart:   false,
-					LabelPrecedence:  false,
-					NoPull:           false,
-					Timeout:          time.Minute,
-					LifecycleUID:     1000,
-					LifecycleGID:     1001,
-					CPUCopyMode:      "auto",
-					PullFailureDelay: time.Duration(0),
+					Update:                       updateB,
 				}
 
 				var wg sync.WaitGroup
@@ -1771,22 +1609,9 @@ var _ = ginkgo.Describe("Actions", func() {
 							Notifier:                     nil,
 							NotificationSplitByContainer: false,
 							NotificationReport:           false,
-							Filter: filters.FilterByScope(
-								"scope-x",
-								filters.NoFilter,
+							Update: defaultTestUpdateParams(
+								filters.FilterByScope("scope-x", filters.NoFilter),
 							),
-							Cleanup:          false,
-							NoRestart:        false,
-							MonitorOnly:      false,
-							LifecycleHooks:   false,
-							RollingRestart:   false,
-							LabelPrecedence:  false,
-							NoPull:           false,
-							Timeout:          time.Minute,
-							LifecycleUID:     1000,
-							LifecycleGID:     1001,
-							CPUCopyMode:      "auto",
-							PullFailureDelay: time.Duration(0),
 						}
 
 						metric := RunUpdatesWithNotifications(context.Background(), params)
@@ -1801,22 +1626,9 @@ var _ = ginkgo.Describe("Actions", func() {
 							Notifier:                     nil,
 							NotificationSplitByContainer: false,
 							NotificationReport:           false,
-							Filter: filters.FilterByScope(
-								"scope-y",
-								filters.NoFilter,
+							Update: defaultTestUpdateParams(
+								filters.FilterByScope("scope-y", filters.NoFilter),
 							),
-							Cleanup:          false,
-							NoRestart:        false,
-							MonitorOnly:      false,
-							LifecycleHooks:   false,
-							RollingRestart:   false,
-							LabelPrecedence:  false,
-							NoPull:           false,
-							Timeout:          time.Minute,
-							LifecycleUID:     1000,
-							LifecycleGID:     1001,
-							CPUCopyMode:      "auto",
-							PullFailureDelay: time.Duration(0),
 						}
 
 						metric := RunUpdatesWithNotifications(context.Background(), params)

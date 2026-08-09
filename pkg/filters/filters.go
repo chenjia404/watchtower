@@ -1,16 +1,53 @@
 package filters
 
 import (
+	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/distribution/reference"
 	"github.com/sirupsen/logrus"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
-// noScope is the default scope value when none is specified.
-const noScope = "none"
+const (
+	// noScope is the default scope value when none is specified.
+	noScope = "none"
+
+	// Expected number of parts in a key=value label pair.
+	labelPairPartsCount = 2
+
+	// maxLabelPairBytes is the maximum combined byte length of a label key and
+	// value, consistent with containerd's label validation.
+	maxLabelPairBytes = 4096
+
+	// maxLabelPairs is the maximum number of label pairs accepted from user
+	// input, preventing memory exhaustion from unbounded slice lengths.
+	maxLabelPairs = 100
+
+	// enableLabelKey is the Docker label key used by Watchtower to control whether
+	// a container is managed.
+	enableLabelKey = "com.centurylinklabs.watchtower.enable"
+)
+
+var (
+	// errTooManyLabelPairs is returned when the number of provided label pairs
+	// exceeds the allowed maximum.
+	errTooManyLabelPairs = errors.New("too many label pairs")
+
+	// errLabelPairMissingEquals is returned when a label pair does not contain
+	// exactly one '=' separator.
+	errLabelPairMissingEquals = errors.New("label pair missing '=' separator")
+
+	// errLabelPairEmptyKey is returned when a label pair has an empty key.
+	errLabelPairEmptyKey = errors.New("label pair has empty key")
+
+	// errLabelPairTooLong is returned when a label pair exceeds the maximum
+	// combined byte length.
+	errLabelPairTooLong = errors.New("label pair exceeds maximum combined length")
+)
 
 // WatchtowerContainersFilter selects only Watchtower containers.
 //
@@ -53,6 +90,63 @@ func UnscopedWatchtowerContainersFilter(c types.FilterableContainer) bool {
 		Debug("Container has scope, excluding from unscoped filter")
 
 	return false
+}
+
+// ExcludeOldWatchtowerFilter rejects containers that are old Watchtower
+// containers renamed during self-update (prefixed with "watchtower-old-").
+//
+// These containers are predecessors that should only be removed, never updated
+// or included in update cycles. This filter ensures they are excluded from
+// regular container processing regardless of scope.
+//
+// Returns:
+//   - bool: True if the container should be included, false if it is an old
+//     Watchtower container that should be excluded.
+func ExcludeOldWatchtowerFilter(c types.FilterableContainer) bool {
+	if !c.IsWatchtower() {
+		return true
+	}
+
+	if IsOldWatchtower(c) {
+		logrus.WithField("container", c.Name()).
+			Debug("Excluding old Watchtower container from update cycle")
+
+		return false
+	}
+
+	return true
+}
+
+// IsOldWatchtower reports whether the container is an old Watchtower
+// container renamed during self-update (prefixed with "watchtower-old-").
+//
+// This is the positive counterpart to ExcludeOldWatchtowerFilter and is
+// intended for guard clauses where a positive check reads more naturally.
+//
+// Returns:
+//   - bool: True if the container is an old Watchtower container.
+func IsOldWatchtower(c types.FilterableContainer) bool {
+	return c.IsWatchtower() && strings.HasPrefix(strings.TrimLeft(c.Name(), "/"), types.WatchtowerOldPrefix)
+}
+
+// ExcludeOldWatchtowerFilterChain wraps a base filter with old
+// Watchtower exclusion. It chains the exclusion check before the base filter,
+// ensuring old Watchtower containers are rejected early in the pipeline.
+//
+// Parameters:
+//   - baseFilter: Base filter to chain.
+//
+// Returns:
+//   - types.Filter: Filter function that excludes old Watchtower containers
+//     and applies the base filter.
+func ExcludeOldWatchtowerFilterChain(baseFilter types.Filter) types.Filter {
+	return func(c types.FilterableContainer) bool {
+		if !ExcludeOldWatchtowerFilter(c) {
+			return false
+		}
+
+		return baseFilter(c)
+	}
 }
 
 // NoFilter allows all containers through.
@@ -133,49 +227,248 @@ func FilterByDisableNames(normalizedDisableNames []string, baseFilter types.Filt
 	}
 }
 
-// FilterByEnableLabel selects containers with enable label set.
+// FilterByMonitoredImageNamePatterns restricts monitoring to containers whose image name
+// matches specified patterns. When set, only matching containers are monitored.
 //
 // Parameters:
+//   - namePatterns: Image name regex patterns.
 //   - baseFilter: Base filter to chain.
 //
 // Returns:
-//   - types.Filter: Filter function requiring enable label and applying base filter.
-func FilterByEnableLabel(baseFilter types.Filter) types.Filter {
+//   - types.Filter: Filter function restricting to matching image names, then
+//     applying base filter.
+func FilterByMonitoredImageNamePatterns(namePatterns []string, baseFilter types.Filter) types.Filter {
+	if len(namePatterns) == 0 {
+		return baseFilter
+	}
+
 	return func(c types.FilterableContainer) bool {
-		clog := logrus.WithField("container", c.Name())
-		_, ok := c.Enabled()
+		imageName := c.ImageName()
+		clog := logrus.WithFields(logrus.Fields{
+			"container":    c.Name(),
+			"image":        imageName,
+			"namePatterns": namePatterns,
+		})
 
-		if !ok {
-			clog.Debug("Container excluded: enable label not set")
+		for _, pattern := range namePatterns {
+			if matchesImageName(imageName, pattern) {
+				clog.Debug("Container image matched pattern")
 
-			return false
+				return baseFilter(c)
+			}
 		}
 
-		clog.Debug("Container included: enable label set")
+		clog.Debug("Container image did not match any pattern")
+
+		return false
+	}
+}
+
+// FilterBySkippedImageNamePatterns prevents monitoring of containers whose image name
+// matches specified patterns. Matching containers are excluded from monitoring.
+//
+// Parameters:
+//   - namePatterns: Image name regex patterns.
+//   - baseFilter: Base filter to chain.
+//
+// Returns:
+//   - types.Filter: Filter function excluding matching image names, then applying
+//     base filter.
+func FilterBySkippedImageNamePatterns(namePatterns []string, baseFilter types.Filter) types.Filter {
+	if len(namePatterns) == 0 {
+		return baseFilter
+	}
+
+	return func(c types.FilterableContainer) bool {
+		imageName := c.ImageName()
+		clog := logrus.WithFields(logrus.Fields{
+			"container":    c.Name(),
+			"image":        imageName,
+			"namePatterns": namePatterns,
+		})
+
+		for _, pattern := range namePatterns {
+			if matchesImageName(imageName, pattern) {
+				clog.Debug("Container image matched skip pattern")
+
+				return false
+			}
+		}
+
+		clog.Debug("Container not skipped by image name patterns")
 
 		return baseFilter(c)
 	}
 }
 
-// FilterByDisabledLabel excludes containers with enable label set to false.
+// parseLabelPairs parses a slice of "key=value" strings into a map.
+//
+// Values are trimmed of surrounding whitespace for consistency with key
+// trimming. Only the first '=' separates key from value; any additional '='
+// characters are retained as part of the value. Entries without at least one
+// '=', empty keys, or pairs exceeding the maximum combined byte length are
+// rejected with an error rather than silently skipped, so callers can surface
+// malformed input to the user.
 //
 // Parameters:
+//   - pairs: Raw label pair strings from flag/env input.
+//
+// Returns:
+//   - map[string]string: Parsed label key-value pairs.
+//   - error: Non-nil if any pair is malformed or exceeds size limits.
+func parseLabelPairs(pairs []string) (map[string]string, error) {
+	if len(pairs) > maxLabelPairs {
+		return nil, fmt.Errorf("%w: %d > %d", errTooManyLabelPairs, len(pairs), maxLabelPairs)
+	}
+
+	result := make(map[string]string)
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		parts := strings.SplitN(pair, "=", labelPairPartsCount)
+		if len(parts) != labelPairPartsCount {
+			return nil, fmt.Errorf("%w: %q", errLabelPairMissingEquals, pair)
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if key == "" {
+			return nil, fmt.Errorf("%w: %q", errLabelPairEmptyKey, pair)
+		}
+
+		if len(key)+len(value) > maxLabelPairBytes {
+			return nil, fmt.Errorf("%w: key=%q value=%q combined=%d bytes", errLabelPairTooLong, key, value, len(key)+len(value))
+		}
+
+		result[key] = value
+	}
+
+	return result, nil
+}
+
+// FilterByEnabledLabels restricts processing to containers that have at least
+// one of the specified label key-value pairs.
+//
+// An empty label list disables the filter entirely.
+//
+// A label entry with an empty value (key="") performs a presence check: the
+// label must exist on the container with any value. A non-empty value requires
+// an exact match.
+//
+// Parameters:
+//   - labels: Map of label key-value pairs to require.
 //   - baseFilter: Base filter to chain.
 //
 // Returns:
-//   - types.Filter: Filter function excluding disabled containers and applying base filter.
-func FilterByDisabledLabel(baseFilter types.Filter) types.Filter {
-	return func(c types.FilterableContainer) bool {
-		clog := logrus.WithField("container", c.Name())
-		enabledLabel, ok := c.Enabled()
+//   - types.Filter: Filter function matching labels and applying base filter.
+func FilterByEnabledLabels(labels map[string]string, baseFilter types.Filter) types.Filter {
+	if len(labels) == 0 {
+		return baseFilter
+	}
 
-		if ok && !enabledLabel {
-			clog.Debug("Container excluded: enable label set to false")
+	return func(c types.FilterableContainer) bool {
+		clog := logrus.WithFields(logrus.Fields{
+			"container": c.Name(),
+			"labels":    labels,
+		})
+
+		for key, expectedValue := range labels {
+			labelValue, ok := c.GetLabel(key)
+			if !ok {
+				continue
+			}
+
+			if expectedValue != "" && labelValue != expectedValue {
+				continue
+			}
+
+			clog.WithField("matched_label", key).Debug("Container matched enabled label")
+
+			return baseFilter(c)
+		}
+
+		clog.Debug("Container did not match any enabled label")
+
+		return false
+	}
+}
+
+// FilterByDisabledLabels excludes containers that have any of the specified
+// label key-value pairs.
+//
+// An empty label list disables the filter entirely.
+//
+// A label entry with an empty value (key="") performs a presence check: the
+// label must exist on the container with any value. A non-empty value requires
+// an exact match.
+//
+// Parameters:
+//   - labels: Map of label key-value pairs to exclude.
+//   - baseFilter: Base filter to chain.
+//
+// Returns:
+//   - types.Filter: Filter function excluding matching labels and applying base filter.
+func FilterByDisabledLabels(labels map[string]string, baseFilter types.Filter) types.Filter {
+	if len(labels) == 0 {
+		return baseFilter
+	}
+
+	return func(c types.FilterableContainer) bool {
+		clog := logrus.WithFields(logrus.Fields{
+			"container": c.Name(),
+			"labels":    labels,
+		})
+
+		for key, expectedValue := range labels {
+			labelValue, ok := c.GetLabel(key)
+			if !ok {
+				continue
+			}
+
+			if expectedValue != "" && labelValue != expectedValue {
+				continue
+			}
+
+			clog.WithField("matched_label", key).Debug("Container excluded by disabled label")
 
 			return false
 		}
 
-		clog.Debug("Container not excluded by disabled label")
+		clog.Debug("Container not excluded by disabled labels")
+
+		return baseFilter(c)
+	}
+}
+
+// FilterByEnableLabel applies the boolean --label-enable filter.
+//
+// When enable is true, only containers whose enable label is present with a
+// value that parses as true are included. When enable is false, containers
+// whose enable label is present with a value that parses as false are excluded.
+// Absent labels and invalid values are both treated as unset, matching
+// Enabled() returning ok=false.
+//
+// Parameters:
+//   - enable: require the enable label when true, exclude false values when false.
+//   - baseFilter: base filter to chain.
+//
+// Returns:
+//   - types.Filter: filter function applying enable-label semantics and baseFilter.
+func FilterByEnableLabel(enable bool, baseFilter types.Filter) types.Filter {
+	return func(c types.FilterableContainer) bool {
+		enabled, ok := c.Enabled()
+		if ok && !enabled {
+			return false
+		}
+
+		if !ok && enable {
+			return false
+		}
 
 		return baseFilter(c)
 	}
@@ -222,7 +515,7 @@ func FilterByScope(scope string, baseFilter types.Filter) types.Filter {
 // Returns:
 //   - types.Filter: Filter function matching images and applying base filter.
 func FilterByImage(images []string, baseFilter types.Filter) types.Filter {
-	if images == nil {
+	if len(images) == 0 {
 		return baseFilter // No images specified, apply base filter only.
 	}
 
@@ -246,23 +539,34 @@ func FilterByImage(images []string, baseFilter types.Filter) types.Filter {
 	}
 }
 
+// matchesImageName checks if a container's image name matches a given pattern (exact or regex).
+// Returns true if it matches, false otherwise.
+// Invalid regex patterns are treated as literal strings for exact matching.
+func matchesImageName(imageName, pattern string) bool {
+	if pattern == imageName {
+		return true
+	}
+
+	regex, err := regexp.Compile("^" + pattern + "$")
+	if err != nil {
+		return false
+	}
+
+	return regex.MatchString(imageName)
+}
+
 // matchesName checks if a container name matches a given pattern (exact or regex).
 // Returns true if it matches, false otherwise.
 // Invalid regex patterns are treated as literal strings for exact matching.
 func matchesName(containerName, pattern string) bool {
-	// Normalize the pattern by trimming leading slash.
-	// This is retained to ensure robust handling, despite existing input normalization.
 	pattern = strings.TrimPrefix(pattern, "/")
 
-	// Exact match first.
 	if pattern == containerName {
 		return true
 	}
 
-	// Try regex match (anchored to match whole string).
 	regex, err := regexp.Compile("^" + pattern + "$")
 	if err != nil {
-		// Treat invalid regex as literal string (exact match already checked above).
 		return false
 	}
 
@@ -271,6 +575,12 @@ func matchesName(containerName, pattern string) bool {
 
 // matchImageAndTag checks if a container's image matches a target image, including optional tag.
 //
+// Image references are parsed with distribution/reference so host:port registries
+// (for example localhost:5000/nginx:alpine) are not split on the port colon.
+// When the target omits a tag, any tag on the container image is accepted.
+// When the target includes a tag, both name and tag must match. Digest-only
+// references compare the familiar name without requiring a matching tag.
+//
 // Parameters:
 //   - containerImage: The container's image name (e.g., "registry:develop").
 //   - targetImage: The target image name or image:tag to match (e.g., "registry").
@@ -278,50 +588,105 @@ func matchesName(containerName, pattern string) bool {
 // Returns:
 //   - bool: True if the image (and tag, if specified) matches, false otherwise.
 func matchImageAndTag(containerImage, targetImage string) bool {
-	containerParts := strings.Split(containerImage, ":") // Split into name and tag.
-	targetParts := strings.Split(targetImage, ":")       // Split target into name and tag.
-
-	if containerParts[0] != targetParts[0] { // Compare image names.
-		return false // Image names don't match.
+	containerRef, err := reference.ParseAnyReference(containerImage)
+	if err != nil {
+		return false
 	}
 
-	if len(targetParts) > 1 && len(containerParts) > 1 { // Both have tags.
-		return containerParts[1] == targetParts[1] // Compare tags.
+	targetRef, err := reference.ParseAnyReference(targetImage)
+	if err != nil {
+		return false
 	}
 
-	return true // No tag in target or container, name match sufficient.
+	containerNamed, ok := containerRef.(reference.Named)
+	if !ok {
+		return false
+	}
+
+	targetNamed, ok := targetRef.(reference.Named)
+	if !ok {
+		return false
+	}
+
+	if reference.FamiliarName(containerNamed) != reference.FamiliarName(targetNamed) {
+		return false
+	}
+
+	targetTagged, targetHasTag := targetRef.(reference.NamedTagged)
+	if !targetHasTag {
+		return true
+	}
+
+	containerTagged, containerHasTag := containerRef.(reference.NamedTagged)
+	if !containerHasTag {
+		return false
+	}
+
+	return containerTagged.Tag() == targetTagged.Tag()
 }
 
 // BuildFilter constructs a composite filter for containers.
 //
 // Parameters:
-//   - normalizedNames: Normalized names or regex patterns to include.
-//   - disableNames: Normalized names or regex patterns to exclude.
+//   - normalizedNames: Normalized container names or regex patterns. When set, only
+//     containers matching these patterns are monitored.
+//   - normalizedDisableNames: Container names or regex patterns to skip. Matching
+//     containers are excluded from monitoring.
+//   - monitoredImageNamePatterns: Image name regex patterns. When set, only containers whose
+//     image matches one of these patterns are monitored.
+//   - skippedImageNamePatterns: Image name regex patterns. Containers whose image
+//     matches one of these patterns are excluded from monitoring.
+//   - enabledLabels: Label key-value pairs. When set, only containers matching at least
+//     one pair are monitored.
+//   - disabledLabels: Label key-value pairs. Containers matching any pair are excluded.
 //   - enableLabel: Require enable label if true.
 //   - scope: Scope to match.
 //
 // Returns:
 //   - types.Filter: Combined filter function.
 //   - string: Description of the filter.
+//   - error: Non-nil if any enabled or disabled label pair is malformed.
 func BuildFilter(
 	normalizedNames []string,
 	normalizedDisableNames []string,
+	monitoredImageNamePatterns []string,
+	skippedImageNamePatterns []string,
+	enabledLabels []string,
+	disabledLabels []string,
 	enableLabel bool,
 	scope string,
-) (types.Filter, string) {
+) (types.Filter, string, error) {
+	enabledLabelMap, err := parseLabelPairs(enabledLabels)
+	if err != nil {
+		return nil, "", err
+	}
+
+	disabledLabelMap, err := parseLabelPairs(disabledLabels)
+	if err != nil {
+		return nil, "", err
+	}
+
 	clog := logrus.WithFields(logrus.Fields{
-		"names":        normalizedNames,
-		"disableNames": normalizedDisableNames,
-		"enableLabel":  enableLabel,
-		"scope":        scope,
+		"names":                      normalizedNames,
+		"disableNames":               normalizedDisableNames,
+		"monitoredImageNamePatterns": monitoredImageNamePatterns,
+		"skippedImageNamePatterns":   skippedImageNamePatterns,
+		"enabledLabels":              enabledLabelMap,
+		"disabledLabels":             disabledLabelMap,
+		"enableLabel":                enableLabel,
+		"scope":                      scope,
 	})
 	clog.Debug("Building container filter")
 
-	// Start with no filter and chain additional filters.
 	stringBuilder := strings.Builder{}
 	filter := NoFilter
 	filter = FilterByNames(normalizedNames, filter)
 	filter = FilterByDisableNames(normalizedDisableNames, filter)
+	filter = FilterByMonitoredImageNamePatterns(monitoredImageNamePatterns, filter)
+	filter = FilterBySkippedImageNamePatterns(skippedImageNamePatterns, filter)
+	filter = FilterByEnabledLabels(enabledLabelMap, filter)
+	filter = FilterByDisabledLabels(disabledLabelMap, filter)
+	filter = FilterByEnableLabel(enableLabel, filter)
 
 	// Add name-based filter description.
 	if len(normalizedNames) > 0 {
@@ -353,15 +718,89 @@ func BuildFilter(
 		stringBuilder.WriteString(`", `)
 	}
 
-	// Apply enable label filter if specified.
-	if enableLabel {
-		filter = FilterByEnableLabel(filter)
+	if len(monitoredImageNamePatterns) > 0 {
+		stringBuilder.WriteString("which image matches \"")
 
-		stringBuilder.WriteString("using enable label, ")
+		for i, n := range monitoredImageNamePatterns {
+			stringBuilder.WriteString(n)
+
+			if i < len(monitoredImageNamePatterns)-1 {
+				stringBuilder.WriteString(`" or "`)
+			}
+		}
+
+		stringBuilder.WriteString(`", `)
 	}
 
-	// Apply scope filter based on value.
-	if scope == noScope || scope == "" { // "none" or empty (unscoped)
+	if len(skippedImageNamePatterns) > 0 {
+		stringBuilder.WriteString("whose image is not one of \"")
+
+		for i, n := range skippedImageNamePatterns {
+			stringBuilder.WriteString(n)
+
+			if i < len(skippedImageNamePatterns)-1 {
+				stringBuilder.WriteString(`" or "`)
+			}
+		}
+
+		stringBuilder.WriteString(`", `)
+	}
+
+	if enableLabel {
+		stringBuilder.WriteString("with label ")
+		stringBuilder.WriteString(enableLabelKey)
+		stringBuilder.WriteString(`, `)
+	}
+
+	if len(enabledLabelMap) > 0 {
+		stringBuilder.WriteString("with label ")
+
+		first := true
+		for key, value := range enabledLabelMap {
+			if !first {
+				stringBuilder.WriteString(" or ")
+			}
+
+			if value == "" {
+				stringBuilder.WriteString(key)
+			} else {
+				stringBuilder.WriteString(key)
+				stringBuilder.WriteString(`="`)
+				stringBuilder.WriteString(value)
+				stringBuilder.WriteString(`"`)
+			}
+
+			first = false
+		}
+
+		stringBuilder.WriteString(`, `)
+	}
+
+	if len(disabledLabelMap) > 0 {
+		stringBuilder.WriteString("without label ")
+
+		first := true
+		for key, value := range disabledLabelMap {
+			if !first {
+				stringBuilder.WriteString(" or ")
+			}
+
+			if value == "" {
+				stringBuilder.WriteString(key)
+			} else {
+				stringBuilder.WriteString(key)
+				stringBuilder.WriteString(`="`)
+				stringBuilder.WriteString(value)
+				stringBuilder.WriteString(`"`)
+			}
+
+			first = false
+		}
+
+		stringBuilder.WriteString(`, `)
+	}
+
+	if scope == noScope || scope == "" {
 		filter = FilterByScope(noScope, filter)
 
 		stringBuilder.WriteString(`without a scope`)
@@ -372,8 +811,9 @@ func BuildFilter(
 		stringBuilder.WriteString(scope)
 	}
 
-	// Exclude explicitly disabled containers.
-	filter = FilterByDisabledLabel(filter)
+	// Exclude old Watchtower containers (predecessors from self-update).
+	// Applied last so it wraps the entire chain and short-circuits first.
+	filter = ExcludeOldWatchtowerFilterChain(filter)
 
 	// Build filter description.
 	filterDesc := "Checking all containers (except explicitly disabled with label)"
@@ -385,5 +825,5 @@ func BuildFilter(
 
 	clog.WithField("filter_desc", filterDesc).Debug("Filter built")
 
-	return filter, filterDesc
+	return filter, filterDesc, nil
 }

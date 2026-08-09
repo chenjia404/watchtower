@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -15,6 +16,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+//nolint:godox
+// TODO: Remove and/or update unit testing of deprecated configuration options just before v2 Release.
 
 var errSetFailed = errors.New("set failed")
 
@@ -28,6 +32,119 @@ func newTestCommand() *cobra.Command {
 	RegisterNotificationFlags(cmd)
 
 	return cmd
+}
+
+// parseWithEnv parses flags then applies environment values (mirrors production preRun).
+func parseWithEnv(t *testing.T, cmd *cobra.Command, args ...string) {
+	t.Helper()
+
+	require.NoError(t, cmd.ParseFlags(args))
+	require.NoError(t, ApplyEnvToFlags(cmd.PersistentFlags(), AllSpecs()))
+}
+
+// TestApplyEnvToFlags_EmptyBoolEnvDoesNotEnable verifies empty non-NO_COLOR bool
+// env vars are treated as unset, while NO_COLOR presence still enables no-color.
+func TestApplyEnvToFlags_EmptyBoolEnvDoesNotEnable(t *testing.T) {
+	t.Setenv("WATCHTOWER_CLEANUP", "")
+	t.Setenv("WATCHTOWER_DEBUG", "")
+	t.Setenv("NO_COLOR", "")
+
+	cmd := newTestCommand()
+	parseWithEnv(t, cmd)
+
+	flagSet := cmd.PersistentFlags()
+
+	cleanup, err := flagSet.GetBool("cleanup")
+	require.NoError(t, err)
+	assert.False(t, cleanup, "empty WATCHTOWER_CLEANUP must not enable cleanup")
+
+	debug, err := flagSet.GetBool("debug")
+	require.NoError(t, err)
+	assert.False(t, debug, "empty WATCHTOWER_DEBUG must not enable debug")
+
+	noColor, err := flagSet.GetBool("no-color")
+	require.NoError(t, err)
+	assert.True(t, noColor, "NO_COLOR presence (empty value) must enable no-color")
+}
+
+// TestApplyEnvToFlags_NOColorPresenceAlwaysEnables verifies NO_COLOR uses
+// presence semantics (including 0/false) and a static false default.
+func TestApplyEnvToFlags_NOColorPresenceAlwaysEnables(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "empty", value: ""},
+		{name: "zero", value: "0"},
+		{name: "false", value: "false"},
+		{name: "true", value: "true"},
+		{name: "one", value: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", tc.value)
+
+			cmd := newTestCommand()
+			// Static default must be false before env apply.
+			defaultNoColor, err := cmd.PersistentFlags().GetBool("no-color")
+			require.NoError(t, err)
+			assert.False(t, defaultNoColor)
+
+			parseWithEnv(t, cmd)
+
+			noColor, err := cmd.PersistentFlags().GetBool("no-color")
+			require.NoError(t, err)
+			assert.True(t, noColor, "NO_COLOR=%q must enable no-color", tc.value)
+		})
+	}
+}
+
+// TestApplyEnvToFlags_DoesNotMarkChanged ensures env bridging leaves pflag.Changed false
+// so API *Changed fields only reflect CLI overrides.
+func TestApplyEnvToFlags_DoesNotMarkChanged(t *testing.T) {
+	t.Setenv("WATCHTOWER_HTTP_API_HOST", "127.0.0.1")
+	t.Setenv("WATCHTOWER_HTTP_API_PORT", "9090")
+	t.Setenv("WATCHTOWER_HTTP_API_RATE_LIMIT", "30")
+	t.Setenv("WATCHTOWER_TIMEOUT", "45")
+	t.Setenv("WATCHTOWER_NOTIFICATION_URL", "slack://hook discord://token")
+
+	cmd := newTestCommand()
+	parseWithEnv(t, cmd)
+
+	flagSet := cmd.PersistentFlags()
+
+	assert.False(t, flagSet.Changed("http-api-host"), "env must not mark host Changed")
+	assert.False(t, flagSet.Changed("http-api-port"), "env must not mark port Changed")
+	assert.False(t, flagSet.Changed("http-api-rate-limit"), "env must not mark rate-limit Changed")
+	assert.False(t, flagSet.Changed("stop-timeout"), "env must not mark stop-timeout Changed")
+	assert.False(t, flagSet.Changed("notification-url"), "env must not mark slice Changed")
+
+	host, err := flagSet.GetString("http-api-host")
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1", host)
+
+	port, err := flagSet.GetString("http-api-port")
+	require.NoError(t, err)
+	assert.Equal(t, "9090", port)
+
+	timeout, err := flagSet.GetDuration("stop-timeout")
+	require.NoError(t, err)
+	assert.Equal(t, 45*time.Second, timeout, "bare-second WATCHTOWER_TIMEOUT must bridge to stop-timeout")
+
+	urls, err := flagSet.GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"slack://hook", "discord://token"}, urls,
+		"space-separated WATCHTOWER_NOTIFICATION_URL must bridge to two entries")
+
+	// CLI still marks Changed and wins over env.
+	t.Setenv("WATCHTOWER_HTTP_API_HOST", "10.0.0.1")
+
+	cmdCLI := newTestCommand()
+	parseWithEnv(t, cmdCLI, "--http-api-host", "192.168.1.1")
+
+	assert.True(t, cmdCLI.PersistentFlags().Changed("http-api-host"))
+	cliHost, err := cmdCLI.PersistentFlags().GetString("http-api-host")
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.1.1", cliHost)
 }
 
 // TestEnvConfig tests EnvConfig functionality with various configurations.
@@ -281,7 +398,15 @@ func TestEnvConfig(t *testing.T) {
 
 			if tc.expectError {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "failed to set flag value")
+				// Partial flag registration fails during BindAll (flag not registered)
+				// or when setting Docker env vars.
+				errMsg := err.Error()
+				assert.True(t,
+					strings.Contains(errMsg, "failed to set flag value") ||
+						strings.Contains(errMsg, "not registered") ||
+						strings.Contains(errMsg, "bind docker"),
+					"unexpected error: %s", errMsg,
+				)
 
 				return
 			}
@@ -333,19 +458,19 @@ func TestGetSecretsFromFiles(t *testing.T) {
 		{
 			name: "slice with file",
 			files: []struct{ path, content string }{
-				{"urls.txt", "\nentry2\n\nentry3"},
+				{"urls.txt", "\ndiscord://entry2\n\ntelegram://entry3"},
 			},
 			flagName: "notification-url",
-			expected: "[entry1,entry2,entry3]",
-			args:     []string{"--notification-url", "entry1", "--notification-url", "urls.txt"},
+			expected: "[discord://entry1,discord://entry2,telegram://entry3]",
+			args:     []string{"--notification-url", "discord://entry1", "--notification-url", "urls.txt"},
 		},
 		{
 			name: "empty lines",
 			files: []struct{ path, content string }{
-				{"urls.txt", "entry1\n\nentry2\n  \nentry3"},
+				{"urls.txt", "discord://entry1\n\ntelegram://entry2\n  \nslack://entry3"},
 			},
 			flagName: "notification-url",
-			expected: "[entry1,entry2,entry3]",
+			expected: "[discord://entry1,telegram://entry2,slack://entry3]",
 			args:     []string{"--notification-url", "urls.txt"},
 		},
 		{
@@ -363,10 +488,10 @@ func TestGetSecretsFromFiles(t *testing.T) {
 		{
 			name: "special chars",
 			files: []struct{ path, content string }{
-				{"urls.txt", "smtp://user:pass@host:port\nslack://token@channel\n!@#$%^&*()"},
+				{"urls.txt", "smtp://user:pass@host:25?key=value\nslack://token@channel"},
 			},
 			flagName: "notification-url",
-			expected: "[smtp://user:pass@host:port,slack://token@channel,!@#$%^&*()]",
+			expected: "[smtp://user:pass@host:25?key=value,slack://token@channel]",
 			args:     []string{"--notification-url", "urls.txt"},
 		},
 		{
@@ -380,17 +505,17 @@ func TestGetSecretsFromFiles(t *testing.T) {
 		{
 			name: "mixed values",
 			files: []struct{ path, content string }{
-				{"urls.txt", "fileentry1\nfileentry2"},
+				{"urls.txt", "discord://fileentry1\ntelegram://fileentry2"},
 			},
 			flagName: "notification-url",
-			expected: "[direct1,fileentry1,fileentry2,direct2]",
+			expected: "[discord://direct1,discord://fileentry1,telegram://fileentry2,discord://direct2]",
 			args: []string{
 				"--notification-url",
-				"direct1",
+				"discord://direct1",
 				"--notification-url",
 				"urls.txt",
 				"--notification-url",
-				"direct2",
+				"discord://direct2",
 			},
 		},
 	}
@@ -646,21 +771,10 @@ func TestSetupLogging(t *testing.T) {
 // TestFlagsArePresentInDocumentation verifies that all flags are documented.
 // It checks documentation files for flag and environment variable mentions.
 func TestFlagsArePresentInDocumentation(t *testing.T) {
-	// Legacy notifications ignored due to soft deprecation.
-	ignoredEnvs := map[string]string{
-		"WATCHTOWER_NOTIFICATION_SLACK_ICON_EMOJI": "legacy",
-		"WATCHTOWER_NOTIFICATION_SLACK_ICON_URL":   "legacy",
-		"DOCKER_CERT_PATH":                         "new feature",
-		"WATCHTOWER_NOTIFICATION_TEMPLATE_FILE":    "new feature",
-	}
+	ignoredEnvs := map[string]string{}
 
 	ignoredFlags := map[string]string{
-		"notification-gotify-url":       "legacy",
-		"notification-slack-icon-emoji": "legacy",
-		"notification-slack-icon-url":   "legacy",
-		"cert-path":                     "new feature",
-		"notification-template-file":    "new feature",
-		"self-update-orchestrator":      "internal",
+		"self-update-orchestrator": "internal",
 	}
 
 	cmd := new(cobra.Command)
@@ -673,10 +787,17 @@ func TestFlagsArePresentInDocumentation(t *testing.T) {
 	flags := cmd.PersistentFlags()
 
 	docFiles := []string{
-		"../../docs/configuration/arguments/index.md",
-		"../../docs/advanced-features/lifecycle-hooks/index.md",
-		"../../docs/notifications/overview/index.md",
-		"../../docs/notifications/templates/index.md",
+		"../../docs/configuration/container-selection/index.md",
+		"../../docs/configuration/docker-connection/index.md",
+		"../../docs/configuration/http-api/index.md",
+		"../../docs/configuration/image-cooldown/index.md",
+		"../../docs/configuration/introduction/index.md",
+		"../../docs/configuration/lifecycle-hooks/index.md",
+		"../../docs/configuration/logging-and-output/index.md",
+		"../../docs/configuration/notifications/index.md",
+		"../../docs/configuration/registry-and-authentication/index.md",
+		"../../docs/configuration/scheduling/index.md",
+		"../../docs/configuration/update-behavior/index.md",
 	}
 	allDocs := ""
 
@@ -716,23 +837,6 @@ func TestFlagsArePresentInDocumentation(t *testing.T) {
 			}
 		}
 	}
-}
-
-// TestReadFlags_FlagErrors tests error handling in ReadFlags with mocked logrus.Fatal.
-func TestReadFlags_FlagErrors(t *testing.T) {
-	originalExit := logrus.StandardLogger().ExitFunc
-
-	defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
-
-	logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
-
-	cmd := new(cobra.Command)
-
-	SetDefaults()
-	// Don't register flags to force retrieval errors
-	assert.PanicsWithValue(t, "FATAL", func() {
-		ReadFlags(cmd)
-	})
 }
 
 // TestSetEnvOptStr_Error tests error handling in setEnvOptStr.
@@ -777,20 +881,95 @@ func TestGetSecretFromFile_OpenError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to open secret file")
 }
 
-func TestReadFlags_Errors(t *testing.T) {
-	originalExit := logrus.StandardLogger().ExitFunc
-
-	defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
-
-	logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
-
+// TestGetSecretFromFile_SkipCommentsAndEmptyLines verifies that comment and empty
+// lines are skipped when reading notification URLs from a secret file.
+func TestGetSecretFromFile_SkipCommentsAndEmptyLines(t *testing.T) {
 	cmd := new(cobra.Command)
 
 	SetDefaults()
-	// Don’t register flags to force errors
-	assert.PanicsWithValue(t, "FATAL", func() {
-		ReadFlags(cmd)
-	})
+	RegisterNotificationFlags(cmd)
+
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString(
+		"# This is a comment\n" +
+			"discord://token@webhookid\n" +
+			"\n" +
+			"  # indented comment\n" +
+			"telegram://token@telegram?chats=@channel\n" +
+			"# another comment\n",
+	)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = cmd.ParseFlags([]string{"--notification-url", file.Name()})
+	require.NoError(t, err)
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.NoError(t, err)
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"discord://token@webhookid", "telegram://token@telegram?chats=@channel"}, urls)
+}
+
+// TestGetSecretFromFile_InvalidSecretURL verifies that non-URL lines and
+// parameterless non-logger/mock URLs in a secret file are rejected with
+// errInvalidSecretURL.
+func TestGetSecretFromFile_InvalidSecretURL(t *testing.T) {
+	cmd := new(cobra.Command)
+
+	SetDefaults()
+	RegisterNotificationFlags(cmd)
+
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString(
+		"discord://token@webhookid\n" +
+			"not-a-url\n" +
+			"://missing-scheme\n" +
+			"discord://\n",
+	)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = cmd.ParseFlags([]string{"--notification-url", file.Name()})
+	require.NoError(t, err)
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.Error(t, err)
+	require.ErrorIs(t, err, errInvalidSecretURL)
+}
+
+// TestGetSecretFromFile_ParameterlessLoggerAndMockURLs verifies that
+// parameterless logger:// and mock:// URLs are accepted in a secret file.
+func TestGetSecretFromFile_ParameterlessLoggerAndMockURLs(t *testing.T) {
+	cmd := new(cobra.Command)
+
+	SetDefaults()
+	RegisterNotificationFlags(cmd)
+
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString(
+		"logger://\n" +
+			"mock://\n" +
+			"discord://token@webhookid\n",
+	)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = cmd.ParseFlags([]string{"--notification-url", file.Name()})
+	require.NoError(t, err)
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.NoError(t, err)
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"logger://", "mock://", "discord://token@webhookid"}, urls)
 }
 
 // TestGetSecretFromFile_CloseError tests file closing errors (simplified without full mocking).
@@ -812,27 +991,183 @@ func TestGetSecretFromFile_CloseError(t *testing.T) {
 	// Full coverage requires mocking os.File.Close to fail
 }
 
-// TestGetSecretFromFile_SliceReplaceError tests slice replacement errors (simplified).
-func TestGetSecretFromFile_SliceReplaceError(t *testing.T) {
-	cmd := new(cobra.Command)
-
-	SetDefaults()
-	RegisterNotificationFlags(cmd)
-	// Use a real file to ensure slice processing
+// TestGetSecretFromFile_StringPathStillMarksChanged verifies that KindString
+// secret expansion still marks Changed=true via flags.Set.
+func TestGetSecretFromFile_StringPathStillMarksChanged(t *testing.T) {
+	cmd := newTestCommand()
 	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
 	require.NoError(t, err)
-	_, err = file.WriteString("entry1\nentry2")
+	_, err = file.WriteString("supersecretstring")
 	require.NoError(t, err)
-
-	fileName := file.Name()
 	require.NoError(t, file.Close())
 
-	err = cmd.ParseFlags([]string{"--notification-url", fileName})
+	err = cmd.ParseFlags([]string{"--notification-email-server-password", file.Name()})
 	require.NoError(t, err)
-	// Note: Without mocking SliceValue.Replace, this won't fail as intended
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-email-server-password")
+	require.NoError(t, err)
+
+	flag := cmd.PersistentFlags().Lookup("notification-email-server-password")
+	require.NotNil(t, flag)
+	assert.True(t, flag.Changed, "KindString secret expansion must mark Changed=true")
+	assert.Equal(t, "supersecretstring", flag.Value.String())
+}
+
+// TestGetSecretFromFile_SlicePath_MarksChangedAfterReplace verifies that
+// getSecretFromFile marks Changed=true after expanding a file path so the
+// pflag value is preferred over raw os.Getenv.
+func TestGetSecretFromFile_SlicePath_MarksChangedAfterReplace(t *testing.T) {
+	cmd := newTestCommand()
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString("gotify://gotify.example.com/token123")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = cmd.ParseFlags([]string{"--notification-url", file.Name()})
+	require.NoError(t, err)
+	parseWithEnv(t, cmd)
+
+	flag := cmd.PersistentFlags().Lookup("notification-url")
+	require.NotNil(t, flag)
+
 	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
-	require.NoError(t, err) // Adjust expectation since Replace doesn't fail without mock
-	// Full coverage of line 663 requires mocking pflag.SliceValue.Replace to fail
+	require.NoError(t, err)
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gotify://gotify.example.com/token123"}, urls)
+	assert.True(t, flag.Changed, "slice secret expansion must mark Changed=true")
+}
+
+// TestGetSecretFromFile_SlicePath_MultiLineFile verifies that a multi-line
+// docker secret file expands into multiple slice values with Changed=true.
+func TestGetSecretFromFile_SlicePath_MultiLineFile(t *testing.T) {
+	cmd := newTestCommand()
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString("gotify://host1/token1\ndiscord://host2/token2")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = cmd.ParseFlags([]string{"--notification-url", file.Name()})
+	require.NoError(t, err)
+	parseWithEnv(t, cmd)
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.NoError(t, err)
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gotify://host1/token1", "discord://host2/token2"}, urls)
+
+	flag := cmd.PersistentFlags().Lookup("notification-url")
+	assert.True(t, flag.Changed)
+}
+
+// TestGetSecretFromFile_SlicePath_LiteralURLsUnchanged verifies that literal
+// notification URLs survive getSecretFromFile without modification and that
+// Changed=true is set on the processed flag.
+func TestGetSecretFromFile_SlicePath_LiteralURLsUnchanged(t *testing.T) {
+	cmd := newTestCommand()
+
+	err := cmd.ParseFlags([]string{
+		"--notification-url", "gotify://gotify.example.com/token123",
+		"--notification-url", "discord://token@channel",
+	})
+	require.NoError(t, err)
+	parseWithEnv(t, cmd)
+
+	flag := cmd.PersistentFlags().Lookup("notification-url")
+	require.NotNil(t, flag)
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.NoError(t, err)
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gotify://gotify.example.com/token123", "discord://token@channel"}, urls)
+
+	// Changed is true after Replace regardless of whether expansion occurred; the
+	// processed value is explicit user config and downstream consumers must read it.
+	assert.True(t, flag.Changed)
+}
+
+// TestGetSecretsFromFile_PorcelainAppendPreservedWithSecret verifies that
+// porcelain mode appends logger:// before secret expansion and the merged
+// slice retains both values with Changed=true.
+func TestGetSecretsFromFile_PorcelainAppendPreservedWithSecret(t *testing.T) {
+	t.Setenv("WATCHTOWER_NOTIFICATION_URL", "/file/that/does/not/exist") // placeholder; real file used via flag
+
+	cmd := newTestCommand()
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString("gotify://host/token")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	err = cmd.ParseFlags([]string{
+		"--notification-url", file.Name(),
+		"--porcelain", "v1",
+	})
+	require.NoError(t, err)
+	ProcessFlagAliases(cmd.PersistentFlags())
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Contains(t, urls, "logger://", "porcelain value must survive secret expansion")
+
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.NoError(t, err)
+
+	urls, err = cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Contains(t, urls, "logger://")
+	assert.Contains(t, urls, "gotify://host/token")
+
+	flag := cmd.PersistentFlags().Lookup("notification-url")
+	assert.True(t, flag.Changed)
+}
+
+// TestApplyEnvToFlags_DoesNotReBrideExpandedSecret verifies that re-running
+// ApplyEnvToFlags does not overwrite an expanded secret with the raw file path.
+func TestApplyEnvToFlags_DoesNotReBrideExpandedSecret(t *testing.T) {
+	cmd := newTestCommand()
+	file, err := os.CreateTemp(t.TempDir(), "watchtower-")
+	require.NoError(t, err)
+	_, err = file.WriteString("gotify://host/token")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	// Step 1: env bridge sets pflag to the file path
+	t.Setenv("WATCHTOWER_NOTIFICATION_URL", file.Name())
+
+	err = cmd.ParseFlags([]string{})
+	require.NoError(t, err)
+	err = ApplyEnvToFlags(cmd.PersistentFlags(), AllSpecs())
+	require.NoError(t, err)
+
+	flag := cmd.PersistentFlags().Lookup("notification-url")
+	require.NotNil(t, flag)
+	assert.False(t, flag.Changed, "env bridge must leave Changed=false")
+
+	// Step 2: secret expansion replaces content and marks Changed=true
+	err = getSecretFromFile(cmd.PersistentFlags(), "notification-url")
+	require.NoError(t, err)
+
+	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gotify://host/token"}, urls)
+	assert.True(t, flag.Changed)
+
+	// Step 3: re-running ApplyEnvToFlags must not overwrite the expanded value
+	err = ApplyEnvToFlags(cmd.PersistentFlags(), AllSpecs())
+	require.NoError(t, err)
+
+	urls, err = cmd.PersistentFlags().GetStringArray("notification-url")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gotify://host/token"}, urls, "re-applying env must not clobber expanded secret")
+	assert.True(t, flag.Changed)
 }
 
 // TestProcessFlagAliases_InvalidPorcelain tests invalid porcelain version handling.
@@ -921,7 +1256,7 @@ func testGetSecretsFromFiles(t *testing.T, flagName, expected string, args ...st
 	SetDefaults()
 	RegisterSystemFlags(cmd)
 	RegisterNotificationFlags(cmd)
-	require.NoError(t, cmd.ParseFlags(args))
+	parseWithEnv(t, cmd, args...)
 	GetSecretsFromFiles(cmd)
 	flag := cmd.PersistentFlags().Lookup(flagName)
 	require.NotNil(t, flag)
@@ -978,9 +1313,7 @@ func TestUpdateOnStart(t *testing.T) {
 
 			SetDefaults()
 			RegisterSystemFlags(cmd)
-
-			err := cmd.ParseFlags(tc.flags)
-			require.NoError(t, err)
+			parseWithEnv(t, cmd, tc.flags...)
 
 			updateOnStart, err := cmd.PersistentFlags().GetBool("update-on-start")
 			require.NoError(t, err)
@@ -998,9 +1331,7 @@ func TestWatchtowerNotificationsEnvironmentVariable(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	notifications, err := cmd.PersistentFlags().GetStringSlice("notifications")
 	require.NoError(t, err)
@@ -1017,9 +1348,7 @@ func TestWatchtowerNotificationURLEnvironmentVariable(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 	require.NoError(t, err)
@@ -1040,9 +1369,7 @@ func TestNotificationEnvVarsDoNotAffectContainerFiltering(t *testing.T) {
 	SetDefaults()
 	RegisterSystemFlags(cmd)
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	disableContainers, err := cmd.PersistentFlags().GetStringSlice("disable-containers")
 	require.NoError(t, err)
@@ -1120,9 +1447,7 @@ func TestNotificationsConfigurationFromEnvVarsVsFlags(t *testing.T) {
 
 			SetDefaults()
 			RegisterNotificationFlags(cmd)
-
-			err := cmd.ParseFlags(tc.flagArgs)
-			require.NoError(t, err)
+			parseWithEnv(t, cmd, tc.flagArgs...)
 
 			notifications, err := cmd.PersistentFlags().GetStringSlice("notifications")
 			require.NoError(t, err)
@@ -1145,9 +1470,7 @@ func TestNotificationURLParsingWithMixedSeparators(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 	require.NoError(t, err)
@@ -1164,9 +1487,7 @@ func TestNotificationURLParsingWithInvalidValues(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 	require.NoError(t, err)
@@ -1183,9 +1504,7 @@ func TestNotificationURLParsingWithEmptyValues(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 	require.NoError(t, err)
@@ -1203,9 +1522,7 @@ func TestNotificationParsingEmptyEnvVar(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	notifications, err := cmd.PersistentFlags().GetStringSlice("notifications")
 	require.NoError(t, err)
@@ -1221,9 +1538,7 @@ func TestNotificationParsingWhitespaceOnly(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	notifications, err := cmd.PersistentFlags().GetStringSlice("notifications")
 	require.NoError(t, err)
@@ -1242,9 +1557,7 @@ func TestNotificationParsingSpecialCharsInURLs(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 	require.NoError(t, err)
@@ -1265,9 +1578,7 @@ func TestNotificationParsingLongURLs(t *testing.T) {
 
 	SetDefaults()
 	RegisterNotificationFlags(cmd)
-
-	err := cmd.ParseFlags([]string{})
-	require.NoError(t, err)
+	parseWithEnv(t, cmd)
 
 	urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 	require.NoError(t, err)
@@ -1367,282 +1678,26 @@ func TestRegexpSplittingLogic(t *testing.T) {
 	}
 }
 
-// TestNotificationURLParsingComprehensive tests comprehensive URL parsing for various Shoutrrr services
-// with different separator combinations and edge cases.
-func TestNotificationURLParsingComprehensive(t *testing.T) {
+// TestNotificationURLEnvToFlagWiring verifies WATCHTOWER_NOTIFICATION_URL reaches
+// notification-url via ApplyEnvToFlags and ListNotificationURLs parsing for
+// representative comma-in-query and mixed-separator cases.
+//
+// Full SplitNotificationValues coverage lives in internal/flags/utils.
+func TestNotificationURLEnvToFlagWiring(t *testing.T) {
 	testCases := []struct {
 		name     string
 		envValue string
 		expected []string
 	}{
-		// SMTP service tests
 		{
-			name:     "SMTP single URL",
-			envValue: "smtp://user:pass@host:port/?from=test@example.com&to=recipient@example.com",
-			expected: []string{
-				"smtp://user:pass@host:port/?from=test@example.com&to=recipient@example.com",
-			},
-		},
-		{
-			name:     "SMTP multiple recipients with comma in query",
-			envValue: "smtp://user:pass@host:port/?from=test@example.com&to=recipient1@example.com,recipient2@example.com",
-			expected: []string{
-				"smtp://user:pass@host:port/?from=test@example.com&to=recipient1@example.com,recipient2@example.com",
-			},
-		},
-		{
-			name:     "SMTP space separator",
-			envValue: "smtp://user:pass@host1:port smtp://user:pass@host2:port",
-			expected: []string{"smtp://user:pass@host1:port", "smtp://user:pass@host2:port"},
-		},
-		{
-			name:     "SMTP comma-space separator",
-			envValue: "smtp://user:pass@host1:port, smtp://user:pass@host2:port",
-			expected: []string{"smtp://user:pass@host1:port", "smtp://user:pass@host2:port"},
-		},
-
-		// Slack service tests
-		{
-			name:     "Slack single URL",
-			envValue: "slack://botname@token-a/token-b/token-c",
-			expected: []string{"slack://botname@token-a/token-b/token-c"},
-		},
-		{
-			name:     "Slack space separator",
-			envValue: "slack://token1@channel1 slack://token2@channel2",
-			expected: []string{"slack://token1@channel1", "slack://token2@channel2"},
-		},
-		{
-			name:     "Slack comma-space separator",
-			envValue: "slack://token1@channel1, slack://token2@channel2",
-			expected: []string{"slack://token1@channel1", "slack://token2@channel2"},
-		},
-
-		// Gotify service tests
-		{
-			name:     "Gotify single URL",
-			envValue: "gotify://gotify-host/token",
-			expected: []string{"gotify://gotify-host/token"},
-		},
-		{
-			name:     "Gotify space separator",
-			envValue: "gotify://host1/token1 gotify://host2/token2",
-			expected: []string{"gotify://host1/token1", "gotify://host2/token2"},
-		},
-		{
-			name:     "Gotify comma-space separator",
-			envValue: "gotify://host1/token1, gotify://host2/token2",
-			expected: []string{"gotify://host1/token1", "gotify://host2/token2"},
-		},
-
-		// Discord service tests
-		{
-			name:     "Discord single URL",
-			envValue: "discord://token@123456789",
-			expected: []string{"discord://token@123456789"},
-		},
-		{
-			name:     "Discord space separator",
-			envValue: "discord://token1@123 discord://token2@456",
-			expected: []string{"discord://token1@123", "discord://token2@456"},
-		},
-		{
-			name:     "Discord comma-space separator",
-			envValue: "discord://token1@123, discord://token2@456",
-			expected: []string{"discord://token1@123", "discord://token2@456"},
-		},
-
-		// Teams service tests
-		{
-			name:     "Teams single URL",
-			envValue: "teams://group@tenant/altId/groupOwner?host=organization.webhook.office.com",
-			expected: []string{
-				"teams://group@tenant/altId/groupOwner?host=organization.webhook.office.com",
-			},
-		},
-		{
-			name:     "Teams space separator",
-			envValue: "teams://group1@tenant1/id1/owner1?host=host1 teams://group2@tenant2/id2/owner2?host=host2",
-			expected: []string{
-				"teams://group1@tenant1/id1/owner1?host=host1",
-				"teams://group2@tenant2/id2/owner2?host=host2",
-			},
-		},
-		{
-			name:     "Teams comma-space separator",
-			envValue: "teams://group1@tenant1/id1/owner1?host=host1, teams://group2@tenant2/id2/owner2?host=host2",
-			expected: []string{
-				"teams://group1@tenant1/id1/owner1?host=host1",
-				"teams://group2@tenant2/id2/owner2?host=host2",
-			},
-		},
-
-		// Telegram service tests
-		{
-			name:     "Telegram single URL",
-			envValue: "telegram://1234567890:AAEJ_AAAAABBBBBccccccccdddddddd@telegram/?channels=123456789&parseMode=html",
-			expected: []string{
-				"telegram://1234567890:AAEJ_AAAAABBBBBccccccccdddddddd@telegram/?channels=123456789&parseMode=html",
-			},
-		},
-		{
-			name:     "Telegram space separator",
-			envValue: "telegram://1234567890:AAEJ_AAAAABBBBBccccccccdddddddd@telegram/?channels=123456789&parseMode=html telegram://another@telegram",
-			expected: []string{
-				"telegram://1234567890:AAEJ_AAAAABBBBBccccccccdddddddd@telegram/?channels=123456789&parseMode=html",
-				"telegram://another@telegram",
-			},
-		},
-		{
-			name:     "Telegram comma-space separator",
-			envValue: "telegram://1234567890:AAEJ_AAAAABBBBBccccccccdddddddd@telegram/?channels=123456789&parseMode=html, telegram://another@telegram",
-			expected: []string{
-				"telegram://1234567890:AAEJ_AAAAABBBBBccccccccdddddddd@telegram/?channels=123456789&parseMode=html",
-				"telegram://another@telegram",
-			},
-		},
-
-		// Generic webhook tests
-		{
-			name:     "Generic webhook single URL",
-			envValue: "generic+https://webhook.example.com/hook?token=abc123",
-			expected: []string{"generic+https://webhook.example.com/hook?token=abc123"},
-		},
-		{
-			name:     "Generic webhook space separator",
-			envValue: "generic+https://hook1.example.com generic+https://hook2.example.com",
-			expected: []string{
-				"generic+https://hook1.example.com",
-				"generic+https://hook2.example.com",
-			},
-		},
-		{
-			name:     "Generic webhook comma-space separator",
-			envValue: "generic+https://hook1.example.com, generic+https://hook2.example.com",
-			expected: []string{
-				"generic+https://hook1.example.com",
-				"generic+https://hook2.example.com",
-			},
-		},
-
-		// Edge cases
-		{
-			name:     "URL with comma in query parameter",
-			envValue: "https://api.example.com/webhook?param=value,with,commas https://api2.example.com/webhook",
-			expected: []string{
-				"https://api.example.com/webhook?param=value,with,commas",
-				"https://api2.example.com/webhook",
-			},
-		},
-		{
-			name:     "Multiple URLs with mixed separators",
-			envValue: "smtp://test1 smtp://test2 slack://test3 slack://test4 gotify://test5",
-			expected: []string{
-				"smtp://test1",
-				"smtp://test2",
-				"slack://test3",
-				"slack://test4",
-				"gotify://test5",
-			},
-		},
-		{
-			name:     "Empty values filtered out",
-			envValue: "smtp://test1 smtp://test2 slack://test3",
-			expected: []string{"smtp://test1", "smtp://test2", "slack://test3"},
-		},
-		{
-			name:     "Malformed URL handling",
-			envValue: "not-a-url smtp://valid@example.com invalid://missing-parts",
-			expected: []string{"not-a-url", "smtp://valid@example.com", "invalid://missing-parts"},
-		},
-		{
-			name:     "URLs with special characters",
-			envValue: "smtp://user%40domain:pass%40word@host:587 slack://token@channel",
-			expected: []string{
-				"smtp://user%40domain:pass%40word@host:587",
-				"slack://token@channel",
-			},
-		},
-		{
-			name: "Very long URL",
-			envValue: "https://very-long-domain-name-with-many-subdomains.example.com/path/to/webhook?param1=" + strings.Repeat(
-				"a",
-				1000,
-			),
-			expected: []string{
-				"https://very-long-domain-name-with-many-subdomains.example.com/path/to/webhook?param1=" + strings.Repeat(
-					"a",
-					1000,
-				),
-			},
-		},
-		// Test cases from issues and bug reports
-		{
-			name:     "URL with comma in query parameter should not be split",
+			name:     "comma in query must not split URL",
 			envValue: "smtp://user:pass@host:port/?to=recipient1@example.com,recipient2@example.com",
 			expected: []string{
 				"smtp://user:pass@host:port/?to=recipient1@example.com,recipient2@example.com",
 			},
 		},
 		{
-			name:     "Multiple URLs with comma in second URL query",
-			envValue: "smtp://test1 smtp://test2?param=value,with,commas",
-			expected: []string{"smtp://test1", "smtp://test2?param=value,with,commas"},
-		},
-		{
-			name:     "Complex URL with commas in path and query",
-			envValue: "https://api.example.com/webhook?param=value,with,commas https://api2.example.com/webhook",
-			expected: []string{
-				"https://api.example.com/webhook?param=value,with,commas",
-				"https://api2.example.com/webhook",
-			},
-		},
-		{
-			name:     "Teams URL with comma in tenant ID",
-			envValue: "teams://group@tenant,id.with,commas/altId/groupOwner?host=organization.webhook.office.com",
-			expected: []string{
-				"teams://group@tenant,id.with,commas/altId/groupOwner?host=organization.webhook.office.com",
-			},
-		},
-
-		// Additional edge cases
-		{
-			name:     "URL with multiple commas in query parameters",
-			envValue: "smtp://user:pass@host:port/?to=recipient1@example.com,recipient2@example.com,recipient3@example.com",
-			expected: []string{
-				"smtp://user:pass@host:port/?to=recipient1@example.com,recipient2@example.com,recipient3@example.com",
-			},
-		},
-		{
-			name:     "URL with encoded commas",
-			envValue: "smtp://user:pass@host:port/?to=recipient1%2Crecipient2%2Crecipient3@example.com",
-			expected: []string{
-				"smtp://user:pass@host:port/?to=recipient1%2Crecipient2%2Crecipient3@example.com",
-			},
-		},
-		{
-			name:     "IPv6 address in URL",
-			envValue: "smtp://[::1]:587/?from=test@example.com",
-			expected: []string{
-				"smtp://[::1]:587/?from=test@example.com",
-			},
-		},
-		{
-			name:     "Complex authentication with encoded characters",
-			envValue: "smtp://user%40domain:pass%40word@host:587",
-			expected: []string{
-				"smtp://user%40domain:pass%40word@host:587",
-			},
-		},
-		{
-			name:     "URL with special characters in query",
-			envValue: "generic+https://api.example.com/webhook?param=value&special=!@#$%^&*()",
-			expected: []string{
-				"generic+https://api.example.com/webhook?param=value&special=!@#$%^&*()",
-			},
-		},
-		{
-			name:     "Multiple URLs with commas in different positions",
+			name:     "space separator with comma in second URL query",
 			envValue: "smtp://test1 smtp://test2?param=value,with,commas gotify://host/token",
 			expected: []string{
 				"smtp://test1",
@@ -1651,49 +1706,7 @@ func TestNotificationURLParsingComprehensive(t *testing.T) {
 			},
 		},
 		{
-			name:     "Multiple IPv6 URLs",
-			envValue: "smtp://[::1]:587 smtp://[2001:db8::1]:587",
-			expected: []string{
-				"smtp://[::1]:587",
-				"smtp://[2001:db8::1]:587",
-			},
-		},
-		{
-			name:     "URL with encoded special characters in path",
-			envValue: "slack://token@channel?text=Hello%20World%21",
-			expected: []string{
-				"slack://token@channel?text=Hello%20World%21",
-			},
-		},
-		{
-			name:     "Teams URL with complex tenant and commas",
-			envValue: "teams://group@tenant.with.dots.and,commas,more/altId/groupOwner?host=organization.webhook.office.com",
-			expected: []string{
-				"teams://group@tenant.with.dots.and,commas,more/altId/groupOwner?host=organization.webhook.office.com",
-			},
-		},
-		{
-			name: "Very long URL with multiple commas",
-			envValue: "https://very-long-domain-name-with-many-subdomains.example.com/path/to/webhook?param1=" + strings.Repeat(
-				"a,b,c,",
-				50,
-			) + "end",
-			expected: []string{
-				"https://very-long-domain-name-with-many-subdomains.example.com/path/to/webhook?param1=" + strings.Repeat(
-					"a,b,c,",
-					50,
-				) + "end",
-			},
-		},
-		{
-			name:     "URL with authentication and IPv6",
-			envValue: "smtp://user:pass@[2001:db8::1]:587/?from=test@example.com",
-			expected: []string{
-				"smtp://user:pass@[2001:db8::1]:587/?from=test@example.com",
-			},
-		},
-		{
-			name:     "Mixed separators with complex URLs",
+			name:     "mixed separators with complex URLs",
 			envValue: "smtp://test1, smtp://test2?param=value,with,commas gotify://host/token slack://token@channel",
 			expected: []string{
 				"smtp://test1",
@@ -1701,6 +1714,18 @@ func TestNotificationURLParsingComprehensive(t *testing.T) {
 				"gotify://host/token",
 				"slack://token@channel",
 			},
+		},
+		{
+			name:     "teams tenant commas preserved",
+			envValue: "teams://group@tenant,id.with,commas/altId/groupOwner?host=organization.webhook.office.com",
+			expected: []string{
+				"teams://group@tenant,id.with,commas/altId/groupOwner?host=organization.webhook.office.com",
+			},
+		},
+		{
+			name:     "comma-space separator between full URLs",
+			envValue: "slack://token1@channel1, slack://token2@channel2",
+			expected: []string{"slack://token1@channel1", "slack://token2@channel2"},
 		},
 	}
 
@@ -1712,14 +1737,69 @@ func TestNotificationURLParsingComprehensive(t *testing.T) {
 
 			SetDefaults()
 			RegisterNotificationFlags(cmd)
-
-			err := cmd.ParseFlags([]string{})
-			require.NoError(t, err)
+			parseWithEnv(t, cmd)
 
 			urls, err := cmd.PersistentFlags().GetStringArray("notification-url")
 			require.NoError(t, err)
-
 			assert.Equal(t, tc.expected, urls)
+		})
+	}
+}
+
+// TestIsPureNumeric verifies isPureNumeric behavior with table-driven cases.
+func TestIsPureNumeric(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		// Valid cases
+		{name: "zero", input: "0", want: true},
+		{name: "positive integer", input: "42", want: true},
+		{name: "large integer (legacy common case)", input: "300", want: true},
+		{name: "simple float", input: "1.5", want: true},
+		{name: "leading dot", input: ".5", want: true},
+		{name: "trailing dot", input: "1.", want: true},
+		{name: "negative integer", input: "-10", want: true},
+		{name: "explicit positive", input: "+3", want: true},
+		{name: "negative float", input: "-1.5", want: true},
+		{name: "positive leading dot", input: "+.5", want: true},
+		{name: "negative leading dot", input: "-.5", want: true},
+
+		// Invalid: no digits
+		{name: "empty string", input: "", want: false},
+		{name: "just decimal point", input: ".", want: false},
+		{name: "just plus sign", input: "+", want: false},
+		{name: "just minus sign", input: "-", want: false},
+		{name: "plus and dot only", input: "+.", want: false},
+		{name: "minus and dot only", input: "-.", want: false},
+
+		// Invalid: multiple dots
+		{name: "multiple dots", input: "1.2.3", want: false},
+		{name: "double dot", input: "1..2", want: false},
+		{name: "three dots", input: "1.2.3.4", want: false},
+
+		// Invalid: misplaced or multiple signs
+		{name: "minus after digit", input: "1-2", want: false},
+		{name: "plus at end", input: "12+", want: false},
+		{name: "plus in middle", input: "1+2", want: false},
+		{name: "trailing minus", input: "5-", want: false},
+		{name: "multiple signs at start", input: "+-1", want: false},
+		{name: "mixed signs", input: "-+5", want: false},
+
+		// Invalid: other characters
+		{name: "contains letter", input: "1a", want: false},
+		{name: "scientific notation", input: "1e3", want: false},
+		{name: "thousands separator", input: "1,000", want: false},
+		{name: "duration unit seconds", input: "30s", want: false},
+		{name: "duration unit minutes", input: "2m", want: false},
+		{name: "embedded space", input: "1 2", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isPureNumeric(tc.input)
+			assert.Equal(t, tc.want, got, "isPureNumeric(%q)", tc.input)
 		})
 	}
 }

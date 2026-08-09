@@ -42,7 +42,7 @@ const shutdownGracePeriod = 50 * time.Millisecond
 
 // LocalLog is a logrus logger that does not send entries as notifications.
 //
-// It’s used for internal logging to avoid notification loops.
+// It's used for internal logging to avoid notification loops.
 var LocalLog = logrus.WithField("notify", "no")
 
 // router defines the interface for sending Shoutrrr notifications.
@@ -125,7 +125,7 @@ func (n *shoutrrrTypeNotifier) AddLogHook() {
 	n.hookOnce.Do(func() {
 		n.receiving.Store(true)
 		logrus.AddHook(n)
-		LocalLog.WithField("urls", n.Urls).
+		LocalLog.WithField("urls", redactServiceURLs(n.Urls)).
 			Debug("Added Shoutrrr notifier as logrus hook, starting notification goroutine")
 
 		// Send using a separate goroutine to avoid blocking the main process.
@@ -170,8 +170,8 @@ func createNotifier(
 		logger = log.New(logrus.StandardLogger().WriterLevel(logrus.TraceLevel), "Shoutrrr: ", 0)
 	}
 
-	// Initialize sender.
-	router, err := shoutrrr.NewSender(logger, urls...)
+	// Initialize sender with default options.
+	router, err := shoutrrr.NewSenderWithOptions(logger, shoutrrrTypes.SenderOptions{}, urls...)
 	if err != nil {
 		LocalLog.WithError(err).Fatal("Failed to initialize Shoutrrr notifications")
 	}
@@ -183,7 +183,7 @@ func createNotifier(
 	}
 
 	// Create context for cancellation
-	//nolint:gosec // G118: cancel is stored in struct and called in Close() method
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &shoutrrrTypeNotifier{
@@ -359,11 +359,7 @@ func sendNotifications(notifier *shoutrrrTypeNotifier) {
 				"notification_type": shoutrrrType,
 			}).Trace("Calling Router.Send with message")
 
-			if !notifier.sendWithCancellation(msg) {
-				LocalLog.Debug("Context canceled during message send")
-
-				return
-			}
+			notifier.send(msg)
 		case <-notifier.stop:
 			// Shutdown mode: drain all remaining messages from the channel
 			LocalLog.Debug("Shutdown signal received, draining remaining messages without delay")
@@ -398,11 +394,7 @@ func sendNotifications(notifier *shoutrrrTypeNotifier) {
 						"notification_type": shoutrrrType,
 					}).Trace("Calling Router.Send with message during shutdown")
 
-					if !notifier.sendWithCancellation(msg) {
-						LocalLog.Debug("Context canceled during shutdown message send")
-
-						return
-					}
+					notifier.send(msg)
 				default:
 					// Channel is empty, all messages drained
 					LocalLog.Debug("All remaining messages drained during shutdown")
@@ -538,6 +530,9 @@ func (n *shoutrrrTypeNotifier) SendFilteredEntries(entries []*logrus.Entry, repo
 // share the same image. This applies to grouped (non-split) notifications only.
 //
 // For "Found new image" entries, deduplication is based on (message, image name, new image ID).
+// When new_id is a short registry digest (check path) rather than a local image ID,
+// entries still dedupe by image + new_id so multiple containers on the same image
+// produce one notification in grouped mode.
 // For "Removing image" entries, deduplication is based on (message, image ID).
 // All other entries are kept as-is.
 //
@@ -572,9 +567,9 @@ func deduplicateEntries(entries []*logrus.Entry) []*logrus.Entry {
 			// Deduplicate by image ID.
 			imageID, _ := entry.Data["image_id"].(string)
 			key = dedupKey{message: entry.Message, data: imageID}
-		case "Image is within cooldown period - deferring update",
-			"Image age exceeds cooldown - proceeding with update",
-			"Image creation time unavailable - deferring update":
+		case "Image is within cooldown period - not eligible for update",
+			"Image age exceeds cooldown - eligible for update",
+			"Image creation time unavailable - update check unavailable":
 			// Deduplicate by image name — multiple containers may share the same image.
 			image, _ := entry.Data["image"].(string)
 			key = dedupKey{message: entry.Message, data: image}
@@ -659,16 +654,12 @@ func (n *shoutrrrTypeNotifier) Fire(entry *logrus.Entry) error {
 	return nil
 }
 
-// sendWithCancellation sends a message with context cancellation support.
+// send sends a message via the notification router.
 //
 // Parameters:
 //   - msg: Message to send.
-//
-// Returns:
-//   - bool: True if sent successfully, false if canceled.
-func (n *shoutrrrTypeNotifier) sendWithCancellation(msg string) bool {
+func (n *shoutrrrTypeNotifier) send(msg string) {
 	sendCh := make(chan []error, 1)
-
 	go func() {
 		sendCh <- n.Router.Send(msg, n.params)
 	}()
@@ -676,10 +667,8 @@ func (n *shoutrrrTypeNotifier) sendWithCancellation(msg string) bool {
 	select {
 	case errs := <-sendCh:
 		processSendErrors(n, errs)
-
-		return true
 	case <-n.ctx.Done():
-		return false
+		LocalLog.WithError(n.ctx.Err()).Debug("Notification send canceled")
 	}
 }
 
@@ -753,14 +742,11 @@ func (n *shoutrrrTypeNotifier) sendEntries(entries []*logrus.Entry, report types
 		Debug("Preparing to send entries")
 
 	if msg == "" {
-		// Log in go func in case we entered from Fire to avoid stalling
-		go func() { // Avoid blocking if called from Fire.
-			if err != nil {
-				LocalLog.WithError(err).Fatal("Notification template error")
-			} else if len(n.Urls) > 1 {
-				LocalLog.Info("Skipping notification due to empty message")
-			}
-		}()
+		if err != nil {
+			LocalLog.WithError(err).Error("Notification template error")
+		} else if len(n.Urls) > 1 {
+			LocalLog.Info("Skipping notification due to empty message")
+		}
 
 		LocalLog.Debug("Message empty, skipping send")
 

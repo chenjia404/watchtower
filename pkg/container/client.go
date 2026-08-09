@@ -17,8 +17,8 @@ import (
 	"github.com/spf13/afero"
 
 	cerrdefs "github.com/containerd/errdefs"
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerClient "github.com/docker/docker/client"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/internal/flags"
 	"github.com/nicholas-fedor/watchtower/pkg/registry"
@@ -133,6 +133,18 @@ type Client interface {
 	//   - error: Non-nil if stop/removal fails, nil on success.
 	StopAndRemoveContainer(ctx context.Context, container types.Container, timeout time.Duration) error
 
+	// CreateContainer creates a new container based on the provided
+	// container's configuration, but does not start it.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control.
+	//   - container: Source container to replicate.
+	//
+	// Returns:
+	//   - types.ContainerID: ID of the new container.
+	//   - error: Non-nil if creation fails, nil on success.
+	CreateContainer(ctx context.Context, container types.Container) (types.ContainerID, error)
+
 	// StartContainer creates and starts a new container based on the provided
 	// container's configuration.
 	//
@@ -167,12 +179,33 @@ type Client interface {
 	// Returns:
 	//   - bool: True if image is stale, false otherwise.
 	//   - types.ImageID: Latest image ID.
+	//   - string: Latest registry manifest digest (empty if unavailable).
 	//   - error: Non-nil if check fails, nil on success.
 	IsContainerStale(
 		ctx context.Context,
 		container types.Container,
 		params types.UpdateParams,
-	) (bool, types.ImageID, error)
+	) (bool, types.ImageID, string, error)
+
+	// CheckContainerUpdate reports whether a newer image is available without
+	// pulling image layers. When NoPull is active it inspects the local cache
+	// only; otherwise it compares registry digests. Cooldown is not applied.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control.
+	//   - container: Container to check.
+	//   - params: Update parameters (NoPull, LabelPrecedence).
+	//
+	// Returns:
+	//   - bool: True if an update is available, false otherwise.
+	//   - types.ImageID: Latest local image ID when known (empty for remote-only mismatch).
+	//   - string: Latest registry manifest digest (empty if unavailable).
+	//   - error: Non-nil if the check fails, nil on success.
+	CheckContainerUpdate(
+		ctx context.Context,
+		container types.Container,
+		params types.UpdateParams,
+	) (bool, types.ImageID, string, error)
 
 	// ExecuteCommand runs a command inside a container and returns whether
 	// to skip updates based on the result.
@@ -235,6 +268,15 @@ type Client interface {
 	//   - error: Non-nil if retrieval fails, nil on success.
 	GetInfo(ctx context.Context) (map[string]any, error)
 
+	// Ping verifies connectivity to the Docker daemon.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control.
+	//
+	// Returns:
+	//   - error: Non-nil if the daemon is unreachable, nil on success.
+	Ping(ctx context.Context) error
+
 	// WaitForContainerHealthy waits for a container to become healthy or times out.
 	//
 	// The timeout parameter controls the maximum wait duration:
@@ -263,6 +305,18 @@ type Client interface {
 	// Returns:
 	//   - error: Non-nil if update fails, nil on success.
 	UpdateContainer(ctx context.Context, container types.Container, config dockerContainer.UpdateConfig) error
+
+	// SetNoRestartPolicy updates the restart policy of a container to "no" to prevent
+	// restart loops after fatal startup failures.
+	//
+	// It is a convenience wrapper around UpdateContainer that constructs the restart
+	// policy configuration and logs a warning if the update fails, ensuring the
+	// failure does not block the exit path.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control.
+	//   - container: Container whose restart policy should be updated.
+	SetNoRestartPolicy(ctx context.Context, container types.Container)
 
 	// RemoveContainer removes a container from the Docker host.
 	//
@@ -323,9 +377,7 @@ type client struct {
 	isPodman bool
 }
 
-// ClientOptions configures the behavior of the dockerClient wrapper around the Docker API.
-//
-// It controls container management and warning behaviors.
+// ClientOptions configures container management behavior for the Docker client.
 type ClientOptions struct {
 	RemoveVolumes           bool
 	IncludeStopped          bool
@@ -355,69 +407,48 @@ func NewClient(opts ClientOptions) Client {
 	)
 	defer cancel()
 
-	// Initialize client with autonegotiation, ignoring DOCKER_API_VERSION initially.
-	cli, err := dockerClient.NewClientWithOpts(
-		dockerClient.FromEnv,
-		dockerClient.WithAPIVersionNegotiation(),
-	)
+	// Initialize client from environment. FromEnv reads DOCKER_HOST, DOCKER_TLS_VERIFY,
+	// DOCKER_CERT_PATH, and DOCKER_API_VERSION. When DOCKER_API_VERSION is set, the client
+	// uses that fixed version; otherwise, it defaults to the maximum supported version
+	// with automatic negotiation enabled.
+	cli, err := dockerClient.New(dockerClient.FromEnv)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to initialize Docker client")
 	}
-	// Set default filesystem if not provided
+
+	// Set default filesystem if not provided.
 	if opts.Fs == nil {
 		opts.Fs = afero.NewOsFs()
 	}
 
-	// Apply forced API version if set and valid.
-	if version := strings.Trim(os.Getenv("DOCKER_API_VERSION"), "\""); version != "" {
-		pingCli, err := dockerClient.NewClientWithOpts(
-			dockerClient.FromEnv, // Include env config for TLS, etc.
-			dockerClient.WithVersion(version),
-		)
-		if err != nil {
-			logrus.WithError(err).Fatal("Failed to create test client")
-		}
-
-		_, err = pingCli.Ping(ctx)
-		switch {
-		case err == nil:
-			// Ping succeeded: use the forced version client
-			cli = pingCli
-		case cerrdefs.IsNotFound(err):
-			logrus.WithFields(logrus.Fields{
-				"version":  version,
-				"error":    err,
-				"endpoint": "/_ping",
-			}).Warn("Invalid API version; falling back to autonegotiation")
-			cli.NegotiateAPIVersion(ctx)
-		default:
-			// Other ping failure: fall back to negotiation (don't override with broken client)
-			logrus.WithFields(logrus.Fields{
-				"version":  version,
-				"error":    err,
-				"endpoint": "/_ping",
-			}).Warn("Ping failed with non-version error; falling back to autonegotiation")
-			cli.NegotiateAPIVersion(ctx)
-		}
-	} else {
-		cli.NegotiateAPIVersion(ctx)
-	}
-
-	// Log client and server API versions.
-	selectedVersion := cli.ClientVersion()
-
-	serverVersion, err := cli.ServerVersion(ctx)
+	// Ping triggers API version negotiation (or validates DOCKER_API_VERSION if set).
+	result, err := cli.Ping(ctx, dockerClient.PingOptions{NegotiateAPIVersion: true})
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"error":    err,
-			"endpoint": "/version",
-		}).Error("Failed to retrieve server version")
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"client_version": selectedVersion,
-			"server_version": serverVersion.APIVersion,
-		}).Debug("Initialized Docker client")
+		// If DOCKER_API_VERSION was set to an incompatible value, the ping may fail
+		// with a not-found error. Recreate the client without a fixed version to allow
+		// negotiation to find a compatible API version.
+		if cerrdefs.IsNotFound(err) {
+			logrus.WithError(err).Warn("DOCKER_API_VERSION incompatible with server; falling back to autonegotiation")
+
+			cli, err = dockerClient.New(dockerClient.FromEnv, dockerClient.WithAPIVersion(""))
+			if err != nil {
+				logrus.WithError(err).Fatal("Failed to recreate Docker client")
+			}
+
+			result, err = cli.Ping(ctx, dockerClient.PingOptions{NegotiateAPIVersion: true})
+		}
+
+		if err != nil {
+			logrus.WithError(err).Warn("Ping failed during initialization; will negotiate on first API call")
+
+			result = dockerClient.PingResult{}
+		}
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"client_version": cli.ClientVersion(),
+		"server_version": result.APIVersion,
+	}).Debug("Initialized Docker client")
 
 	return &client{
 		api:           cli,
@@ -563,6 +594,7 @@ func (c *client) GetCurrentWatchtowerContainer(
 	containerInfo, err := c.api.ContainerInspect(
 		ctx,
 		string(containerID),
+		dockerClient.ContainerInspectOptions{},
 	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to inspect current Watchtower container")
@@ -572,7 +604,7 @@ func (c *client) GetCurrentWatchtowerContainer(
 
 	clog.Debug("Retrieved minimal container info")
 
-	return NewContainer(&containerInfo, nil), nil
+	return NewContainer(&containerInfo.Container, nil), nil
 }
 
 // StopContainer stops a specified container.
@@ -639,6 +671,59 @@ func (c *client) StopAndRemoveContainer(ctx context.Context, container types.Con
 	return nil
 }
 
+// CreateContainer creates a new container based on the provided
+// container's configuration, but does not start it.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control.
+//   - container: Source container to replicate.
+//
+// Returns:
+//   - types.ContainerID: ID of the new container.
+//   - error: Non-nil if creation fails, nil on success.
+func (c *client) CreateContainer(ctx context.Context, container types.Container) (types.ContainerID, error) {
+	fields := logrus.Fields{
+		"container": container.Name(),
+		"image":     container.ImageName(),
+	}
+	// Determine if the container runtime is Podman to handle runtime-specific differences.
+	//
+	//nolint:contextcheck // getRuntime uses context.Background() internally for cached detection
+	isPodman := c.getRuntime()
+
+	clientVersion := c.GetVersion()
+
+	logrus.WithFields(fields).WithField("client_version", clientVersion).
+		Debug("Obtaining source container network configuration")
+
+	// Get unified network config.
+	networkConfig := getNetworkConfig(container, clientVersion)
+
+	// Create new container with selected config.
+	newID, err := CreateTargetContainer(
+		ctx,
+		c.api,
+		container,
+		networkConfig,
+		clientVersion,
+		flags.DockerAPIMinVersion, // Docker API Version 1.24
+		c.DisableMemorySwappiness,
+		c.CPUCopyMode,
+		isPodman,
+	)
+	if err != nil {
+		logrus.WithFields(fields).WithError(err).Debug("Failed to create new container")
+
+		return "", err
+	}
+
+	logrus.WithFields(fields).
+		WithField("new_id", newID.ShortID()).
+		Debug("Created new container")
+
+	return newID, nil
+}
+
 // StartContainer creates and starts a new container based on an
 // existing container's configuration.
 //
@@ -654,6 +739,7 @@ func (c *client) StartContainer(ctx context.Context, container types.Container) 
 		"container": container.Name(),
 		"image":     container.ImageName(),
 	}
+
 	// Determine if the container runtime is Podman to handle runtime-specific differences.
 	//
 	//nolint:contextcheck // getRuntime uses context.Background() internally for cached detection
@@ -697,9 +783,9 @@ func (c *client) StartContainer(ctx context.Context, container types.Container) 
 //
 // Unlike StartContainer, this does not create a new container from a source
 // configuration. It directly starts an existing, already-created container
-// using the Docker API's ContainerStart method. This bypasses the reviveStopped
-// check that prevents StartContainer from starting new containers when the
-// source container is stopped.
+// using the Docker API's ContainerStart method. Callers are responsible for
+// checking whether the container should be started (e.g., the reviveStopped
+// and noRestart checks in restartStaleContainer).
 //
 // This method is used by the ephemeral orchestrator to start the new container
 // after the old one has been stopped during the self-update sequence.
@@ -718,10 +804,10 @@ func (c *client) StartContainerByID(
 
 	clog.Debug("Starting container by ID")
 
-	err := c.api.ContainerStart(
+	_, err := c.api.ContainerStart(
 		ctx,
 		string(containerID),
-		dockerContainer.StartOptions{},
+		dockerClient.ContainerStartOptions{},
 	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to start container by ID")
@@ -755,7 +841,10 @@ func (c *client) UpdateContainer(
 	_, err := c.api.ContainerUpdate(
 		ctx,
 		string(container.ID()),
-		config,
+		dockerClient.ContainerUpdateOptions{
+			Resources:     &config.Resources,
+			RestartPolicy: &config.RestartPolicy,
+		},
 	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to update container")
@@ -766,6 +855,39 @@ func (c *client) UpdateContainer(
 	clog.Debug("Container configuration updated")
 
 	return nil
+}
+
+// SetNoRestartPolicy updates the restart policy of a container to "no" to prevent
+// restart loops after fatal startup failures.
+//
+// It is a convenience wrapper around UpdateContainer that constructs the restart
+// policy configuration and logs a warning if the update fails, ensuring the
+// failure does not block the exit path.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control.
+//   - container: Container whose restart policy should be updated.
+func (c *client) SetNoRestartPolicy(ctx context.Context, container types.Container) {
+	if container == nil {
+		return
+	}
+
+	clog := logrus.WithField("container_id", container.ID())
+
+	clog.Debug("Setting restart policy to 'no'")
+
+	_, err := c.api.ContainerUpdate(
+		ctx,
+		string(container.ID()),
+		dockerClient.ContainerUpdateOptions{
+			RestartPolicy: &dockerContainer.RestartPolicy{
+				Name: "no",
+			},
+		},
+	)
+	if err != nil {
+		clog.WithError(err).Warn("Failed to set restart policy to 'no'")
+	}
 }
 
 // RemoveContainer removes a container from the Docker host.
@@ -784,10 +906,10 @@ func (c *client) RemoveContainer(ctx context.Context, container types.Container)
 
 	clog.Debug("Removing container")
 
-	err := c.api.ContainerRemove(
+	_, err := c.api.ContainerRemove(
 		ctx,
 		string(container.ID()),
-		dockerContainer.RemoveOptions{
+		dockerClient.ContainerRemoveOptions{
 			Force: true,
 		},
 	)
@@ -858,7 +980,7 @@ func (c *client) WarnOnHeadPullFailed(container types.Container) bool {
 	return registry.WarnOnAPIConsumption(container)
 }
 
-// IsContainerStale checks if a container’s image is outdated.
+// IsContainerStale checks if a container's image is outdated.
 //
 // Parameters:
 //   - container: Container to check.
@@ -872,11 +994,11 @@ func (c *client) IsContainerStale(
 	ctx context.Context,
 	container types.Container,
 	params types.UpdateParams,
-) (bool, types.ImageID, error) {
+) (bool, types.ImageID, string, error) {
 	// Use image client to perform staleness check.
 	imgClient := newImageClient(c.api)
 
-	stale, newestImage, err := imgClient.IsContainerStale(
+	stale, newestImage, latestDigest, err := imgClient.IsContainerStale(
 		ctx,
 		container,
 		params,
@@ -896,7 +1018,49 @@ func (c *client) IsContainerStale(
 		}).Debug("Checked container staleness")
 	}
 
-	return stale, newestImage, err
+	return stale, newestImage, latestDigest, err
+}
+
+// CheckContainerUpdate reports whether a newer image is available without pulling.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control.
+//   - container: Container to check.
+//   - params: Update parameters (NoPull, LabelPrecedence).
+//
+// Returns:
+//   - bool: True if an update is available, false otherwise.
+//   - types.ImageID: Latest local image ID when known.
+//   - string: Latest registry manifest digest (empty if unavailable).
+//   - error: Non-nil if the check fails, nil on success.
+func (c *client) CheckContainerUpdate(
+	ctx context.Context,
+	container types.Container,
+	params types.UpdateParams,
+) (bool, types.ImageID, string, error) {
+	imgClient := newImageClient(c.api)
+
+	available, newestImage, latestDigest, err := imgClient.CheckContainerUpdate(
+		ctx,
+		container,
+		params,
+	)
+	if err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"container": container.Name(),
+			"image":     container.ImageName(),
+		}).Debug("Failed to check container for updates")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"container":        container.Name(),
+			"image":            container.ImageName(),
+			"update_available": available,
+			"latest_image_id":  newestImage,
+			"latest_digest":    latestDigest,
+		}).Debug("Checked container for updates")
+	}
+
+	return available, newestImage, latestDigest, err
 }
 
 // ExecuteCommand runs a command inside a container and evaluates its result.
@@ -948,17 +1112,18 @@ func (c *client) ExecuteCommand(
 
 	// Set up exec configuration with command and metadata.
 	clog.WithField("command", command).Debug("Creating exec instance")
-	execConfig := dockerContainer.ExecOptions{
-		Tty:    true,
-		Detach: true,
-		Cmd:    []string{"sh", "-c", command},
-		Env:    []string{"WT_CONTAINER=" + metadataJSON},
-		User:   user,
+	execConfig := dockerClient.ExecCreateOptions{
+		TTY:          true,
+		Cmd:          []string{"sh", "-c", command},
+		Env:          []string{"WT_CONTAINER=" + metadataJSON},
+		User:         user,
+		AttachStdout: true,
+		AttachStderr: true,
 	}
 
 	// Create the exec instance using the parent context.
 	// Timeout management is handled by waitForExecOrTimeout.
-	exec, err := c.api.ContainerExecCreate(
+	exec, err := c.api.ExecCreate(
 		ctx,
 		string(container.ID()),
 		execConfig,
@@ -972,9 +1137,9 @@ func (c *client) ExecuteCommand(
 	// Start the exec instance.
 	clog.WithField("exec_id", exec.ID).Debug("Starting exec instance")
 
-	execStartCheck := dockerContainer.ExecStartOptions{Tty: true}
+	execStartCheck := dockerClient.ExecStartOptions{Detach: true, TTY: true}
 
-	err = c.api.ContainerExecStart(ctx, exec.ID, execStartCheck)
+	_, err = c.api.ExecStart(ctx, exec.ID, execStartCheck)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to start exec instance")
 
@@ -1086,12 +1251,32 @@ func (c *client) RemoveImageByID(
 	return nil
 }
 
-// GetVersion returns the client’s API version.
+// GetVersion returns the client's API version.
 //
 // Returns:
 //   - string: Docker API version (e.g., "1.44").
 func (c *client) GetVersion() string {
 	return strings.Trim(c.api.ClientVersion(), "\"")
+}
+
+// Ping verifies connectivity to the Docker daemon.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control.
+//
+// Returns:
+//   - error: Non-nil if the daemon is unreachable, nil on success.
+func (c *client) Ping(ctx context.Context) error {
+	_, err := c.api.Ping(
+		ctx,
+		// Version renegotiation is not necessary.
+		dockerClient.PingOptions{NegotiateAPIVersion: false},
+	)
+	if err != nil {
+		return fmt.Errorf("ping failed: %w", err)
+	}
+
+	return nil
 }
 
 // GetInfo returns system information from the Docker daemon.
@@ -1103,7 +1288,7 @@ func (c *client) GetVersion() string {
 //   - map[string]interface{}: System information.
 //   - error: Non-nil if retrieval fails, nil on success.
 func (c *client) GetInfo(ctx context.Context) (map[string]any, error) {
-	info, err := c.api.Info(ctx)
+	info, err := c.api.Info(ctx, dockerClient.InfoOptions{})
 	if err != nil {
 		logrus.WithError(err).Debug("Failed to get system info")
 
@@ -1112,11 +1297,11 @@ func (c *client) GetInfo(ctx context.Context) (map[string]any, error) {
 
 	// Convert to map for easier access
 	infoMap := map[string]any{
-		"Name":            info.Name,
-		"ServerVersion":   info.ServerVersion,
-		"OSType":          info.OSType,
-		"OperatingSystem": info.OperatingSystem,
-		"Driver":          info.Driver,
+		"Name":            info.Info.Name,
+		"ServerVersion":   info.Info.ServerVersion,
+		"OSType":          info.Info.OSType,
+		"OperatingSystem": info.Info.OperatingSystem,
+		"Driver":          info.Info.Driver,
 	}
 
 	return infoMap, nil
@@ -1178,6 +1363,7 @@ func (c *client) WaitForContainerHealthy(
 			inspect, err := c.api.ContainerInspect(
 				ctx,
 				string(containerID),
+				dockerClient.ContainerInspectOptions{},
 			)
 			if err != nil {
 				clog.WithError(err).Debug("Failed to inspect container for health check")
@@ -1186,13 +1372,13 @@ func (c *client) WaitForContainerHealthy(
 			}
 
 			// Check if health check is configured
-			if inspect.State == nil || inspect.State.Health == nil {
+			if inspect.Container.State == nil || inspect.Container.State.Health == nil {
 				clog.Debug("No health check configured for container, proceeding")
 
 				return nil
 			}
 
-			status := inspect.State.Health.Status
+			status := inspect.Container.State.Health.Status
 			clog.WithField("health_status", status).Debug("Checked container health status")
 
 			if status == "healthy" {
@@ -1426,10 +1612,10 @@ func (c *client) captureExecOutput(ctx context.Context, execID string) (string, 
 	// Attach to the exec instance for output.
 	clog.Debug("Attaching to exec instance")
 
-	response, err := c.api.ContainerExecAttach(
+	response, err := c.api.ExecAttach(
 		ctx,
 		execID,
-		dockerContainer.ExecStartOptions{Tty: true},
+		dockerClient.ExecAttachOptions{TTY: true},
 	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to attach to exec instance")
@@ -1511,7 +1697,7 @@ func (c *client) waitForExecOrTimeout(
 
 	// Poll exec status until completion.
 	for {
-		execInspect, err := c.api.ContainerExecInspect(execCtx, execID)
+		execInspect, err := c.api.ExecInspect(execCtx, execID, dockerClient.ExecInspectOptions{})
 		if err != nil {
 			clog.WithError(err).Debug("Failed to inspect exec instance")
 

@@ -13,9 +13,9 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/ghttp"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerFilters "github.com/docker/docker/api/types/filters"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
@@ -26,7 +26,7 @@ const (
 	assertionOffset      = 2 // Call stack offset for Gomega assertions in nested calls
 )
 
-// Returns the file contents or an error if the file isn’t found.
+// Returns the file contents or an error if the file isn't found.
 func getMockJSONFile(relPath string) ([]byte, error) {
 	absPath, _ := filepath.Abs(relPath)
 
@@ -50,7 +50,7 @@ func RespondWithJSONFile(
 	return handler
 }
 
-// Returns the handler and an error if the file can’t be read.
+// Returns the handler and an error if the file can't be read.
 func respondWithJSONFile(
 	relPath string,
 	statusCode int,
@@ -73,7 +73,7 @@ func GetContainerHandlers(containerRefs ...*ContainerRef) []http.HandlerFunc {
 		for _, ref := range containerRef.references {
 			handlers = append(handlers, getContainerFileHandler(ref))
 		}
-		// Append image handler for each container’s image
+		// Append image handler for each container's image
 		handlers = append(handlers, getImageHandler(containerRef.image.id,
 			RespondWithJSONFile(containerRef.image.getFileName(), http.StatusOK),
 		))
@@ -83,8 +83,8 @@ func GetContainerHandlers(containerRefs ...*ContainerRef) []http.HandlerFunc {
 }
 
 // Adds each status as a filter key for Docker API compatibility.
-func createFilterArgs(statuses []string) dockerFilters.Args {
-	args := dockerFilters.NewArgs()
+func createFilterArgs(statuses []string) dockerClient.Filters {
+	args := make(dockerClient.Filters)
 	for _, status := range statuses {
 		args.Add("status", status)
 	}
@@ -178,7 +178,7 @@ const (
 	NetSupplierContainerName = "/wt-contnet-producer-1"
 )
 
-// Fails the test if the file can’t be retrieved; returns a 404 handler if the container is missing.
+// Fails the test if the file can't be retrieved; returns a 404 handler if the container is missing.
 func getContainerFileHandler(container *ContainerRef) http.HandlerFunc {
 	if container.isMissing {
 		return containerNotFoundResponse(string(container.id))
@@ -227,7 +227,7 @@ func GetImageHandler(imageInfo *dockerImage.InspectResponse) http.HandlerFunc {
 // Filters containers by the given statuses and serves the filtered list.
 func ListContainersHandler(statuses ...string) http.HandlerFunc {
 	filterArgs := createFilterArgs(statuses)
-	bytes, err := filterArgs.MarshalJSON()
+	bytes, err := json.Marshal(filterArgs)
 	gomega.ExpectWithOffset(1, err).ShouldNot(gomega.HaveOccurred())
 
 	query := url.Values{
@@ -236,12 +236,12 @@ func ListContainersHandler(statuses ...string) http.HandlerFunc {
 
 	return ghttp.CombineHandlers(
 		ghttp.VerifyRequest("GET", gomega.HaveSuffix("containers/json"), query.Encode()),
-		respondWithFilteredContainers(filterArgs),
+		respondWithFilteredContainers(statuses),
 	)
 }
 
-// Loads mock data from containers.json and filters it according to the provided args.
-func respondWithFilteredContainers(filters dockerFilters.Args) http.HandlerFunc {
+// Loads mock data from containers.json and filters it according to the provided statuses.
+func respondWithFilteredContainers(statuses []string) http.HandlerFunc {
 	containersJSON, err := getMockJSONFile("./mocks/data/containers.json")
 	gomega.ExpectWithOffset(assertionOffset, err).
 		ShouldNot(gomega.HaveOccurred())
@@ -256,8 +256,8 @@ func respondWithFilteredContainers(filters dockerFilters.Args) http.HandlerFunc 
 		// Offset for nested call depth
 
 	for _, v := range containers {
-		for _, key := range filters.Get("status") {
-			if v.State == key {
+		for _, status := range statuses {
+			if v.State == dockerContainer.ContainerState(status) {
 				filteredContainers = append(filteredContainers, v)
 			}
 		}

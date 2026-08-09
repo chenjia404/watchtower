@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -10,11 +11,10 @@ import (
 	"github.com/sirupsen/logrus"
 
 	cerrdefs "github.com/containerd/errdefs"
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerFilters "github.com/docker/docker/api/types/filters"
-	dockerNetwork "github.com/docker/docker/api/types/network"
-	dockerAPIVersion "github.com/docker/docker/api/types/versions"
-	dockerClient "github.com/docker/docker/client"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerNetwork "github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
+	dockerAPIVersion "github.com/moby/moby/client/pkg/versions"
 
 	"github.com/nicholas-fedor/watchtower/internal/util"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -65,7 +65,7 @@ func ListSourceContainers(
 	}).Debug("Built filter arguments")
 
 	// Fetch containers with status filters always applied based on ClientOptions.
-	listOptions := dockerContainer.ListOptions{Filters: filterArgs}
+	listOptions := dockerClient.ContainerListOptions{Filters: filterArgs}
 
 	clog.Debug("API status filters applied based on ClientOptions")
 
@@ -101,7 +101,7 @@ func ListSourceContainers(
 	// Convert and filter containers.
 	hostContainers := []types.Container{}
 
-	for _, runningContainer := range containers {
+	for _, runningContainer := range containers.Items {
 		container, err := GetSourceContainer(ctx, api, types.ContainerID(runningContainer.ID))
 		if err != nil {
 			// Log detailed error information for debugging container inspect failures
@@ -156,7 +156,7 @@ func GetSourceContainer(
 	clog.Debug("Inspecting container")
 
 	// Inspect the container to get its details.
-	containerInfo, err := api.ContainerInspect(ctx, string(containerID))
+	containerResult, err := api.ContainerInspect(ctx, string(containerID), dockerClient.ContainerInspectOptions{})
 	if err != nil {
 		// Log detailed error information for debugging
 		clog.WithFields(logrus.Fields{
@@ -171,37 +171,41 @@ func GetSourceContainer(
 		return nil, fmt.Errorf("%w: %w", errInspectContainerFailed, err)
 	}
 
+	containerInfo := &containerResult.Container
+
 	// Resolve network mode if it references another container.
-	netType, netContainerID, found := strings.Cut(string(containerInfo.HostConfig.NetworkMode), ":")
-	if found && netType == "container" {
-		parentContainer, err := api.ContainerInspect(ctx, netContainerID)
-		if err != nil {
-			clog.WithError(err).WithFields(logrus.Fields{
-				"container":         util.NormalizeContainerName(containerInfo.Name),
-				"network_container": netContainerID,
-			}).Warn("Unable to resolve network container")
-		} else {
-			containerInfo.HostConfig.NetworkMode = dockerContainer.NetworkMode(
-				"container:" + parentContainer.Name,
-			)
-			clog.WithFields(logrus.Fields{
-				"container":         util.NormalizeContainerName(containerInfo.Name),
-				"network_container": util.NormalizeContainerName(parentContainer.Name),
-			}).Debug("Resolved network container name")
+	if containerInfo.HostConfig != nil {
+		netType, netContainerID, found := strings.Cut(string(containerInfo.HostConfig.NetworkMode), ":")
+		if found && netType == "container" {
+			parentResult, err := api.ContainerInspect(ctx, netContainerID, dockerClient.ContainerInspectOptions{})
+			if err != nil {
+				clog.WithError(err).WithFields(logrus.Fields{
+					"container":         util.NormalizeContainerName(containerInfo.Name),
+					"network_container": netContainerID,
+				}).Warn("Unable to resolve network container")
+			} else {
+				containerInfo.HostConfig.NetworkMode = dockerContainer.NetworkMode(
+					"container:" + parentResult.Container.Name,
+				)
+				clog.WithFields(logrus.Fields{
+					"container":         util.NormalizeContainerName(containerInfo.Name),
+					"network_container": util.NormalizeContainerName(parentResult.Container.Name),
+				}).Debug("Resolved network container name")
+			}
 		}
 	}
 
 	// Fetch image info, falling back if it fails.
-	imageInfo, err := api.ImageInspect(ctx, containerInfo.Image)
+	imageResult, err := api.ImageInspect(ctx, containerInfo.Image)
 	if err != nil {
 		clog.WithError(err).Warn("Failed to retrieve image info")
 
-		return NewContainer(&containerInfo, nil), nil
+		return NewContainer(containerInfo, nil), nil
 	}
 
 	clog.WithField("image", containerInfo.Image).Debug("Retrieved container and image info")
 
-	return NewContainer(&containerInfo, &imageInfo), nil
+	return NewContainer(containerInfo, &imageResult.InspectResponse), nil
 }
 
 // StopSourceContainer stops the specified container using the Docker API's StopContainer method.
@@ -274,10 +278,14 @@ func StopSourceContainer(
 
 	// Call the Docker API's StopContainer with the stop signal and timeout in seconds.
 	// The API sends the signal (SIGTERM or custom), waits for the timeout, and sends SIGKILL if needed.
-	err := api.ContainerStop(ctx, string(sourceContainer.ID()), dockerContainer.StopOptions{
-		Signal:  signal,
-		Timeout: &timeoutSeconds,
-	})
+	_, err := api.ContainerStop(
+		ctx,
+		string(sourceContainer.ID()),
+		dockerClient.ContainerStopOptions{
+			Signal:  signal,
+			Timeout: &timeoutSeconds,
+		},
+	)
 	if err != nil {
 		// Check if the container was already removed by another process before
 		// the stop call completed, treating it as already stopped.
@@ -335,7 +343,8 @@ func StopAndRemoveSourceContainer(
 
 	// Check if the container has AutoRemove enabled in its HostConfig, which automatically removes
 	// the container after stopping, eliminating the need for an explicit removal call.
-	if sourceContainer.ContainerInfo().HostConfig.AutoRemove {
+	info := sourceContainer.ContainerInfo()
+	if info != nil && info.HostConfig != nil && info.HostConfig.AutoRemove {
 		// Log that the container is skipped due to AutoRemove configuration.
 		clog.Debug("Skipping container removal due to AutoRemove configuration")
 
@@ -351,7 +360,7 @@ func StopAndRemoveSourceContainer(
 
 	// Call the Docker API's ContainerRemove to delete the container, forcing termination of any
 	// lingering processes (via SIGKILL if needed) and removing volumes if specified.
-	err = api.ContainerRemove(ctx, string(sourceContainer.ID()), dockerContainer.RemoveOptions{
+	_, err = api.ContainerRemove(ctx, string(sourceContainer.ID()), dockerClient.ContainerRemoveOptions{
 		Force:         true,          // Ensure any lingering processes are terminated before removal.
 		RemoveVolumes: removeVolumes, // Remove associated volumes if the parameter is true.
 	})
@@ -385,11 +394,12 @@ func StopAndRemoveSourceContainer(
 //
 // Parameters:
 //   - opts: Client options for filtering.
+//   - isPodman: Whether the runtime is Podman.
 //
 // Returns:
-//   - dockerFiltersType.Args: Arguments for filtering Docker containers
-func buildListFilterArgs(opts ClientOptions, isPodman bool) dockerFilters.Args {
-	filterArgs := dockerFilters.NewArgs()
+//   - dockerClient.Filters: Arguments for filtering Docker containers
+func buildListFilterArgs(opts ClientOptions, isPodman bool) dockerClient.Filters {
+	filterArgs := make(dockerClient.Filters)
 
 	filterArgs.Add("status", "running")
 
@@ -439,7 +449,11 @@ func getNetworkConfig(
 		return config
 	}
 
-	networkMode := containerInfo.HostConfig.NetworkMode
+	var networkMode dockerContainer.NetworkMode
+	if containerInfo.HostConfig != nil {
+		networkMode = containerInfo.HostConfig.NetworkMode
+	}
+
 	isHostNetwork := string(networkMode) == "host"
 	clog.WithFields(logrus.Fields{
 		"network_mode": networkMode,
@@ -563,8 +577,8 @@ func processEndpoint(
 
 	// Handle aliases, MAC address, IP address, and DNS names based on API version and network mode.
 	if dockerAPIVersion.LessThan(clientVersion, "1.44") || isHostNetwork {
-		targetEndpoint.MacAddress = ""
-		targetEndpoint.IPAddress = ""
+		targetEndpoint.MacAddress = dockerNetwork.HardwareAddr{}
+		targetEndpoint.IPAddress = netip.Addr{}
 		targetEndpoint.DNSNames = nil
 
 		if isHostNetwork {
@@ -572,9 +586,116 @@ func processEndpoint(
 		} else {
 			clog.Debug("Cleared MAC address, IP address, and DNS names for legacy API")
 		}
+	} else if isEngineGeneratedMAC(targetEndpoint.MacAddress, sourceEndpoint.IPAddress) {
+		// Clear MACs derived from the endpoint's IPv4 address. Docker 29.x+ bridge
+		// networks assign random MACs and will not match the engine-generated
+		// pattern, but older Docker versions and overlay networks still produce
+		// IP-derived MACs that become stale after IP reassignment.
+		targetEndpoint.MacAddress = dockerNetwork.HardwareAddr{}
+
+		clog.Debug("Cleared engine-generated MAC address; Docker will regenerate for new IP")
 	}
 
 	return targetEndpoint, nil
+}
+
+// isEngineGeneratedMAC reports whether mac matches the bridge driver's engine-generated
+// pattern derived from the endpoint's current IPv4 address.
+//
+// Docker ≤ 25.x bridge networks assigned MACs of the form "02:42:aa:bb:cc:dd",
+// where the last four bytes are the IPv4 octets. Docker 29.x+ switched the bridge
+// driver to fully random MACs, but overlay networks still use IP-derived MACs, so
+// this check remains relevant for those drivers and for older Docker versions.
+// A MAC matching that pattern for the given IP is not a user-configured value and
+// should not be preserved across container recreation. If ip is not a valid IPv4
+// address, the MAC is assumed to be user-configured and false is returned.
+//
+// Parameters:
+//   - mac: MAC address to check.
+//   - ip: Endpoint's current IPv4 address.
+//
+// Returns:
+//   - bool: True if the MAC was engine-generated from ip, false otherwise.
+func isEngineGeneratedMAC(mac dockerNetwork.HardwareAddr, ip netip.Addr) bool {
+	if len(mac) != 17 || !ip.Is4() {
+		return false
+	}
+
+	ipv4 := ip.As4()
+	expected := fmt.Sprintf("02:42:%02x:%02x:%02x:%02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
+
+	return string(mac) == expected
+}
+
+// onlyGeneratedMacs reports whether every non-empty MAC in the source
+// container's original network settings matches the bridge driver's
+// engine-generated pattern for that endpoint's IP, and whether every non-nil
+// original endpoint is present in the processed configuration.
+//
+// It is used by validateMacAddresses to allow missing MACs in the processed
+// config only when those MACs were intentionally cleared by processEndpoint and
+// no endpoints were lost during processing.
+//
+// Parameters:
+//   - sourceContainer: The container whose original network settings are inspected.
+//   - processedConfig: The processed network configuration whose endpoint coverage is checked.
+//
+// Returns:
+//   - bool: True if the container had at least one MAC and every one of them was
+//     engine-generated, and all non-nil original endpoints appear in the processed
+//     config. False otherwise.
+func onlyGeneratedMacs(sourceContainer types.Container, processedConfig *dockerNetwork.NetworkingConfig) bool {
+	if sourceContainer == nil {
+		return false
+	}
+
+	containerInfo := sourceContainer.ContainerInfo()
+
+	if containerInfo == nil || containerInfo.NetworkSettings == nil {
+		return false
+	}
+
+	// Build a set of network names present in the processed config so we can
+	// verify that every non-nil original endpoint survived processing.
+	processedNetworks := make(map[string]bool, len(processedConfig.EndpointsConfig))
+
+	for name := range processedConfig.EndpointsConfig {
+		processedNetworks[name] = true
+	}
+
+	hasMac := false
+
+	for networkName, endpoint := range containerInfo.NetworkSettings.Networks {
+		// Nil endpoints carry no MAC and do not participate in coverage checks.
+		if endpoint == nil {
+			continue
+		}
+
+		// A non-nil original endpoint that was dropped during processing means
+		// the missing-MAC result may not be fully explained by intentional
+		// clearing, so do not grant the waiver.
+		if !processedNetworks[networkName] {
+			return false
+		}
+
+		// Endpoints without a MAC cannot be engine-generated, but they also do
+		// not disprove the hypothesis that every original MAC was generated.
+		if len(endpoint.MacAddress) == 0 {
+			continue
+		}
+
+		hasMac = true
+
+		// Any user-configured MAC disproves the all-generated hypothesis and
+		// preserves normal missing-MAC validation behavior.
+		if !isEngineGeneratedMAC(endpoint.MacAddress, endpoint.IPAddress) {
+			return false
+		}
+	}
+
+	// Require at least one original MAC so that containers with no MACs at all
+	// do not incorrectly bypass validation.
+	return hasMac
 }
 
 // validateMacAddresses verifies the presence of MAC addresses in a container's network configuration
@@ -628,7 +749,13 @@ func validateMacAddresses(
 	foundMac := false
 
 	for networkName, endpoint := range config.EndpointsConfig {
-		if endpoint.MacAddress != "" {
+		if endpoint == nil {
+			clog.WithField("network", networkName).Debug("Skipping nil endpoint in MAC validation")
+
+			continue
+		}
+
+		if len(endpoint.MacAddress) > 0 {
 			foundMac = true
 			// Log the found MAC address at debug level for diagnostic purposes.
 			clog.WithFields(logrus.Fields{
@@ -638,16 +765,16 @@ func validateMacAddresses(
 		}
 	}
 
-	// Retrieve container state to determine if it’s running, which affects MAC address expectations.
+	// Retrieve container state to determine if it's running, which affects MAC address expectations.
 	// Non-running containers (e.g., created, exited) typically lack MAC addresses due to inactive network interfaces.
 	containerInfo := sourceContainer.ContainerInfo()
 	isRunning := sourceContainer.IsRunning()
 
-	// Extract the container’s state (e.g., "running", "created", "exited") for logging context.
+	// Extract the container's state (e.g., "running", "created", "exited") for logging context.
 	// Use "unknown" as a fallback if container metadata is incomplete to ensure safe logging.
 	containerState := "unknown"
 	if containerInfo != nil && containerInfo.State != nil {
-		containerState = containerInfo.State.Status
+		containerState = string(containerInfo.State.Status)
 	}
 
 	// Handle legacy Docker API versions (< 1.44), where MAC address preservation is not fully supported.
@@ -665,7 +792,7 @@ func validateMacAddresses(
 		return nil
 	}
 
-	// Handle host network mode, where the container uses the host’s network stack and should not have its own MAC addresses.
+	// Handle host network mode, where the container uses the host's network stack and should not have its own MAC addresses.
 	if isHostNetwork {
 		if foundMac {
 			// MAC addresses in host mode are unexpected and indicate a misconfiguration; log a warning and return an error.
@@ -690,6 +817,17 @@ func validateMacAddresses(
 
 			return nil
 		}
+
+		// If all original MACs were engine-generated and every non-nil original
+		// endpoint is present in the processed config, the absence is expected
+		// because processEndpoint intentionally clears them to avoid stale MACs
+		// after IP reassignment.
+		if onlyGeneratedMacs(sourceContainer, config) {
+			clog.Debug("No MAC address found; all original MACs were engine-generated and intentionally cleared")
+
+			return nil
+		}
+
 		// Running containers should have MAC addresses, but absence may indicate
 		// either a lack of support or a configuration issue.
 		clog.WithField("state", containerState).
@@ -705,7 +843,7 @@ func validateMacAddresses(
 	return nil
 }
 
-// filterAliases removes the container’s short ID from the list of aliases.
+// filterAliases removes the container's short ID from the list of aliases.
 //
 // Parameters:
 //   - aliases: List of aliases to filter.
@@ -725,7 +863,7 @@ func filterAliases(aliases []string, shortID string) []string {
 	return result
 }
 
-// debugLogMacAddress logs MAC address info for a container’s network config.
+// debugLogMacAddress logs MAC address info for a container's network config.
 //
 // Parameters:
 //   - networkConfig: Network configuration to check.
@@ -754,7 +892,7 @@ func debugLogMacAddress(
 		// Iterate through network endpoints to find MAC addresses.
 		for networkName, endpoint := range networkConfig.EndpointsConfig {
 			// Check if the endpoint has a MAC address.
-			if endpoint.MacAddress != "" {
+			if len(endpoint.MacAddress) > 0 {
 				clog.WithFields(logrus.Fields{
 					"network":     networkName,
 					"mac_address": endpoint.MacAddress,

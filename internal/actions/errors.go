@@ -30,7 +30,9 @@ var (
 	errStopContainerFailed = errors.New("failed to stop container")
 	// errStartContainerFailed indicates a failure to start a container after an update.
 	errStartContainerFailed = errors.New("failed to start container")
-	// errParseImageReference indicates a failure to parse a container’s image reference.
+	// errCreateContainerFailed indicates a failure to create a container during the update process.
+	errCreateContainerFailed = errors.New("failed to create container")
+	// errParseImageReference indicates a failure to parse a container's image reference.
 	errParseImageReference = errors.New("failed to parse image reference")
 	// errInvalidImageReference indicates an invalid image reference that cannot be processed.
 	errInvalidImageReference = errors.New("invalid image reference")
@@ -40,20 +42,13 @@ var (
 	errSelfDependency = errors.New("container has self-dependency")
 )
 
-// Errors for image cooldown operations.
-var (
-	// errImageCooldown indicates the image is within the cooldown period and the update is deferred.
-	errImageCooldown = errors.New("deferred")
-	// errFetchImageAgeFailed indicates the image creation time could not be determined from the registry.
-	errFetchImageAgeFailed = errors.New("image creation time unavailable")
-	// errGetPullOptionsFailed indicates pull options (e.g., registry auth) could not be retrieved for cooldown check.
-	errGetPullOptionsFailed = errors.New("failed to get pull options")
-)
-
 // Errors for Watchtower self-update operations.
 var (
 	// errRenameWatchtowerFailed indicates a failure to rename the Watchtower container before restarting.
 	errRenameWatchtowerFailed = errors.New("failed to rename Watchtower container")
-	// errStopWatchtowerFailed flags failures in stopping excess Watchtower instances.
+	// errStopWatchtowerFailed flags failures in stopping excess Watchtower containers.
 	errStopWatchtowerFailed = errors.New("errors occurred while stopping watchtower containers")
+	// errOldSelfDetected indicates the current container is an old
+	// Watchtower container that should not be running.
+	errOldSelfDetected = errors.New("current container is an old Watchtower container")
 )

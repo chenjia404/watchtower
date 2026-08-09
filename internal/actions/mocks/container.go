@@ -7,10 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/go-connections/nat"
-
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	dockerNetwork "github.com/moby/moby/api/types/network"
 
 	"github.com/nicholas-fedor/watchtower/pkg/container"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -24,19 +23,17 @@ const mockIDLength = 64
 // It initializes a basic container with the specified ID, name, image, and creation time.
 func CreateMockContainer(id, name, image string, created time.Time) types.Container {
 	content := dockerContainer.InspectResponse{
-		ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-			ID:      id,
-			Image:   image,
-			Name:    name,
-			Created: created.Format(time.RFC3339Nano), // Use RFC3339Nano format
-			HostConfig: &dockerContainer.HostConfig{
-				PortBindings: map[nat.Port][]nat.PortBinding{},
-			},
+		ID:      id,
+		Image:   image,
+		Name:    name,
+		Created: created.Format(time.RFC3339Nano), // Use RFC3339Nano format
+		HostConfig: &dockerContainer.HostConfig{
+			PortBindings: dockerNetwork.PortMap{},
 		},
 		Config: &dockerContainer.Config{
 			Image:        image,
 			Labels:       make(map[string]string),
-			ExposedPorts: map[nat.Port]struct{}{},
+			ExposedPorts: dockerNetwork.PortSet{},
 		},
 	}
 
@@ -83,15 +80,17 @@ func CreateMockContainerWithImageInfoP(
 	imageInfo *dockerImage.InspectResponse,
 ) types.Container {
 	content := dockerContainer.InspectResponse{
-		ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-			ID:      id,
-			Image:   image,
-			Name:    name,
-			Created: created.String(),
+		ID:      id,
+		Image:   image,
+		Name:    name,
+		Created: created.Format(time.RFC3339Nano),
+		HostConfig: &dockerContainer.HostConfig{
+			PortBindings: dockerNetwork.PortMap{},
 		},
 		Config: &dockerContainer.Config{
-			Image:  image,
-			Labels: make(map[string]string),
+			Image:        image,
+			Labels:       make(map[string]string),
+			ExposedPorts: dockerNetwork.PortSet{},
 		},
 	}
 
@@ -128,18 +127,16 @@ func CreateMockContainerWithConfig(
 	config *dockerContainer.Config,
 ) types.Container {
 	content := dockerContainer.InspectResponse{
-		ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-			ID:    id,
-			Image: image,
-			Name:  name,
-			State: &dockerContainer.State{
-				Running:    running,
-				Restarting: restarting,
-			},
-			Created: created.Format(time.RFC3339Nano), // Use RFC3339Nano format
-			HostConfig: &dockerContainer.HostConfig{
-				PortBindings: map[nat.Port][]nat.PortBinding{},
-			},
+		ID:    id,
+		Image: image,
+		Name:  name,
+		State: &dockerContainer.State{
+			Running:    running,
+			Restarting: restarting,
+		},
+		Created: created.Format(time.RFC3339Nano), // Use RFC3339Nano format
+		HostConfig: &dockerContainer.HostConfig{
+			PortBindings: dockerNetwork.PortMap{},
 		},
 		Config: config,
 	}
@@ -186,18 +183,18 @@ func CreateMockContainerWithLinks(
 	imageInfo *dockerImage.InspectResponse,
 ) types.Container {
 	content := dockerContainer.InspectResponse{
-		ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-			ID:      id,
-			Image:   image,
-			Name:    name,
-			Created: created.String(),
-			HostConfig: &dockerContainer.HostConfig{
-				Links: links,
-			},
+		ID:      id,
+		Image:   image,
+		Name:    name,
+		Created: created.Format(time.RFC3339Nano),
+		HostConfig: &dockerContainer.HostConfig{
+			Links:        links,
+			PortBindings: dockerNetwork.PortMap{},
 		},
 		Config: &dockerContainer.Config{
-			Image:  image,
-			Labels: make(map[string]string),
+			Image:        image,
+			Labels:       make(map[string]string),
+			ExposedPorts: dockerNetwork.PortSet{},
 		},
 	}
 

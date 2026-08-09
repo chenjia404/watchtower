@@ -28,7 +28,7 @@ var _ = ginkgo.Describe("notifications", func() {
 			})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			notifier := notifications.NewNotifier(command)
+			notifier := notifications.NewNotifierFromFlags(command)
 
 			gomega.Expect(notifier.GetNames()).To(gomega.BeEmpty())
 		})
@@ -69,6 +69,8 @@ var _ = ginkgo.Describe("notifications", func() {
 			})
 		})
 		ginkgo.When("legacy email tag is set", func() {
+			//nolint:godox
+			// TODO: Remove legacy email subjecttag test when legacy notification types are removed.
 			ginkgo.It("should use the prefix in the title", func() {
 				command := cmd.NewRootCommand()
 				flags.RegisterNotificationFlags(command)
@@ -97,50 +99,31 @@ var _ = ginkgo.Describe("notifications", func() {
 		})
 		ginkgo.When("no delay is defined", func() {
 			ginkgo.It("should use the default delay", func() {
-				command := cmd.NewRootCommand()
-				flags.RegisterNotificationFlags(command)
-
-				delay := notifications.GetDelay(command, time.Duration(0))
+				delay := notifications.GetDelay(0, time.Duration(0))
 				gomega.Expect(delay).To(gomega.Equal(time.Duration(0)))
 			})
 		})
 		ginkgo.When("delay is defined", func() {
 			ginkgo.It("should use the specified delay", func() {
-				command := cmd.NewRootCommand()
-				flags.RegisterNotificationFlags(command)
-
-				err := command.ParseFlags([]string{
-					"--notifications-delay",
-					"5",
-				})
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-				delay := notifications.GetDelay(command, time.Duration(0))
+				delay := notifications.GetDelay(5, time.Duration(0))
 				gomega.Expect(delay).To(gomega.Equal(5 * time.Second))
 			})
 		})
 		ginkgo.When("legacy delay is defined", func() {
+			//nolint:godox
+			// TODO: Remove legacy delay tests when legacy notification types are removed.
 			ginkgo.It("should use the specified legacy delay", func() {
-				command := cmd.NewRootCommand()
-				flags.RegisterNotificationFlags(command)
-				delay := notifications.GetDelay(command, 5*time.Second)
+				delay := notifications.GetDelay(0, 5*time.Second)
 				gomega.Expect(delay).To(gomega.Equal(5 * time.Second))
 			})
 		})
 		ginkgo.When("legacy delay and delay is defined", func() {
+			//nolint:godox
+			// TODO: Remove legacy delay tests when legacy notification types are removed.
 			ginkgo.It(
 				"should use the specified legacy delay and ignore the specified delay",
 				func() {
-					command := cmd.NewRootCommand()
-					flags.RegisterNotificationFlags(command)
-
-					err := command.ParseFlags([]string{
-						"--notifications-delay",
-						"0",
-					})
-					gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-					delay := notifications.GetDelay(command, 7*time.Second)
+					delay := notifications.GetDelay(5, 7*time.Second)
 					gomega.Expect(delay).To(gomega.Equal(7 * time.Second))
 				},
 			)
@@ -168,12 +151,14 @@ var _ = ginkgo.Describe("notifications", func() {
 				})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				notifier := notifications.NewNotifier(command)
+				notifier := notifications.NewNotifierFromFlags(command)
 				gomega.Expect(notifier).NotTo(gomega.BeNil())
 				gomega.Expect(notifier.GetNames()).To(gomega.ContainElement("logger"))
 			})
 		})
 	})
+	//nolint:godox
+	// TODO: Remove legacy slack notifier tests when legacy notification types are removed.
 	ginkgo.Describe("the slack notifier", func() {
 		// builderFn := notifications.NewSlackNotifier
 		ginkgo.When("passing a discord url to the slack notifier", func() {
@@ -339,8 +324,32 @@ var _ = ginkgo.Describe("notifications", func() {
 				})
 			})
 		})
+		ginkgo.When("the hook URL is empty", func() {
+			ginkgo.It("should fatal with a clear missing argument message", func() {
+				originalExit := logrus.StandardLogger().ExitFunc
+				defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
+
+				logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
+
+				gomega.Expect(func() {
+					command := cmd.NewRootCommand()
+					flags.RegisterNotificationFlags(command)
+
+					args := []string{
+						"--notifications",
+						"slack",
+					}
+
+					command.ParseFlags(args)
+
+					notifications.NewNotifierFromFlags(command)
+				}).To(gomega.Panic())
+			})
+		})
 	})
 
+	//nolint:godox
+	// TODO: Remove legacy gotify notifier tests when legacy notification types are removed.
 	ginkgo.Describe("the gotify notifier", func() {
 		ginkgo.When("converting a gotify service config into a shoutrrr url", func() {
 			ginkgo.It("should return the expected URL", func() {
@@ -386,7 +395,7 @@ var _ = ginkgo.Describe("notifications", func() {
 				}
 				gomega.Expect(command.ParseFlags(args)).To(gomega.Succeed())
 
-				notifier := notifications.NewNotifier(command)
+				notifier := notifications.NewNotifierFromFlags(command)
 				names := notifier.GetNames()
 				gomega.Expect(names).To(gomega.ContainElement("gotify"))
 
@@ -414,7 +423,7 @@ var _ = ginkgo.Describe("notifications", func() {
 				logrus.SetOutput(io.Discard)
 				defer logrus.SetOutput(os.Stderr)
 
-				notifier := notifications.NewNotifier(command)
+				notifier := notifications.NewNotifierFromFlags(command)
 				names := notifier.GetNames()
 				gomega.Expect(names).To(gomega.ContainElement("gotify"))
 
@@ -425,6 +434,8 @@ var _ = ginkgo.Describe("notifications", func() {
 		})
 	})
 
+	//nolint:godox
+	// TODO: Remove legacy msteams notifier tests when legacy notification types are removed.
 	ginkgo.Describe("the teams notifier", func() {
 		ginkgo.BeforeEach(func() {
 			logrus.SetLevel(logrus.DebugLevel) // Ensure debug logs are visible
@@ -434,30 +445,14 @@ var _ = ginkgo.Describe("notifications", func() {
 				command := cmd.NewRootCommand()
 				flags.RegisterNotificationFlags(command)
 
-				tokenA := "11111111-4444-4444-8444-cccccccccccc"            // Group
-				tokenB := "22222222-4444-4444-8444-cccccccccccc"            // Tenant
-				tokenC := "33333301222222222233333333333344"                // AltID
-				tokenD := "44444444-4444-4444-8444-cccccccccccc"            // GroupOwner
-				extraID := "V2ESyij_gAljSoUQHvZoZYzlpAoAXExyOl26dlf1xHEx05" // ExtraID from shoutrrr test
 				color := url.QueryEscape(notifications.ColorHex)
 
-				// Use a more specific org domain instead of "test"
-				hookURL := fmt.Sprintf(
-					"https://myorg.webhook.office.com/webhookb2/%s@%s/IncomingWebhook/%s/%s/%s",
-					tokenA,
-					tokenB,
-					tokenC,
-					tokenD,
-					extraID,
-				)
+				// Power Automate workflow incoming webhook URL.
+				hookURL := "https://default.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/abc123/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=XXXXXXXX"
 				expectedOutput := fmt.Sprintf(
-					"teams://%s@%s/%s/%s/%s?color=%s&host=myorg.webhook.office.com",
-					tokenA,
-					tokenB,
-					tokenC,
-					tokenD,
-					extraID,
+					"teams:?color=%s&host=%s",
 					color,
+					url.QueryEscape(hookURL),
 				)
 
 				args := []string{
@@ -472,6 +467,8 @@ var _ = ginkgo.Describe("notifications", func() {
 		})
 	})
 
+	//nolint:godox
+	// TODO: Remove legacy email notifier tests when legacy notification types are removed.
 	ginkgo.Describe("the email notifier", func() {
 		ginkgo.When("converting an email service config into a shoutrrr url", func() {
 			ginkgo.It("should set the from address in the URL", func() {
@@ -540,9 +537,88 @@ var _ = ginkgo.Describe("notifications", func() {
 				testURL(args, expectedOutput, expectedDelay)
 			})
 		})
+		ginkgo.When("a required field is empty", func() {
+			ginkgo.It("should fatal when the from address is empty", func() {
+				originalExit := logrus.StandardLogger().ExitFunc
+				defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
+
+				logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
+
+				gomega.Expect(func() {
+					command := cmd.NewRootCommand()
+					flags.RegisterNotificationFlags(command)
+
+					args := []string{
+						"--notifications",
+						"email",
+						"--notification-email-to",
+						"recipient@example.com",
+						"--notification-email-server",
+						"smtp.example.com",
+					}
+
+					command.ParseFlags(args)
+
+					notifications.NewNotifierFromFlags(command)
+				}).To(gomega.Panic())
+			})
+
+			ginkgo.It("should fatal when the to address is empty", func() {
+				originalExit := logrus.StandardLogger().ExitFunc
+				defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
+
+				logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
+
+				gomega.Expect(func() {
+					command := cmd.NewRootCommand()
+					flags.RegisterNotificationFlags(command)
+
+					args := []string{
+						"--notifications",
+						"email",
+						"--notification-email-from",
+						"sender@example.com",
+						"--notification-email-server",
+						"smtp.example.com",
+					}
+
+					command.ParseFlags(args)
+
+					notifications.NewNotifierFromFlags(command)
+				}).To(gomega.Panic())
+			})
+
+			ginkgo.It("should fatal when the server is empty", func() {
+				originalExit := logrus.StandardLogger().ExitFunc
+				defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
+
+				logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
+
+				gomega.Expect(func() {
+					command := cmd.NewRootCommand()
+					flags.RegisterNotificationFlags(command)
+
+					args := []string{
+						"--notifications",
+						"email",
+						"--notification-email-from",
+						"sender@example.com",
+						"--notification-email-to",
+						"recipient@example.com",
+					}
+
+					command.ParseFlags(args)
+
+					notifications.NewNotifierFromFlags(command)
+				}).To(gomega.Panic())
+			})
+		})
 	})
 })
 
+// TODO: Remove buildExpectedURL helper when legacy notification tests are removed.
+//
+//nolint:godox
 func buildExpectedURL(
 	username string,
 	password string,
@@ -562,6 +638,9 @@ func buildExpectedURL(
 		url.QueryEscape(destAddress))
 }
 
+// TODO: Remove testURL helper when legacy notification tests are removed.
+//
+//nolint:godox
 func testURL(args []string, expectedURL string, expectedDelay time.Duration) {
 	defer ginkgo.GinkgoRecover()
 

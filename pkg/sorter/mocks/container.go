@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
 
 	"github.com/nicholas-fedor/watchtower/internal/util"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -47,8 +47,8 @@ func (c *SimpleContainer) ContainerInfo() *dockerContainer.InspectResponse {
 	}
 	// Ensure Name includes leading "/" to match Docker API behavior
 	return &dockerContainer.InspectResponse{
-		ContainerJSONBase: &dockerContainer.ContainerJSONBase{Name: name},
-		Config:            &dockerContainer.Config{Labels: map[string]string{}},
+		Name:   name,
+		Config: &dockerContainer.Config{Labels: map[string]string{}},
 	}
 }
 
@@ -80,6 +80,15 @@ func (c *SimpleContainer) Enabled() (bool, bool)                   { return true
 func (c *SimpleContainer) IsMonitorOnly(_ types.UpdateParams) bool { return false }
 
 func (c *SimpleContainer) Scope() (string, bool) { return "", false }
+func (c *SimpleContainer) GetLabel(key string) (string, bool) {
+	if c.ContainerInfoField != nil && c.ContainerInfoField.Config != nil && c.ContainerInfoField.Config.Labels != nil {
+		val, ok := c.ContainerInfoField.Config.Labels[key]
+
+		return val, ok
+	}
+
+	return "", false
+}
 func (c *SimpleContainer) ToRestart() bool       { return false }
 
 func (c *SimpleContainer) StopSignal() string {
@@ -131,6 +140,7 @@ func (c *SimpleContainer) PostUpdateTimeout() int {
 	return 30
 }
 func (c *SimpleContainer) IsRestarting() bool                               { return false }
+func (c *SimpleContainer) IsCreated() bool                                  { return false }
 func (c *SimpleContainer) GetCreateConfig() *dockerContainer.Config         { return nil }
 func (c *SimpleContainer) GetCreateHostConfig() *dockerContainer.HostConfig { return nil }
 func (c *SimpleContainer) HasExposedPorts() bool                            { return false }

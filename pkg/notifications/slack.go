@@ -9,15 +9,30 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
+	notifyConfig "github.com/nicholas-fedor/watchtower/internal/config/notify"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
 // slackType is the identifier for Slack notifications.
+//
+// Deprecated: Legacy slack notification type is deprecated.
+// Use --notification-url with a slack:// or discord:// URL instead.
+//
+// TODO: Remove slackType constant for the v2 release.
+//
+//nolint:godox
 const slackType = "slack"
 
 // slackTypeNotifier handles Slack notifications via webhook.
 //
 // It supports custom username, channel, and icons.
+//
+// Deprecated: Legacy slack notifier is deprecated.
+// Use --notification-url with a slack:// or discord:// URL instead.
+//
+// TODO: Remove slackTypeNotifier for the v2 release.
+//
+//nolint:godox
 type slackTypeNotifier struct {
 	HookURL   string // Slack webhook URL.
 	Username  string // Notification username.
@@ -26,22 +41,32 @@ type slackTypeNotifier struct {
 	IconURL   string // URL icon for messages.
 }
 
-// newSlackNotifier creates a Slack notifier from command-line flags.
+// newSlackNotifier creates a Slack notifier from resolved legacy settings.
 //
 // Parameters:
-//   - c: Cobra command with flags.
+//   - legacy: Deprecated Slack/Discord webhook settings (from process config or flags).
 //
 // Returns:
 //   - types.ConvertibleNotifier: New Slack notifier instance.
-func newSlackNotifier(c *cobra.Command) types.ConvertibleNotifier {
-	flags := c.Flags()
+//
+// Deprecated: Legacy slack notifier is deprecated.
+// Use --notification-url with a slack:// or discord:// URL instead.
+//
+// TODO: Remove newSlackNotifier for the v2 release.
+//
+//nolint:godox
+func newSlackNotifier(legacy notifyConfig.Legacy) types.ConvertibleNotifier {
+	hookURL := legacy.SlackHookURL
+	userName := legacy.SlackIdentifier
+	channel := legacy.SlackChannel
+	emoji := legacy.SlackIconEmoji
+	iconURL := legacy.SlackIconURL
 
-	// Extract Slack configuration from flags.
-	hookURL, _ := flags.GetString("notification-slack-hook-url")
-	userName, _ := flags.GetString("notification-slack-identifier")
-	channel, _ := flags.GetString("notification-slack-channel")
-	emoji, _ := flags.GetString("notification-slack-icon-emoji")
-	iconURL, _ := flags.GetString("notification-slack-icon-url")
+	if hookURL == "" {
+		logrus.Fatal(
+			"Slack hook URL is empty.",
+		)
+	}
 
 	clog := logrus.WithFields(logrus.Fields{
 		"hook_url": hookURL,
@@ -71,9 +96,17 @@ func newSlackNotifier(c *cobra.Command) types.ConvertibleNotifier {
 // Returns:
 //   - string: Service URL (Slack or Discord).
 //   - error: Non-nil if token parsing fails, nil on success.
+//
+// Deprecated: This method is part of the legacy slack notifier and will be removed
+// for the v2 release. Use --notification-url with a slack:// URL instead.
 func (s *slackTypeNotifier) GetURL(_ *cobra.Command) (string, error) {
-	clog := logrus.WithField("hook_url", s.HookURL)
+	clog := logrus.NewEntry(logrus.StandardLogger())
 	clog.Debug("Generating Slack service URL")
+
+	if logrus.IsLevelEnabled(logrus.TraceLevel) {
+		clog.WithField("hook_url", redactServiceURL(s.HookURL)).
+			Trace("Slack hook URL loaded")
+	}
 
 	// Normalize URL and split parts.
 	trimmedURL := strings.TrimRight(s.HookURL, "/")
@@ -97,7 +130,12 @@ func (s *slackTypeNotifier) GetURL(_ *cobra.Command) (string, error) {
 		}
 
 		urlStr := conf.GetURL().String()
-		clog.WithField("service_url", urlStr).Debug("Generated Discord service URL")
+		if logrus.IsLevelEnabled(logrus.TraceLevel) {
+			clog.WithField("service_url", redactServiceURL(urlStr)).
+				Trace("Generated Discord service URL")
+		} else {
+			clog.Debug("Generated Discord service URL")
+		}
 
 		return urlStr, nil
 	}
@@ -127,7 +165,12 @@ func (s *slackTypeNotifier) GetURL(_ *cobra.Command) (string, error) {
 	}
 
 	urlStr := conf.GetURL().String()
-	clog.WithField("service_url", urlStr).Debug("Generated Slack service URL")
+	if logrus.IsLevelEnabled(logrus.TraceLevel) {
+		clog.WithField("service_url", redactServiceURL(urlStr)).
+			Trace("Generated Slack service URL")
+	} else {
+		clog.Debug("Generated Slack service URL")
+	}
 
 	return urlStr, nil
 }
@@ -136,6 +179,9 @@ func (s *slackTypeNotifier) GetURL(_ *cobra.Command) (string, error) {
 //
 // Returns:
 //   - []*logrus.Entry: Always nil.
+//
+// Deprecated: This method is part of the legacy slack notifier and will be removed
+// for the v2 release.
 func (s *slackTypeNotifier) GetEntries() []*logrus.Entry {
 	return nil
 }
@@ -145,6 +191,9 @@ func (s *slackTypeNotifier) GetEntries() []*logrus.Entry {
 // Parameters:
 //   - entries: Ignored.
 //   - report: Ignored.
+//
+// Deprecated: This method is part of the legacy slack notifier and will be removed
+// for the v2 release.
 func (s *slackTypeNotifier) SendFilteredEntries(_ []*logrus.Entry, _ types.Report) {
 	// Legacy notifiers do not support filtered entries.
 }

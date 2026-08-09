@@ -7,8 +7,8 @@ package mocks
 import (
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -110,7 +110,7 @@ type MockContainer_CooldownDelay_Call struct {
 
 // CooldownDelay is a helper method to define mock.On call
 //   - params types.UpdateParams
-func (_e *MockContainer_Expecter) CooldownDelay(params interface{}) *MockContainer_CooldownDelay_Call {
+func (_e *MockContainer_Expecter) CooldownDelay(params any) *MockContainer_CooldownDelay_Call {
 	return &MockContainer_CooldownDelay_Call{Call: _e.mock.On("CooldownDelay", params)}
 }
 
@@ -331,6 +331,66 @@ func (_c *MockContainer_GetCreateHostConfig_Call) Return(hostConfig *container.H
 }
 
 func (_c *MockContainer_GetCreateHostConfig_Call) RunAndReturn(run func() *container.HostConfig) *MockContainer_GetCreateHostConfig_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetLabel provides a mock function for the type MockContainer
+func (_mock *MockContainer) GetLabel(key string) (string, bool) {
+	ret := _mock.Called(key)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetLabel")
+	}
+
+	var r0 string
+	var r1 bool
+	if returnFunc, ok := ret.Get(0).(func(string) (string, bool)); ok {
+		return returnFunc(key)
+	}
+	if returnFunc, ok := ret.Get(0).(func(string) string); ok {
+		r0 = returnFunc(key)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(string) bool); ok {
+		r1 = returnFunc(key)
+	} else {
+		r1 = ret.Get(1).(bool)
+	}
+	return r0, r1
+}
+
+// MockContainer_GetLabel_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetLabel'
+type MockContainer_GetLabel_Call struct {
+	*mock.Call
+}
+
+// GetLabel is a helper method to define mock.On call
+//   - key string
+func (_e *MockContainer_Expecter) GetLabel(key any) *MockContainer_GetLabel_Call {
+	return &MockContainer_GetLabel_Call{Call: _e.mock.On("GetLabel", key)}
+}
+
+func (_c *MockContainer_GetLabel_Call) Run(run func(key string)) *MockContainer_GetLabel_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockContainer_GetLabel_Call) Return(s string, b bool) *MockContainer_GetLabel_Call {
+	_c.Call.Return(s, b)
+	return _c
+}
+
+func (_c *MockContainer_GetLabel_Call) RunAndReturn(run func(key string) (string, bool)) *MockContainer_GetLabel_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -883,6 +943,50 @@ func (_c *MockContainer_ImageName_Call) RunAndReturn(run func() string) *MockCon
 	return _c
 }
 
+// IsCreated provides a mock function for the type MockContainer
+func (_mock *MockContainer) IsCreated() bool {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for IsCreated")
+	}
+
+	var r0 bool
+	if returnFunc, ok := ret.Get(0).(func() bool); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	return r0
+}
+
+// MockContainer_IsCreated_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'IsCreated'
+type MockContainer_IsCreated_Call struct {
+	*mock.Call
+}
+
+// IsCreated is a helper method to define mock.On call
+func (_e *MockContainer_Expecter) IsCreated() *MockContainer_IsCreated_Call {
+	return &MockContainer_IsCreated_Call{Call: _e.mock.On("IsCreated")}
+}
+
+func (_c *MockContainer_IsCreated_Call) Run(run func()) *MockContainer_IsCreated_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockContainer_IsCreated_Call) Return(b bool) *MockContainer_IsCreated_Call {
+	_c.Call.Return(b)
+	return _c
+}
+
+func (_c *MockContainer_IsCreated_Call) RunAndReturn(run func() bool) *MockContainer_IsCreated_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // IsLinkedToRestarting provides a mock function for the type MockContainer
 func (_mock *MockContainer) IsLinkedToRestarting() bool {
 	ret := _mock.Called()
@@ -951,7 +1055,7 @@ type MockContainer_IsMonitorOnly_Call struct {
 
 // IsMonitorOnly is a helper method to define mock.On call
 //   - params types.UpdateParams
-func (_e *MockContainer_Expecter) IsMonitorOnly(params interface{}) *MockContainer_IsMonitorOnly_Call {
+func (_e *MockContainer_Expecter) IsMonitorOnly(params any) *MockContainer_IsMonitorOnly_Call {
 	return &MockContainer_IsMonitorOnly_Call{Call: _e.mock.On("IsMonitorOnly", params)}
 }
 
@@ -1002,7 +1106,7 @@ type MockContainer_IsNoPull_Call struct {
 
 // IsNoPull is a helper method to define mock.On call
 //   - params types.UpdateParams
-func (_e *MockContainer_Expecter) IsNoPull(params interface{}) *MockContainer_IsNoPull_Call {
+func (_e *MockContainer_Expecter) IsNoPull(params any) *MockContainer_IsNoPull_Call {
 	return &MockContainer_IsNoPull_Call{Call: _e.mock.On("IsNoPull", params)}
 }
 
@@ -1231,7 +1335,7 @@ type MockContainer_Links_Call struct {
 
 // Links is a helper method to define mock.On call
 //   - useComposeDependsOn bool
-func (_e *MockContainer_Expecter) Links(useComposeDependsOn interface{}) *MockContainer_Links_Call {
+func (_e *MockContainer_Expecter) Links(useComposeDependsOn any) *MockContainer_Links_Call {
 	return &MockContainer_Links_Call{Call: _e.mock.On("Links", useComposeDependsOn)}
 }
 
@@ -1456,7 +1560,7 @@ type MockContainer_SetLinkedToRestarting_Call struct {
 
 // SetLinkedToRestarting is a helper method to define mock.On call
 //   - status bool
-func (_e *MockContainer_Expecter) SetLinkedToRestarting(status interface{}) *MockContainer_SetLinkedToRestarting_Call {
+func (_e *MockContainer_Expecter) SetLinkedToRestarting(status any) *MockContainer_SetLinkedToRestarting_Call {
 	return &MockContainer_SetLinkedToRestarting_Call{Call: _e.mock.On("SetLinkedToRestarting", status)}
 }
 
@@ -1496,7 +1600,7 @@ type MockContainer_SetStale_Call struct {
 
 // SetStale is a helper method to define mock.On call
 //   - status bool
-func (_e *MockContainer_Expecter) SetStale(status interface{}) *MockContainer_SetStale_Call {
+func (_e *MockContainer_Expecter) SetStale(status any) *MockContainer_SetStale_Call {
 	return &MockContainer_SetStale_Call{Call: _e.mock.On("SetStale", status)}
 }
 

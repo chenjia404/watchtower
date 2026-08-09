@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/docker/docker/api/types/versions"
+	"github.com/moby/moby/client/pkg/versions"
 	"github.com/sirupsen/logrus"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerNetwork "github.com/docker/docker/api/types/network"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerNetwork "github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
@@ -20,7 +21,7 @@ const (
 	cleanupTimeout = 10 * time.Second
 )
 
-// StartTargetContainer creates and starts a new container based on the source container’s configuration.
+// StartTargetContainer creates and starts a new container based on the source container's configuration.
 //
 // It applies the provided network configuration and respects the reviveStopped option.
 // For legacy Docker API versions (< 1.44) with multiple networks, it creates the container with a single
@@ -54,6 +55,151 @@ func StartTargetContainer(
 	cpuCopyMode string,
 	isPodman bool,
 ) (types.ContainerID, error) {
+	createdContainerID, err := CreateTargetContainer(
+		ctx,
+		api,
+		sourceContainer,
+		networkConfig,
+		clientVersion,
+		minSupportedVersion,
+		disableMemorySwappiness,
+		cpuCopyMode,
+		isPodman,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	clog := logrus.WithFields(logrus.Fields{
+		"container": sourceContainer.Name(),
+		"id":        sourceContainer.ID().ShortID(),
+	})
+
+	// Skip starting if source isn't running and revive isn't enabled.
+	if !sourceContainer.IsRunning() && !reviveStopped {
+		clog.WithField("new_id", createdContainerID).
+			Debug("Created container, not starting due to stopped state")
+
+		return createdContainerID, nil
+	}
+
+	// Start the newly created container.
+	clog.WithField("new_id", createdContainerID).
+		Debug("Starting new container")
+
+	_, err = api.ContainerStart(
+		ctx,
+		string(createdContainerID),
+		dockerClient.ContainerStartOptions{},
+	)
+	if err != nil {
+		clog.WithError(err).
+			WithField("new_id", createdContainerID).
+			Debug("Failed to start new container")
+
+		// Start failures from cancellation or transport errors can leave the
+		// container state ambiguous. Inspect first and force-remove only when
+		// the container is still stopped so a late-started instance is kept.
+
+		cleanupFailedStartContainer(ctx, api, clog, createdContainerID)
+
+		return "", fmt.Errorf("%w: %w", errStartContainerFailed, err)
+	}
+
+	// Log detailed start message
+	message := "Started new container"
+	if sourceContainer.IsLinkedToRestarting() {
+		message = "Started linked container"
+	}
+
+	clog.WithField("new_id", createdContainerID.ShortID()).Info(message)
+
+	return createdContainerID, nil
+}
+
+// cleanupFailedStartContainer inspects a container that failed to start and
+// force-removes it only when it is still stopped. Cancellation or transport
+// failures can leave state ambiguous. A late-started container is left alone.
+//
+// Parameters:
+//   - parentCtx: Parent context; deadlines are detached so cleanup can finish.
+//   - api: Interface for container operations.
+//   - clog: Logger with container context fields.
+//   - containerID: ID of the container created before the start failure.
+func cleanupFailedStartContainer(
+	parentCtx context.Context,
+	api Operations,
+	clog *logrus.Entry,
+	containerID types.ContainerID,
+) {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(parentCtx),
+		cleanupTimeout,
+	)
+	defer cancel()
+
+	inspectResult, inspectErr := api.ContainerInspect(
+		cleanupCtx,
+		string(containerID),
+		dockerClient.ContainerInspectOptions{},
+	)
+	if inspectErr != nil {
+		clog.WithError(inspectErr).
+			WithField("new_id", containerID).
+			Debug("Failed to inspect container after start error")
+
+		return
+	}
+
+	state := inspectResult.Container.State
+	if state != nil && state.Running {
+		clog.WithField("new_id", containerID).
+			Debug("Skipped cleanup of running container after start error")
+
+		return
+	}
+
+	_, rmErr := api.ContainerRemove(
+		cleanupCtx,
+		string(containerID),
+		dockerClient.ContainerRemoveOptions{Force: true},
+	)
+	if rmErr != nil {
+		clog.WithError(rmErr).
+			WithField("new_id", containerID).
+			Debug("Failed to clean up container after start error")
+	}
+}
+
+// CreateTargetContainer creates a new container based on the source container's
+// configuration but does not start it. It applies the provided network configuration,
+// renames the container, and attaches additional networks for legacy API versions.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control.
+//   - api: Interface for container operations (Operations).
+//   - sourceContainer: Source container to replicate.
+//   - networkConfig: Network configuration to apply to the new container.
+//   - clientVersion: Docker API version used by the client.
+//   - minSupportedVersion: Minimum Docker API version required for full network features.
+//   - disableMemorySwappiness: If true, disables memory swappiness for Podman compatibility.
+//   - cpuCopyMode: CPU copy mode for container recreation, used for compatibility with Podman.
+//   - isPodman: If true, indicates Podman is being used for CPU compatibility.
+//
+// Returns:
+//   - types.ContainerID: ID of the new container.
+//   - error: Non-nil if creation fails, nil on success.
+func CreateTargetContainer(
+	ctx context.Context,
+	api Operations,
+	sourceContainer types.Container,
+	networkConfig *dockerNetwork.NetworkingConfig,
+	clientVersion string,
+	minSupportedVersion string,
+	disableMemorySwappiness bool,
+	cpuCopyMode string,
+	isPodman bool,
+) (types.ContainerID, error) {
 	clog := logrus.WithFields(logrus.Fields{
 		"container": sourceContainer.Name(),
 		"id":        sourceContainer.ID().ShortID(),
@@ -74,7 +220,11 @@ func StartTargetContainer(
 	handleCPUSettings(hostConfig, cpuCopyMode, isPodman, clog)
 
 	// Log network details for debugging, including MAC address validation.
-	isHostNetwork := sourceContainer.ContainerInfo().HostConfig.NetworkMode.IsHost()
+	isHostNetwork := false
+	if info := sourceContainer.ContainerInfo(); info != nil && info.HostConfig != nil {
+		isHostNetwork = info.HostConfig.NetworkMode.IsHost()
+	}
+
 	debugLogMacAddress(
 		networkConfig,
 		sourceContainer.ID(),
@@ -110,11 +260,12 @@ func StartTargetContainer(
 
 	createdContainer, err := api.ContainerCreate(
 		ctx,
-		config,
-		hostConfig,
-		createNetworkConfig,
-		nil,
-		"",
+		dockerClient.ContainerCreateOptions{
+			Config:           config,
+			HostConfig:       hostConfig,
+			NetworkingConfig: createNetworkConfig,
+			Name:             "",
+		},
 	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to create new container")
@@ -123,23 +274,33 @@ func StartTargetContainer(
 	}
 
 	createdContainerID := types.ContainerID(createdContainer.ID)
-	clog.WithField("new_id", createdContainerID).Debug("Created container successfully")
+	clog.WithField("new_id", createdContainerID).
+		Debug("Created container successfully")
 
 	// Rename the container to the correct name to avoid conflicts during self-update
 	clog.Debug("Renaming container to correct name")
 
-	err = api.ContainerRename(ctx, createdContainer.ID, sourceContainer.Name())
+	_, err = api.ContainerRename(
+		ctx,
+		createdContainer.ID,
+		dockerClient.ContainerRenameOptions{
+			NewName: sourceContainer.Name(),
+		},
+	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to rename container")
 
 		// Clean up the created container to avoid orphaned resources
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		cleanupCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			cleanupTimeout,
+		)
 		defer cancel()
 
-		rmErr := api.ContainerRemove(
+		_, rmErr := api.ContainerRemove(
 			cleanupCtx,
 			createdContainer.ID,
-			dockerContainer.RemoveOptions{Force: true},
+			dockerClient.ContainerRemoveOptions{Force: true},
 		)
 		if rmErr != nil {
 			clog.WithError(rmErr).Warn("Failed to clean up container after rename error")
@@ -160,13 +321,16 @@ func StartTargetContainer(
 		)
 		if err != nil {
 			// Clean up the created container to avoid orphaned resources.
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			cleanupCtx, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx),
+				cleanupTimeout,
+			)
 			defer cancel()
 
-			rmErr := api.ContainerRemove(
+			_, rmErr := api.ContainerRemove(
 				cleanupCtx,
 				createdContainer.ID,
-				dockerContainer.RemoveOptions{Force: true},
+				dockerClient.ContainerRemoveOptions{Force: true},
 			)
 			if rmErr != nil {
 				clog.WithError(rmErr).
@@ -176,38 +340,6 @@ func StartTargetContainer(
 			return "", err
 		}
 	}
-
-	// Skip starting if source isn’t running and revive isn’t enabled.
-	if !sourceContainer.IsRunning() && !reviveStopped {
-		clog.WithField("new_id", createdContainerID).
-			Debug("Created container, not starting due to stopped state")
-
-		return createdContainerID, nil
-	}
-
-	// Start the newly created container.
-	clog.WithField("new_id", createdContainerID).Debug("Starting new container")
-
-	err = api.ContainerStart(
-		ctx,
-		createdContainer.ID,
-		dockerContainer.StartOptions{},
-	)
-	if err != nil {
-		clog.WithError(err).
-			WithField("new_id", createdContainerID).
-			Debug("Failed to start new container")
-
-		return createdContainerID, fmt.Errorf("%w: %w", errStartContainerFailed, err)
-	}
-
-	// Log detailed start message
-	message := "Started new container"
-	if sourceContainer.IsLinkedToRestarting() {
-		message = "Started linked container"
-	}
-
-	clog.WithField("new_id", createdContainerID.ShortID()).Info(message)
 
 	return createdContainerID, nil
 }
@@ -248,7 +380,14 @@ func attachNetworks(
 		if name != initialNetworkName && name != "" {
 			clog.WithField("network", name).Debug("Attaching additional network to container")
 
-			err := api.NetworkConnect(ctx, name, containerID, endpoint)
+			_, err := api.NetworkConnect(
+				ctx,
+				name,
+				dockerClient.NetworkConnectOptions{
+					Container:      containerID,
+					EndpointConfig: endpoint,
+				},
+			)
 			if err != nil {
 				clog.WithError(err).
 					WithField("network", name).
@@ -289,7 +428,13 @@ func RenameTargetContainer(
 	// Attempt to rename the container.
 	clog.Debug("Renaming container")
 
-	err := api.ContainerRename(ctx, string(targetContainer.ID()), targetName)
+	_, err := api.ContainerRename(
+		ctx,
+		string(targetContainer.ID()),
+		dockerClient.ContainerRenameOptions{
+			NewName: targetName,
+		},
+	)
 	if err != nil {
 		clog.WithError(err).Debug("Failed to rename container")
 
@@ -335,6 +480,7 @@ func handleCPUSettings(
 			clog.Debug("Detected Docker, copied all CPU settings")
 		}
 	default:
-		clog.WithField("mode", cpuCopyMode).Debug("Unknown CPU copy mode, defaulting to full")
+		clog.WithField("mode", cpuCopyMode).
+			Debug("Unknown CPU copy mode, defaulting to full")
 	}
 }

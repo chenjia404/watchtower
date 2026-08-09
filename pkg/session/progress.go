@@ -1,6 +1,8 @@
 package session
 
 import (
+	"time"
+
 	"github.com/sirupsen/logrus"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -116,7 +118,7 @@ func (m Progress) Add(update *ContainerStatus) {
 	}).Debug("Added container status to progress map")
 }
 
-// MarkForUpdate sets a container’s state to updated.
+// MarkForUpdate sets a container's state to updated.
 //
 // Parameters:
 //   - containerID: ID of container to mark.
@@ -136,7 +138,7 @@ func (m Progress) MarkForUpdate(containerID types.ContainerID) {
 	}).Debug("Marked container for update")
 }
 
-// MarkRestarted sets a container’s state to restarted.
+// MarkRestarted sets a container's state to restarted.
 //
 // Parameters:
 //   - containerID: ID of container to mark.
@@ -163,8 +165,16 @@ func (m Progress) MarkRestarted(containerID types.ContainerID) {
 //   - age: Human-readable image age.
 //   - delay: Human-readable cooldown duration.
 //   - remaining: Human-readable remaining time (empty if passed).
+//   - eligibleAt: Time when the container becomes eligible for update.
 //   - passed: True if the image passed the cooldown check.
-func (m Progress) SetCooldownInfo(containerID types.ContainerID, age, delay, remaining string, passed bool) {
+func (m Progress) SetCooldownInfo(
+	containerID types.ContainerID,
+	age,
+	delay,
+	remaining string,
+	eligibleAt time.Time,
+	passed bool,
+) {
 	update, exists := m[containerID]
 	if !exists {
 		logrus.WithField("container_id", containerID.ShortID()).
@@ -173,7 +183,7 @@ func (m Progress) SetCooldownInfo(containerID types.ContainerID, age, delay, rem
 		return
 	}
 
-	update.SetCooldownInfo(age, delay, remaining, passed)
+	update.SetCooldownInfo(age, delay, remaining, eligibleAt, passed)
 	logrus.WithFields(logrus.Fields{
 		"container_id": containerID.ShortID(),
 		"name":         update.Name(),

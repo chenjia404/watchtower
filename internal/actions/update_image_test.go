@@ -2,6 +2,7 @@ package actions_test
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -126,6 +127,38 @@ var _ = ginkgo.Describe("the update action", func() {
 				To(gomega.Equal(int32(0)), "RemoveImageByID should not be called")
 			gomega.Expect(client.TestData.IsContainerStaleCount.Load()).
 				To(gomega.Equal(int32(0)), "IsContainerStale should not be called")
+		})
+
+		ginkgo.It("should skip bare sha256-pinned containers and not call IsContainerStale", func() {
+			client = &mockActions.MockClient{
+				TestData: &mockActions.TestData{
+					Containers: []types.Container{
+						mockActions.CreateMockContainer(
+							"bare-digest-container",
+							"/bare-digest-container",
+							"sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+							time.Now(),
+						),
+					},
+					Staleness: map[string]bool{
+						"bare-digest-container": true,
+					},
+				},
+				Stopped: make(map[string]bool),
+			}
+			report, cleanupImageInfos, err := actions.Update(
+				context.Background(),
+				client,
+				config,
+			)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(report.Scanned()).
+				To(gomega.HaveLen(1), "Bare digest container should be scanned")
+			gomega.Expect(report.Updated()).
+				To(gomega.BeEmpty(), "Bare digest container should not be updated")
+			gomega.Expect(cleanupImageInfos).To(gomega.BeEmpty())
+			gomega.Expect(client.TestData.IsContainerStaleCount.Load()).
+				To(gomega.Equal(int32(0)), "IsContainerStale should not be called for bare digest pin")
 		})
 
 		ginkgo.It(
@@ -275,6 +308,60 @@ var _ = ginkgo.Describe("the update action", func() {
 				To(gomega.Equal(int32(0)), "RemoveImageByID should not be called")
 			gomega.Expect(client.TestData.IsContainerStaleCount.Load()).
 				To(gomega.Equal(int32(0)), "IsContainerStale should not be called")
+		})
+
+		// Verify that failures across parallel staleness checks are all counted
+		// in the final report when IsContainerStale returns an error for every container.
+		ginkgo.It("should count all parallel staleness failures in the final report", func() {
+			client = &mockActions.MockClient{
+				TestData: &mockActions.TestData{
+					Containers: []types.Container{
+						mockActions.CreateMockContainerWithImageInfoP(
+							"invalid-ref-container",
+							"/invalid-ref-container",
+							"",
+							time.Now(),
+							nil,
+						),
+						mockActions.CreateMockContainer(
+							"stale-fail-container",
+							"/stale-fail-container",
+							"image:latest",
+							time.Now(),
+						),
+						mockActions.CreateMockContainer(
+							"normal-container",
+							"/normal-container",
+							"image:latest",
+							time.Now(),
+						),
+					},
+					Staleness: map[string]bool{
+						"invalid-ref-container": true,
+						"stale-fail-container":  true,
+						"normal-container":      true,
+					},
+				},
+				Stopped: make(map[string]bool),
+			}
+			client.TestData.IsContainerStaleError = errors.New("stale check failed")
+
+			report, cleanupImageInfos, err := actions.Update(
+				context.Background(),
+				client,
+				config,
+			)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(report.Skipped()).
+				To(gomega.HaveLen(3), "All three containers should be skipped when IsContainerStale fails")
+			gomega.Expect(report.Scanned()).
+				To(gomega.BeEmpty(), "No containers should be scanned when all fail")
+			gomega.Expect(report.Updated()).
+				To(gomega.BeEmpty(), "No containers should be updated when IsContainerStale fails")
+			gomega.Expect(cleanupImageInfos).
+				To(gomega.BeEmpty(), "No image IDs should be collected")
+			gomega.Expect(client.TestData.IsContainerStaleCount.Load()).
+				To(gomega.Equal(int32(3)), "IsContainerStale should be called for all three containers")
 		})
 	})
 })

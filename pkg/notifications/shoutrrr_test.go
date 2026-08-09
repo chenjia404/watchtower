@@ -16,6 +16,8 @@ import (
 	"github.com/onsi/gomega/gbytes"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	mockActions "github.com/nicholas-fedor/watchtower/internal/actions/mocks"
 	"github.com/nicholas-fedor/watchtower/internal/flags"
@@ -25,6 +27,9 @@ import (
 
 var allButTrace = logrus.DebugLevel
 
+// TODO: Remove legacyMockData when legacy notification types are removed.
+//
+//nolint:godox
 var legacyMockData = Data{
 	Entries: []*logrus.Entry{
 		{
@@ -58,6 +63,10 @@ var mockDataAllFresh = Data{
 
 // mockDataFromStates generates mock notification data with specified container states.
 // It includes legacy log entries and static data for testing purposes.
+//
+// TODO: Remove legacyMockData reference when legacy notification types are removed.
+//
+//nolint:godox
 func mockDataFromStates(states ...session.State) Data {
 	hostname := "Mock"
 	prefix := ""
@@ -141,6 +150,8 @@ updt1 (mock/updt1:latest): Updated
 		})
 	})
 
+	//nolint:godox
+	// TODO: Remove legacy template tests when legacy notification types are removed.
 	ginkgo.When("using legacy templates", func() {
 		ginkgo.When("no custom template is provided", func() {
 			ginkgo.It("should format the messages using the default template", func() {
@@ -1108,6 +1119,10 @@ func (b blockingRouter) Send(_ string, _ *types.Params) []error {
 
 // sendNotificationsWithBlockingRouter creates a notifier with a blocking router for testing.
 // It queues a message and returns the notifier and router to verify notification delays.
+//
+// TODO: Remove legacy template usage when legacy notification types are removed.
+//
+//nolint:godox
 func sendNotificationsWithBlockingRouter() (*shoutrrrTypeNotifier, *blockingRouter, error) {
 	legacy := true
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1152,6 +1167,10 @@ func sendNotificationsWithBlockingRouter() (*shoutrrrTypeNotifier, *blockingRout
 
 // createNotifierWithTemplate creates a notifier with a specified template for testing.
 // It returns the notifier and an error, falling back to a default template if parsing fails.
+//
+// TODO: Remove legacy parameter and default-legacy fallback when legacy notification types are removed.
+//
+//nolint:godox
 func createNotifierWithTemplate(tplString string, legacy bool) (*shoutrrrTypeNotifier, error) {
 	tpl, err := getShoutrrrTemplate(tplString, legacy)
 	if err != nil {
@@ -1179,6 +1198,10 @@ func createNotifierWithTemplate(tplString string, legacy bool) (*shoutrrrTypeNot
 
 // getTemplatedResult generates a templated message for testing.
 // It builds and returns the message string, expecting no errors.
+//
+// TODO: Remove legacy parameter when legacy notification types are removed.
+//
+//nolint:godox
 func getTemplatedResult(tplString string, legacy bool, data Data) string {
 	notifier, err := createNotifierWithTemplate(tplString, legacy)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
@@ -1198,7 +1221,7 @@ func TestShutdownGracePeriodConstant(t *testing.T) {
 
 // TestCloseDoesNotHangWithBlockingRouter verifies that Close() completes without hanging
 // when the router is blocked. This tests that the context cancellation properly unblocks
-// the sendWithCancellation call.
+// the send call.
 func TestCloseDoesNotHangWithBlockingRouter(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Set up logging
@@ -1416,4 +1439,42 @@ func TestCloseWithNoGoroutine(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatalf("Close() took too long without goroutine (timeout exceeded)")
 	}
+}
+
+// TestCreateNotifier_FatalsOnBadURL verifies that createNotifier calls Fatal
+// when given a docker-secret file path instead of a valid URL.
+func TestCreateNotifier_FatalsOnBadURL(t *testing.T) {
+	originalExit := logrus.StandardLogger().ExitFunc
+
+	defer func() { logrus.StandardLogger().ExitFunc = originalExit }()
+
+	logrus.StandardLogger().ExitFunc = func(_ int) { panic("FATAL") }
+
+	assert.PanicsWithValue(t, "FATAL", func() {
+		createNotifier(
+			[]string{"/run/secrets/WATCHTOWER_NOTIFICATION_URL"},
+			logrus.InfoLevel,
+			"",
+			true,
+			StaticData{},
+			false,
+			0,
+		)
+	})
+}
+
+// TestCreateNotifier_AcceptsGotifyURLFromFileExpansion verifies that createNotifier
+// succeeds when given a valid Gotify URL matching expanded secret content.
+func TestCreateNotifier_AcceptsGotifyURLFromFileExpansion(t *testing.T) {
+	notifier := createNotifier(
+		[]string{"gotify://gotify.example.com/token123"},
+		logrus.InfoLevel,
+		"",
+		true,
+		StaticData{},
+		false,
+		0,
+	)
+
+	require.NotNil(t, notifier)
 }

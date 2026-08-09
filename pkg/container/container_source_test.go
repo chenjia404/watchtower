@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -14,10 +15,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
-	dockerContainer "github.com/docker/docker/api/types/container"
-	dockerImage "github.com/docker/docker/api/types/image"
-	dockerNetwork "github.com/docker/docker/api/types/network"
-	dockerClient "github.com/docker/docker/client"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	dockerNetwork "github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/pkg/filters"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -39,10 +40,12 @@ var _ = ginkgo.Describe("ListSourceContainers", func() {
 
 		var err error
 
-		docker, err = dockerClient.NewClientWithOpts(
+		docker, err = dockerClient.New(
 			dockerClient.WithHost(mockServer.URL()),
 			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()))
 		require.NoError(ginkgo.GinkgoT(), err)
+
+		mockServer.AppendHandlers(APIVersionPingHandler())
 	})
 
 	ginkgo.AfterEach(func() {
@@ -52,7 +55,11 @@ var _ = ginkgo.Describe("ListSourceContainers", func() {
 	// Helper function to verify filters in request
 	verifyFilters := func(expectedStatuses []string) http.HandlerFunc {
 		return ghttp.CombineHandlers(
-			ghttp.VerifyRequest("GET", gomega.MatchRegexp("^/v[0-9.]+/containers/json$")),
+			ghttp.VerifyRequest(
+				"GET",
+				gomega.MatchRegexp(
+					"^/v[0-9.]+/containers/json$"),
+			),
 			func(w http.ResponseWriter, r *http.Request) {
 				filtersParam := r.URL.Query().Get("filters")
 
@@ -90,19 +97,19 @@ var _ = ginkgo.Describe("ListSourceContainers", func() {
 			ghttp.CombineHandlers(
 				ghttp.VerifyRequest(
 					"GET",
-					gomega.MatchRegexp(fmt.Sprintf("^/v[0-9.]+/containers/%s/json$", containerID)),
+					gomega.MatchRegexp(
+						fmt.Sprintf("^/v[0-9.]+/containers/%s/json$", containerID),
+					),
 				),
 				ghttp.RespondWithJSONEncoded(http.StatusOK, dockerContainer.InspectResponse{
-					ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-						ID:    containerID,
-						Name:  "/test-container",
-						Image: "test-image:latest",
-						State: &dockerContainer.State{
-							Status:  "running",
-							Running: true,
-						},
-						HostConfig: &dockerContainer.HostConfig{},
+					ID:    containerID,
+					Name:  "/test-container",
+					Image: "test-image:latest",
+					State: &dockerContainer.State{
+						Status:  "running",
+						Running: true,
 					},
+					HostConfig: &dockerContainer.HostConfig{},
 					Config: &dockerContainer.Config{
 						Image: "test-image:latest",
 					},
@@ -127,7 +134,12 @@ var _ = ginkgo.Describe("ListSourceContainers", func() {
 			)
 			mockServer.AppendHandlers(mockInspects(testContainerID)...)
 
-			containers, err := ListSourceContainers(context.Background(), docker, ClientOptions{}, nil)
+			containers, err := ListSourceContainers(
+				context.Background(),
+				docker,
+				ClientOptions{},
+				nil,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(1))
 		})
@@ -176,7 +188,12 @@ var _ = ginkgo.Describe("ListSourceContainers", func() {
 			)
 			mockServer.AppendHandlers(mockInspects(testContainerID)...)
 
-			containers, err := ListSourceContainers(context.Background(), docker, ClientOptions{}, filters.NoFilter)
+			containers, err := ListSourceContainers(
+				context.Background(),
+				docker,
+				ClientOptions{},
+				filters.NoFilter,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(1))
 		})
@@ -186,12 +203,20 @@ var _ = ginkgo.Describe("ListSourceContainers", func() {
 		ginkgo.It("should return empty container list without error", func() {
 			mockServer.AppendHandlers(
 				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", gomega.MatchRegexp("^/v[0-9.]+/containers/json$")),
+					ghttp.VerifyRequest(
+						"GET",
+						gomega.MatchRegexp("^/v[0-9.]+/containers/json$"),
+					),
 					ghttp.RespondWith(http.StatusNotFound, `{"message":"page not found"}`),
 				),
 			)
 
-			containers, err := ListSourceContainers(context.Background(), docker, ClientOptions{}, nil)
+			containers, err := ListSourceContainers(
+				context.Background(),
+				docker,
+				ClientOptions{},
+				nil,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.BeEmpty())
 		})
@@ -202,14 +227,14 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 	ginkgo.It("includes running status always", func() {
 		opts := ClientOptions{}
 		filterArgs := buildListFilterArgs(opts, false)
-		statuses := filterArgs.Get("status")
+		statuses := getStatusFilterKeys(filterArgs)
 		gomega.Expect(statuses).To(gomega.ContainElement("running"))
 	})
 
 	ginkgo.It("includes created and exited when IncludeStopped is true", func() {
 		opts := ClientOptions{IncludeStopped: true}
 		filterArgs := buildListFilterArgs(opts, false)
-		statuses := filterArgs.Get("status")
+		statuses := getStatusFilterKeys(filterArgs)
 		gomega.Expect(statuses).To(gomega.ContainElement("created"))
 		gomega.Expect(statuses).To(gomega.ContainElement("exited"))
 		gomega.Expect(statuses).To(gomega.ContainElement("running"))
@@ -218,7 +243,7 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 	ginkgo.It("does not include created and exited when IncludeStopped is false", func() {
 		opts := ClientOptions{IncludeStopped: false}
 		filterArgs := buildListFilterArgs(opts, false)
-		statuses := filterArgs.Get("status")
+		statuses := getStatusFilterKeys(filterArgs)
 		gomega.Expect(statuses).ToNot(gomega.ContainElement("created"))
 		gomega.Expect(statuses).ToNot(gomega.ContainElement("exited"))
 		gomega.Expect(statuses).To(gomega.ContainElement("running"))
@@ -229,7 +254,7 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 		func() {
 			opts := ClientOptions{IncludeRestarting: true}
 			filterArgs := buildListFilterArgs(opts, false)
-			statuses := filterArgs.Get("status")
+			statuses := getStatusFilterKeys(filterArgs)
 			gomega.Expect(statuses).To(gomega.ContainElement("restarting"))
 			gomega.Expect(statuses).To(gomega.ContainElement("running"))
 		},
@@ -238,7 +263,7 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 	ginkgo.It("does not include restarting when IncludeRestarting is false", func() {
 		opts := ClientOptions{IncludeRestarting: false}
 		filterArgs := buildListFilterArgs(opts, false)
-		statuses := filterArgs.Get("status")
+		statuses := getStatusFilterKeys(filterArgs)
 		gomega.Expect(statuses).ToNot(gomega.ContainElement("restarting"))
 		gomega.Expect(statuses).To(gomega.ContainElement("running"))
 	})
@@ -248,7 +273,7 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 		func() {
 			opts := ClientOptions{IncludeRestarting: true}
 			filterArgs := buildListFilterArgs(opts, true)
-			statuses := filterArgs.Get("status")
+			statuses := getStatusFilterKeys(filterArgs)
 			gomega.Expect(statuses).ToNot(gomega.ContainElement("restarting"))
 			gomega.Expect(statuses).To(gomega.ContainElement("running"))
 		},
@@ -259,7 +284,7 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 		func() {
 			opts := ClientOptions{IncludeStopped: true, IncludeRestarting: true}
 			filterArgs := buildListFilterArgs(opts, false)
-			statuses := filterArgs.Get("status")
+			statuses := getStatusFilterKeys(filterArgs)
 			gomega.Expect(statuses).To(gomega.ContainElement("running"))
 			gomega.Expect(statuses).To(gomega.ContainElement("created"))
 			gomega.Expect(statuses).To(gomega.ContainElement("exited"))
@@ -272,7 +297,7 @@ var _ = ginkgo.Describe("buildListFilterArgs", func() {
 		func() {
 			opts := ClientOptions{IncludeStopped: true, IncludeRestarting: true}
 			filterArgs := buildListFilterArgs(opts, true)
-			statuses := filterArgs.Get("status")
+			statuses := getStatusFilterKeys(filterArgs)
 			gomega.Expect(statuses).To(gomega.ContainElement("running"))
 			gomega.Expect(statuses).To(gomega.ContainElement("created"))
 			gomega.Expect(statuses).To(gomega.ContainElement("exited"))
@@ -292,10 +317,13 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 
 		var err error
 
-		docker, err = dockerClient.NewClientWithOpts(
+		docker, err = dockerClient.New(
 			dockerClient.WithHost(mockServer.URL()),
-			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()))
+			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()),
+		)
 		require.NoError(ginkgo.GinkgoT(), err)
+
+		mockServer.AppendHandlers(APIVersionPingHandler())
 	})
 
 	ginkgo.AfterEach(func() {
@@ -314,16 +342,14 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 						),
 					),
 					ghttp.RespondWithJSONEncoded(http.StatusOK, dockerContainer.InspectResponse{
-						ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-							ID:    containerID,
-							Name:  "/test-watchtower",
-							Image: "test-image:latest",
-							State: &dockerContainer.State{
-								Status:  "running",
-								Running: true,
-							},
-							HostConfig: &dockerContainer.HostConfig{},
+						ID:    containerID,
+						Name:  "/test-watchtower",
+						Image: "test-image:latest",
+						State: &dockerContainer.State{
+							Status:  "running",
+							Running: true,
 						},
+						HostConfig: &dockerContainer.HostConfig{},
 						Config: &dockerContainer.Config{
 							Image: "test-image:latest",
 						},
@@ -340,7 +366,11 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				),
 			)
 
-			container, err := GetSourceContainer(context.Background(), docker, types.ContainerID(containerID))
+			container, err := GetSourceContainer(
+				context.Background(),
+				docker,
+				types.ContainerID(containerID),
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(container).ToNot(gomega.BeNil())
 			gomega.Expect(container.ID()).To(gomega.Equal(types.ContainerID(containerID)))
@@ -361,16 +391,14 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 						),
 					),
 					ghttp.RespondWithJSONEncoded(http.StatusOK, dockerContainer.InspectResponse{
-						ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-							ID:    containerID,
-							Name:  "/test-watchtower",
-							Image: "test-image:latest",
-							State: &dockerContainer.State{
-								Status:  "exited",
-								Running: false,
-							},
-							HostConfig: &dockerContainer.HostConfig{},
+						ID:    containerID,
+						Name:  "/test-watchtower",
+						Image: "test-image:latest",
+						State: &dockerContainer.State{
+							Status:  "exited",
+							Running: false,
 						},
+						HostConfig: &dockerContainer.HostConfig{},
 						Config: &dockerContainer.Config{
 							Image: "test-image:latest",
 						},
@@ -388,7 +416,11 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				),
 			)
 
-			container, err := GetSourceContainer(context.Background(), docker, types.ContainerID(containerID))
+			container, err := GetSourceContainer(
+				context.Background(),
+				docker,
+				types.ContainerID(containerID),
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(container).ToNot(gomega.BeNil())
 			gomega.Expect(container.ID()).To(gomega.Equal(types.ContainerID(containerID)))
@@ -409,17 +441,15 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 						),
 					),
 					ghttp.RespondWithJSONEncoded(http.StatusOK, dockerContainer.InspectResponse{
-						ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-							ID:    containerID,
-							Name:  "/test-watchtower",
-							Image: "test-image:latest",
-							State: &dockerContainer.State{
-								Status:  "running",
-								Running: true,
-							},
-							HostConfig: &dockerContainer.HostConfig{
-								NetworkMode: dockerContainer.NetworkMode("container:" + parentID),
-							},
+						ID:    containerID,
+						Name:  "/test-watchtower",
+						Image: "test-image:latest",
+						State: &dockerContainer.State{
+							Status:  "running",
+							Running: true,
+						},
+						HostConfig: &dockerContainer.HostConfig{
+							NetworkMode: dockerContainer.NetworkMode("container:" + parentID),
 						},
 						Config: &dockerContainer.Config{
 							Image: "test-image:latest",
@@ -429,13 +459,13 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				ghttp.CombineHandlers(
 					ghttp.VerifyRequest(
 						"GET",
-						gomega.MatchRegexp(fmt.Sprintf("^/v[0-9.]+/containers/%s/json$", parentID)),
+						gomega.MatchRegexp(
+							fmt.Sprintf("^/v[0-9.]+/containers/%s/json$", parentID),
+						),
 					),
 					ghttp.RespondWithJSONEncoded(http.StatusOK, dockerContainer.InspectResponse{
-						ContainerJSONBase: &dockerContainer.ContainerJSONBase{
-							ID:   parentID,
-							Name: "/parent-container",
-						},
+						ID:   parentID,
+						Name: "/parent-container",
 					}),
 				),
 				ghttp.CombineHandlers(
@@ -449,7 +479,11 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				),
 			)
 
-			container, err := GetSourceContainer(context.Background(), docker, types.ContainerID(containerID))
+			container, err := GetSourceContainer(
+				context.Background(),
+				docker,
+				types.ContainerID(containerID),
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(container).ToNot(gomega.BeNil())
 			gomega.Expect(container.ContainerInfo().HostConfig.NetworkMode).
@@ -472,7 +506,11 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				),
 			)
 
-			container, err := GetSourceContainer(context.Background(), docker, types.ContainerID(containerID))
+			container, err := GetSourceContainer(
+				context.Background(),
+				docker,
+				types.ContainerID(containerID),
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to inspect container"))
 			gomega.Expect(container).To(gomega.BeNil())
@@ -494,7 +532,11 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				),
 			)
 
-			container, err := GetSourceContainer(context.Background(), docker, types.ContainerID(containerID))
+			container, err := GetSourceContainer(
+				context.Background(),
+				docker,
+				types.ContainerID(containerID),
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to inspect container"))
 			gomega.Expect(container).To(gomega.BeNil())
@@ -516,7 +558,11 @@ var _ = ginkgo.Describe("GetSourceContainer", func() {
 				),
 			)
 
-			container, err := GetSourceContainer(context.Background(), docker, types.ContainerID(containerID))
+			container, err := GetSourceContainer(
+				context.Background(),
+				docker,
+				types.ContainerID(containerID),
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to inspect container"))
 			gomega.Expect(container).To(gomega.BeNil())
@@ -535,10 +581,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 
 		var err error
 
-		docker, err = dockerClient.NewClientWithOpts(
+		docker, err = dockerClient.New(
 			dockerClient.WithHost(mockServer.URL()),
-			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()))
+			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()),
+		)
 		require.NoError(ginkgo.GinkgoT(), err)
+
+		mockServer.AppendHandlers(APIVersionPingHandler())
 	})
 
 	ginkgo.AfterEach(func() {
@@ -578,7 +627,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 					),
 				)
 
-				err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, false)
+				err := StopAndRemoveSourceContainer(
+					context.Background(),
+					docker,
+					container,
+					10*time.Second,
+					false,
+				)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			})
 		},
@@ -617,7 +672,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 					),
 				)
 
-				err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, true)
+				err := StopAndRemoveSourceContainer(
+					context.Background(),
+					docker,
+					container,
+					10*time.Second,
+					true,
+				)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			})
 		},
@@ -640,7 +701,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, false)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				false,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to stop container"))
 		})
@@ -673,7 +740,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, false)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				false,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to remove container"))
 		})
@@ -697,10 +770,57 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, true)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				true,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			// Should not have made a DELETE request since AutoRemove is true
-			gomega.Expect(mockServer.ReceivedRequests()).To(gomega.HaveLen(1))
+			gomega.Expect(mockServer.ReceivedRequests()).To(gomega.HaveLen(2))
+		})
+	})
+
+	ginkgo.When("container HostConfig is nil", func() {
+		ginkgo.It("should stop and remove without panicking", func() {
+			container := MockContainer(
+				WithContainerState(dockerContainer.State{Running: true}),
+				func(c *dockerContainer.InspectResponse, _ *dockerImage.InspectResponse) {
+					c.HostConfig = nil
+				},
+			)
+			cid := container.ContainerInfo().ID
+
+			mockServer.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest(
+						"POST",
+						gomega.HaveSuffix(fmt.Sprintf("containers/%s/stop", cid)),
+					),
+					ghttp.RespondWith(http.StatusNoContent, nil),
+				),
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest(
+						"DELETE",
+						gomega.MatchRegexp(fmt.Sprintf("^/v[0-9.]+/containers/%s$", cid)),
+					),
+					ghttp.RespondWith(http.StatusNoContent, nil),
+				),
+			)
+
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				true,
+			)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			// Stop + DELETE (nil HostConfig is not AutoRemove).
+			// ReceivedRequests includes the initial API version ping.
+			gomega.Expect(mockServer.ReceivedRequests()).To(gomega.HaveLen(3))
 		})
 	})
 
@@ -725,7 +845,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, true)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				true,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 	})
@@ -763,7 +889,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, timeout, false)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				timeout,
+				false,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 	})
@@ -792,7 +924,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, false)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				false,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 	})
@@ -814,7 +952,13 @@ var _ = ginkgo.Describe("StopAndRemoveSourceContainer", func() {
 				),
 			)
 
-			err := StopAndRemoveSourceContainer(context.Background(), docker, container, 10*time.Second, false)
+			err := StopAndRemoveSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+				false,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to stop container"))
 		})
@@ -829,12 +973,12 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"bridge": {
 						NetworkID:  "bridge_network_id",
-						MacAddress: "02:42:ac:11:00:02",
-						IPAddress:  "172.17.0.2",
+						MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+						IPAddress:  netip.MustParseAddr("172.17.0.2"),
 						Aliases:    []string{"container_id", "test-alias"},
 						DNSNames:   []string{"test.example.com"},
 						IPAMConfig: &dockerNetwork.EndpointIPAMConfig{
-							IPv4Address: "172.17.0.2",
+							IPv4Address: netip.MustParseAddr("172.17.0.2"),
 						},
 					},
 				}),
@@ -846,11 +990,17 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 			gomega.Expect(config.EndpointsConfig).To(gomega.HaveKey("bridge"))
 			endpoint := config.EndpointsConfig["bridge"]
 			gomega.Expect(endpoint.NetworkID).To(gomega.Equal("bridge_network_id"))
-			gomega.Expect(endpoint.MacAddress).To(gomega.Equal("02:42:ac:11:00:02"))
-			gomega.Expect(endpoint.IPAddress).To(gomega.Equal("172.17.0.2"))
+			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(
+				dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+			))
+			gomega.Expect(endpoint.IPAddress).To(gomega.Equal(
+				netip.MustParseAddr("172.17.0.2"),
+			))
 			gomega.Expect(endpoint.DNSNames).To(gomega.ConsistOf("test.example.com"))
 			gomega.Expect(endpoint.IPAMConfig).ToNot(gomega.BeNil())
-			gomega.Expect(endpoint.IPAMConfig.IPv4Address).To(gomega.Equal("172.17.0.2"))
+			gomega.Expect(endpoint.IPAMConfig.IPv4Address).To(gomega.Equal(
+				netip.MustParseAddr("172.17.0.2"),
+			))
 			// Aliases should be filtered to remove container short ID
 			gomega.Expect(endpoint.Aliases).To(gomega.ConsistOf("test-alias"))
 		})
@@ -866,6 +1016,27 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 			gomega.Expect(config.EndpointsConfig).To(gomega.HaveKey("bridge"))
 			gomega.Expect(config.EndpointsConfig).To(gomega.HaveKey("custom_network"))
 		})
+
+		ginkgo.It("should clear engine-generated MAC for running container without validation error", func() {
+			container := MockContainer(
+				WithNetworkMode("bridge"),
+				WithContainerState(dockerContainer.State{Running: true, Status: "running"}),
+				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
+					"bridge": {
+						NetworkID:  "bridge_network_id",
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						IPAddress:  netip.MustParseAddr("172.17.0.2"),
+					},
+				}),
+			)
+
+			config := getNetworkConfig(container, "1.50")
+
+			gomega.Expect(config).ToNot(gomega.BeNil())
+			gomega.Expect(config.EndpointsConfig).To(gomega.HaveKey("bridge"))
+			endpoint := config.EndpointsConfig["bridge"]
+			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+		})
 	})
 
 	ginkgo.Context("with host network mode", func() {
@@ -874,12 +1045,12 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 				WithNetworkMode("host"),
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"host": {
-						MacAddress: "02:42:ac:11:00:02",
-						IPAddress:  "192.168.1.100",
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						IPAddress:  netip.MustParseAddr("192.168.1.100"),
 						Aliases:    []string{"container_id", "host-alias"},
 						DNSNames:   []string{"host.example.com"},
 						IPAMConfig: &dockerNetwork.EndpointIPAMConfig{
-							IPv4Address: "192.168.1.100",
+							IPv4Address: netip.MustParseAddr("192.168.1.100"),
 						},
 					},
 				}),
@@ -889,8 +1060,8 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 
 			gomega.Expect(config.EndpointsConfig).To(gomega.HaveKey("host"))
 			endpoint := config.EndpointsConfig["host"]
-			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(""))
-			gomega.Expect(endpoint.IPAddress).To(gomega.Equal(""))
+			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+			gomega.Expect(endpoint.IPAddress).To(gomega.Equal(netip.Addr{}))
 			gomega.Expect(endpoint.DNSNames).To(gomega.BeNil())
 			gomega.Expect(endpoint.IPAMConfig).To(gomega.BeNil())
 			gomega.Expect(endpoint.Aliases).To(gomega.BeNil())
@@ -902,8 +1073,8 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 			container := MockContainer(
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"bridge": {
-						MacAddress: "02:42:ac:11:00:02",
-						IPAddress:  "172.17.0.2",
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						IPAddress:  netip.MustParseAddr("172.17.0.2"),
 						DNSNames:   []string{"test.example.com"},
 					},
 				}),
@@ -912,8 +1083,8 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 			config := getNetworkConfig(container, "1.40")
 
 			endpoint := config.EndpointsConfig["bridge"]
-			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(""))
-			gomega.Expect(endpoint.IPAddress).To(gomega.Equal(""))
+			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+			gomega.Expect(endpoint.IPAddress).To(gomega.Equal(netip.Addr{}))
 			gomega.Expect(endpoint.DNSNames).To(gomega.BeNil())
 		})
 	})
@@ -957,8 +1128,8 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"my_custom_network": {
 						NetworkID:  "custom_net_id",
-						MacAddress: "aa:bb:cc:dd:ee:ff",
-						IPAddress:  "10.0.0.5",
+						MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+						IPAddress:  netip.MustParseAddr("10.0.0.5"),
 						Aliases:    []string{"container_id", "custom-alias"},
 						Links:      []string{"other_container:alias"},
 					},
@@ -969,8 +1140,12 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 
 			endpoint := config.EndpointsConfig["my_custom_network"]
 			gomega.Expect(endpoint.NetworkID).To(gomega.Equal("custom_net_id"))
-			gomega.Expect(endpoint.MacAddress).To(gomega.Equal("aa:bb:cc:dd:ee:ff"))
-			gomega.Expect(endpoint.IPAddress).To(gomega.Equal("10.0.0.5"))
+			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(
+				dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+			))
+			gomega.Expect(endpoint.IPAddress).To(gomega.Equal(
+				netip.MustParseAddr("10.0.0.5"),
+			))
 			gomega.Expect(endpoint.Aliases).To(gomega.ConsistOf("custom-alias"))
 			gomega.Expect(endpoint.Links).To(gomega.ConsistOf("other_container:alias"))
 		})
@@ -981,7 +1156,7 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 			container := MockContainer(
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"bridge": {
-						MacAddress: "02:42:ac:11:00:02",
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
 					},
 				}),
 			)
@@ -991,7 +1166,9 @@ var _ = ginkgo.Describe("getNetworkConfig", func() {
 
 			endpoint := config.EndpointsConfig["bridge"]
 			// Should preserve MAC for modern versions
-			gomega.Expect(endpoint.MacAddress).To(gomega.Equal("02:42:ac:11:00:02"))
+			gomega.Expect(endpoint.MacAddress).To(gomega.Equal(
+				dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+			))
 		})
 	})
 
@@ -1054,12 +1231,12 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 			ginkgo.It("should preserve MAC address, IP address, and DNS names", func() {
 				sourceEndpoint := &dockerNetwork.EndpointSettings{
 					NetworkID:  "bridge_network_id",
-					MacAddress: "02:42:ac:11:00:02",
-					IPAddress:  "172.17.0.2",
+					MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
 					DNSNames:   []string{"test.example.com"},
 					Aliases:    []string{"container_id", "test-alias"},
 					IPAMConfig: &dockerNetwork.EndpointIPAMConfig{
-						IPv4Address: "172.17.0.2",
+						IPv4Address: netip.MustParseAddr("172.17.0.2"),
 					},
 				}
 				containerID := types.ContainerID("container_id")
@@ -1073,13 +1250,143 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				gomega.Expect(result.NetworkID).To(gomega.Equal("bridge_network_id"))
-				gomega.Expect(result.MacAddress).To(gomega.Equal("02:42:ac:11:00:02"))
-				gomega.Expect(result.IPAddress).To(gomega.Equal("172.17.0.2"))
+				gomega.Expect(result.MacAddress).To(gomega.Equal(
+					dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+				))
+				gomega.Expect(result.IPAddress).To(gomega.Equal(
+					netip.MustParseAddr("172.17.0.2"),
+				))
 				gomega.Expect(result.DNSNames).To(gomega.ConsistOf("test.example.com"))
 				gomega.Expect(result.IPAMConfig).ToNot(gomega.BeNil())
-				gomega.Expect(result.IPAMConfig.IPv4Address).To(gomega.Equal("172.17.0.2"))
+				gomega.Expect(result.IPAMConfig.IPv4Address).To(gomega.Equal(
+					netip.MustParseAddr("172.17.0.2"),
+				))
 				// Aliases should be filtered to remove container short ID
 				gomega.Expect(result.Aliases).To(gomega.ConsistOf("test-alias"))
+			})
+
+			ginkgo.It("should clear engine-generated MAC when it matches the endpoint IP", func() {
+				sourceEndpoint := &dockerNetwork.EndpointSettings{
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				}
+				containerID := types.ContainerID("container_id")
+
+				result, err := processEndpoint(
+					sourceEndpoint,
+					containerID,
+					clientVersion,
+					isHostNetwork,
+				)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Expect(result.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+			})
+
+			ginkgo.It("should preserve user-configured MAC that does not match the endpoint IP", func() {
+				sourceEndpoint := &dockerNetwork.EndpointSettings{
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				}
+				containerID := types.ContainerID("container_id")
+
+				result, err := processEndpoint(
+					sourceEndpoint,
+					containerID,
+					clientVersion,
+					isHostNetwork,
+				)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Expect(result.MacAddress).To(gomega.Equal(
+					dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+				))
+			})
+
+			ginkgo.It("should preserve engine-generated MAC when endpoint IP is empty", func() {
+				sourceEndpoint := &dockerNetwork.EndpointSettings{
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					IPAddress:  netip.Addr{},
+				}
+				containerID := types.ContainerID("container_id")
+
+				result, err := processEndpoint(
+					sourceEndpoint,
+					containerID,
+					clientVersion,
+					isHostNetwork,
+				)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Expect(result.MacAddress).To(gomega.Equal(
+					dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+				))
+			})
+
+			ginkgo.It("should preserve engine-generated MAC when endpoint IP is IPv6", func() {
+				sourceEndpoint := &dockerNetwork.EndpointSettings{
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					IPAddress:  netip.MustParseAddr("::1"),
+				}
+				containerID := types.ContainerID("container_id")
+
+				result, err := processEndpoint(
+					sourceEndpoint,
+					containerID,
+					clientVersion,
+					isHostNetwork,
+				)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Expect(result.MacAddress).To(gomega.Equal(
+					dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+				))
+			})
+
+			ginkgo.It("should clear empty MAC without error", func() {
+				sourceEndpoint := &dockerNetwork.EndpointSettings{
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr{},
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				}
+				containerID := types.ContainerID("container_id")
+
+				result, err := processEndpoint(
+					sourceEndpoint,
+					containerID,
+					clientVersion,
+					isHostNetwork,
+				)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Expect(result.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+			})
+
+			ginkgo.It("should preserve user-configured MAC matching engine-generated prefix with different IP", func() {
+				// A user-configured MAC that happens to start with 02:42 but whose last
+				// four bytes do not match the endpoint's IP must not be cleared.
+				sourceEndpoint := &dockerNetwork.EndpointSettings{
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:de:ad:be:ef"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				}
+				containerID := types.ContainerID("container_id")
+
+				result, err := processEndpoint(
+					sourceEndpoint,
+					containerID,
+					clientVersion,
+					isHostNetwork,
+				)
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+				gomega.Expect(result.MacAddress).To(gomega.Equal(
+					dockerNetwork.HardwareAddr("02:42:de:ad:be:ef"),
+				))
 			})
 
 			ginkgo.It("should handle multiple aliases correctly", func() {
@@ -1096,15 +1403,20 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 				)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-				gomega.Expect(result.Aliases).To(gomega.ConsistOf("alias1", "alias2", "other_id"))
+				gomega.Expect(result.Aliases).To(gomega.ConsistOf(
+					"alias1", "alias2", "other_id"),
+				)
 			})
 
 			ginkgo.It("should copy all IPAM config fields", func() {
 				sourceEndpoint := &dockerNetwork.EndpointSettings{
 					IPAMConfig: &dockerNetwork.EndpointIPAMConfig{
-						IPv4Address:  "192.168.1.100",
-						IPv6Address:  "2001:db8::1",
-						LinkLocalIPs: []string{"169.254.1.1", "169.254.1.2"},
+						IPv4Address: netip.MustParseAddr("192.168.1.100"),
+						IPv6Address: netip.MustParseAddr("2001:db8::1"),
+						LinkLocalIPs: []netip.Addr{
+							netip.MustParseAddr("169.254.1.1"),
+							netip.MustParseAddr("169.254.1.2"),
+						},
 					},
 				}
 				containerID := types.ContainerID("container_id")
@@ -1118,10 +1430,17 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				gomega.Expect(result.IPAMConfig).ToNot(gomega.BeNil())
-				gomega.Expect(result.IPAMConfig.IPv4Address).To(gomega.Equal("192.168.1.100"))
-				gomega.Expect(result.IPAMConfig.IPv6Address).To(gomega.Equal("2001:db8::1"))
+				gomega.Expect(result.IPAMConfig.IPv4Address).To(gomega.Equal(
+					netip.MustParseAddr("192.168.1.100"),
+				))
+				gomega.Expect(result.IPAMConfig.IPv6Address).To(gomega.Equal(
+					netip.MustParseAddr("2001:db8::1"),
+				))
 				gomega.Expect(result.IPAMConfig.LinkLocalIPs).
-					To(gomega.ConsistOf("169.254.1.1", "169.254.1.2"))
+					To(gomega.ConsistOf(
+						netip.MustParseAddr("169.254.1.1"),
+						netip.MustParseAddr("169.254.1.2"),
+					))
 			})
 
 			ginkgo.It("should preserve empty aliases list", func() {
@@ -1143,7 +1462,7 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 
 			ginkgo.It("should preserve other endpoint fields", func() {
 				sourceEndpoint := &dockerNetwork.EndpointSettings{
-					Gateway:    "172.17.0.1",
+					Gateway:    netip.MustParseAddr("172.17.0.1"),
 					Links:      []string{"other_container:alias"},
 					EndpointID: "endpoint_id",
 				}
@@ -1157,7 +1476,9 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 				)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-				gomega.Expect(result.Gateway).To(gomega.Equal("172.17.0.1"))
+				gomega.Expect(result.Gateway).To(gomega.Equal(
+					netip.MustParseAddr("172.17.0.1"),
+				))
 				gomega.Expect(result.Links).To(gomega.ConsistOf("other_container:alias"))
 				gomega.Expect(result.EndpointID).To(gomega.Equal("endpoint_id"))
 			})
@@ -1172,12 +1493,12 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 
 			ginkgo.It("should clear MAC address, IP address, and DNS names", func() {
 				sourceEndpoint := &dockerNetwork.EndpointSettings{
-					MacAddress: "02:42:ac:11:00:02",
-					IPAddress:  "172.17.0.2",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
 					DNSNames:   []string{"test.example.com"},
 					Aliases:    []string{"container_id", "test-alias"},
 					IPAMConfig: &dockerNetwork.EndpointIPAMConfig{
-						IPv4Address: "172.17.0.2",
+						IPv4Address: netip.MustParseAddr("172.17.0.2"),
 					},
 				}
 				containerID := types.ContainerID("container_id")
@@ -1190,11 +1511,13 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 				)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-				gomega.Expect(result.MacAddress).To(gomega.Equal(""))
-				gomega.Expect(result.IPAddress).To(gomega.Equal(""))
+				gomega.Expect(result.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+				gomega.Expect(result.IPAddress).To(gomega.Equal(netip.Addr{}))
 				gomega.Expect(result.DNSNames).To(gomega.BeNil())
 				gomega.Expect(result.IPAMConfig).ToNot(gomega.BeNil())
-				gomega.Expect(result.IPAMConfig.IPv4Address).To(gomega.Equal("172.17.0.2"))
+				gomega.Expect(result.IPAMConfig.IPv4Address).To(gomega.Equal(
+					netip.MustParseAddr("172.17.0.2"),
+				))
 				// Aliases should still be filtered
 				gomega.Expect(result.Aliases).To(gomega.ConsistOf("test-alias"))
 			})
@@ -1210,7 +1533,12 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 			}
 			containerID := types.ContainerID("test_container_id")
 
-			result, err := processEndpoint(sourceEndpoint, containerID, "1.50", isHostNetwork)
+			result, err := processEndpoint(
+				sourceEndpoint,
+				containerID,
+				"1.50",
+				isHostNetwork,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 			gomega.Expect(result.Aliases).To(gomega.BeNil())
@@ -1219,12 +1547,17 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 		ginkgo.It("should clear IPAM config regardless of API version", func() {
 			sourceEndpoint := &dockerNetwork.EndpointSettings{
 				IPAMConfig: &dockerNetwork.EndpointIPAMConfig{
-					IPv4Address: "192.168.1.100",
+					IPv4Address: netip.MustParseAddr("192.168.1.100"),
 				},
 			}
 			containerID := types.ContainerID("test_container_id")
 
-			result, err := processEndpoint(sourceEndpoint, containerID, "1.50", isHostNetwork)
+			result, err := processEndpoint(
+				sourceEndpoint,
+				containerID,
+				"1.50",
+				isHostNetwork,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 			gomega.Expect(result.IPAMConfig).To(gomega.BeNil())
@@ -1232,17 +1565,22 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 
 		ginkgo.It("should clear MAC and IP addresses even with modern API", func() {
 			sourceEndpoint := &dockerNetwork.EndpointSettings{
-				MacAddress: "02:42:ac:11:00:02",
-				IPAddress:  "192.168.1.100",
+				MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+				IPAddress:  netip.MustParseAddr("192.168.1.100"),
 				DNSNames:   []string{"host.example.com"},
 			}
 			containerID := types.ContainerID("test_container_id")
 
-			result, err := processEndpoint(sourceEndpoint, containerID, "1.50", isHostNetwork)
+			result, err := processEndpoint(
+				sourceEndpoint,
+				containerID,
+				"1.50",
+				isHostNetwork,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-			gomega.Expect(result.MacAddress).To(gomega.Equal(""))
-			gomega.Expect(result.IPAddress).To(gomega.Equal(""))
+			gomega.Expect(result.MacAddress).To(gomega.Equal(dockerNetwork.HardwareAddr{}))
+			gomega.Expect(result.IPAddress).To(gomega.Equal(netip.Addr{}))
 			gomega.Expect(result.DNSNames).To(gomega.BeNil())
 		})
 	})
@@ -1254,7 +1592,12 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 			}
 			containerID := types.ContainerID("test_container_id")
 
-			result, err := processEndpoint(sourceEndpoint, containerID, "1.50", false)
+			result, err := processEndpoint(
+				sourceEndpoint,
+				containerID,
+				"1.50",
+				false,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 			gomega.Expect(result.IPAMConfig).To(gomega.BeNil())
@@ -1266,7 +1609,12 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 			}
 			containerID := types.ContainerID("test_container_id")
 
-			result, err := processEndpoint(sourceEndpoint, containerID, "1.50", false)
+			result, err := processEndpoint(
+				sourceEndpoint,
+				containerID,
+				"1.50",
+				false,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 			gomega.Expect(result.DNSNames).To(gomega.BeEmpty())
@@ -1276,12 +1624,164 @@ var _ = ginkgo.Describe("processEndpoint", func() {
 			ginkgo.It("should return ErrNilSourceEndpoint when sourceEndpoint is nil", func() {
 				containerID := types.ContainerID("test_container_id")
 
-				result, err := processEndpoint(nil, containerID, "1.50", false)
+				result, err := processEndpoint(
+					nil,
+					containerID,
+					"1.50",
+					false,
+				)
 				gomega.Expect(err).To(gomega.HaveOccurred())
 				gomega.Expect(err).To(gomega.MatchError(errNilSourceEndpoint))
 				gomega.Expect(result).To(gomega.BeNil())
 			})
 		})
+	})
+})
+
+var _ = ginkgo.Describe("isEngineGeneratedMAC", func() {
+	ginkgo.It("should return true for MAC derived from the endpoint IPv4 address", func() {
+		mac := dockerNetwork.HardwareAddr("02:42:ac:11:00:02")
+		ip := netip.MustParseAddr("172.17.0.2")
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeTrue())
+	})
+
+	ginkgo.It("should return false for user-configured MAC with matching prefix but different IP", func() {
+		mac := dockerNetwork.HardwareAddr("02:42:de:ad:be:ef")
+		ip := netip.MustParseAddr("172.17.0.2")
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when MAC is empty", func() {
+		mac := dockerNetwork.HardwareAddr{}
+		ip := netip.MustParseAddr("172.17.0.2")
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when IP is empty", func() {
+		mac := dockerNetwork.HardwareAddr("02:42:ac:11:00:02")
+		ip := netip.Addr{}
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when IP is IPv6", func() {
+		mac := dockerNetwork.HardwareAddr("02:42:ac:11:00:02")
+		ip := netip.MustParseAddr("::1")
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when MAC length is not 6", func() {
+		mac := dockerNetwork.HardwareAddr("02:42:ac:11")
+		ip := netip.MustParseAddr("172.17.0.2")
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return true for the reproduction case from issue #2104", func() {
+		mac := dockerNetwork.HardwareAddr("02:42:0a:63:00:02")
+		ip := netip.MustParseAddr("10.99.0.2")
+
+		gomega.Expect(isEngineGeneratedMAC(mac, ip)).To(gomega.BeTrue())
+	})
+})
+
+var _ = ginkgo.Describe("onlyGeneratedMacs", func() {
+	ginkgo.It("should return true when all original MACs are engine-generated and all endpoints are covered", func() {
+		container := MockContainer(
+			WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				},
+			}),
+		)
+		processedConfig := &dockerNetwork.NetworkingConfig{
+			EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID: "bridge_network_id",
+				},
+			},
+		}
+
+		gomega.Expect(onlyGeneratedMacs(container, processedConfig)).To(gomega.BeTrue())
+	})
+
+	ginkgo.It("should return false when a non-nil original endpoint is missing from the processed config", func() {
+		container := MockContainer(
+			WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				},
+				"custom": {
+					NetworkID:  "custom_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("02:42:0a:00:00:05"),
+					IPAddress:  netip.MustParseAddr("10.0.0.5"),
+				},
+			}),
+		)
+		processedConfig := &dockerNetwork.NetworkingConfig{
+			EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID: "bridge_network_id",
+				},
+			},
+		}
+
+		gomega.Expect(onlyGeneratedMacs(container, processedConfig)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when there is a user-configured MAC", func() {
+		container := MockContainer(
+			WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID:  "bridge_network_id",
+					MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+					IPAddress:  netip.MustParseAddr("172.17.0.2"),
+				},
+			}),
+		)
+		processedConfig := &dockerNetwork.NetworkingConfig{
+			EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID: "bridge_network_id",
+				},
+			},
+		}
+
+		gomega.Expect(onlyGeneratedMacs(container, processedConfig)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when there are no MACs at all", func() {
+		container := MockContainer(
+			WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID: "bridge_network_id",
+					IPAddress: netip.MustParseAddr("172.17.0.2"),
+				},
+			}),
+		)
+		processedConfig := &dockerNetwork.NetworkingConfig{
+			EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
+				"bridge": {
+					NetworkID: "bridge_network_id",
+				},
+			},
+		}
+
+		gomega.Expect(onlyGeneratedMacs(container, processedConfig)).To(gomega.BeFalse())
+	})
+
+	ginkgo.It("should return false when container info is nil", func() {
+		processedConfig := &dockerNetwork.NetworkingConfig{}
+
+		gomega.Expect(onlyGeneratedMacs(nil, processedConfig)).To(gomega.BeFalse())
 	})
 })
 
@@ -1297,7 +1797,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 					WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 						"bridge": {
 							NetworkID: "bridge_network_id",
-							IPAddress: "172.17.0.2",
+							IPAddress: netip.MustParseAddr("172.17.0.2"),
 						},
 					}),
 				)
@@ -1305,7 +1805,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 					EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 						"bridge": {
 							NetworkID: "bridge_network_id",
-							IPAddress: "172.17.0.2",
+							IPAddress: netip.MustParseAddr("172.17.0.2"),
 						},
 					},
 				}
@@ -1325,8 +1825,8 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 					WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 						"bridge": {
 							NetworkID:  "bridge_network_id",
-							MacAddress: "02:42:ac:11:00:02",
-							IPAddress:  "172.17.0.2",
+							MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+							IPAddress:  netip.MustParseAddr("172.17.0.2"),
 						},
 					}),
 				)
@@ -1334,8 +1834,8 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 					EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 						"bridge": {
 							NetworkID:  "bridge_network_id",
-							MacAddress: "02:42:ac:11:00:02",
-							IPAddress:  "172.17.0.2",
+							MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+							IPAddress:  netip.MustParseAddr("172.17.0.2"),
 						},
 					},
 				}
@@ -1349,7 +1849,9 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				)
 				gomega.Expect(err).To(gomega.HaveOccurred())
 				gomega.Expect(err).
-					To(gomega.MatchError(gomega.ContainSubstring("unexpected MAC address in legacy config")))
+					To(gomega.MatchError(gomega.ContainSubstring(
+						"unexpected MAC address in legacy config",
+					)))
 				gomega.Expect(err).
 					To(gomega.MatchError(gomega.ContainSubstring("API version 1.40")))
 			})
@@ -1365,7 +1867,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"host": {
 						NetworkID: "host_network_id",
-						IPAddress: "192.168.1.100",
+						IPAddress: netip.MustParseAddr("192.168.1.100"),
 					},
 				}),
 			)
@@ -1373,12 +1875,18 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 					"host": {
 						NetworkID: "host_network_id",
-						IPAddress: "192.168.1.100",
+						IPAddress: netip.MustParseAddr("192.168.1.100"),
 					},
 				},
 			}
 
-			err := validateMacAddresses(config, container.ID(), "1.50", isHostNetwork, container)
+			err := validateMacAddresses(
+				config,
+				container.ID(),
+				"1.50",
+				isHostNetwork,
+				container,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 
@@ -1388,8 +1896,8 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 					"host": {
 						NetworkID:  "host_network_id",
-						MacAddress: "02:42:ac:11:00:02",
-						IPAddress:  "192.168.1.100",
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						IPAddress:  netip.MustParseAddr("192.168.1.100"),
 					},
 				}),
 			)
@@ -1397,13 +1905,19 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 					"host": {
 						NetworkID:  "host_network_id",
-						MacAddress: "02:42:ac:11:00:02",
-						IPAddress:  "192.168.1.100",
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						IPAddress:  netip.MustParseAddr("192.168.1.100"),
 					},
 				},
 			}
 
-			err := validateMacAddresses(config, container.ID(), "1.50", isHostNetwork, container)
+			err := validateMacAddresses(
+				config,
+				container.ID(),
+				"1.50",
+				isHostNetwork,
+				container,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err).To(gomega.MatchError(errUnexpectedMacInHost))
 		})
@@ -1422,8 +1936,8 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID:  "bridge_network_id",
-								MacAddress: "02:42:ac:11:00:02",
-								IPAddress:  "172.17.0.2",
+								MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+								IPAddress:  netip.MustParseAddr("172.17.0.2"),
 							},
 						}),
 					)
@@ -1431,8 +1945,8 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID:  "bridge_network_id",
-								MacAddress: "02:42:ac:11:00:02",
-								IPAddress:  "172.17.0.2",
+								MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+								IPAddress:  netip.MustParseAddr("172.17.0.2"),
 							},
 						},
 					}
@@ -1453,7 +1967,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID: "bridge_network_id",
-								IPAddress: "172.17.0.2",
+								IPAddress: netip.MustParseAddr("172.17.0.2"),
 							},
 						}),
 					)
@@ -1461,7 +1975,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID: "bridge_network_id",
-								IPAddress: "172.17.0.2",
+								IPAddress: netip.MustParseAddr("172.17.0.2"),
 							},
 						},
 					}
@@ -1484,13 +1998,13 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID:  "bridge_network_id",
-								MacAddress: "02:42:ac:11:00:02",
-								IPAddress:  "172.17.0.2",
+								MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+								IPAddress:  netip.MustParseAddr("172.17.0.2"),
 							},
 							"custom_network": {
 								NetworkID:  "custom_network_id",
-								MacAddress: "aa:bb:cc:dd:ee:ff",
-								IPAddress:  "10.0.0.5",
+								MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+								IPAddress:  netip.MustParseAddr("10.0.0.5"),
 							},
 						}),
 					)
@@ -1498,13 +2012,13 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID:  "bridge_network_id",
-								MacAddress: "02:42:ac:11:00:02",
-								IPAddress:  "172.17.0.2",
+								MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+								IPAddress:  netip.MustParseAddr("172.17.0.2"),
 							},
 							"custom_network": {
 								NetworkID:  "custom_network_id",
-								MacAddress: "aa:bb:cc:dd:ee:ff",
-								IPAddress:  "10.0.0.5",
+								MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+								IPAddress:  netip.MustParseAddr("10.0.0.5"),
 							},
 						},
 					}
@@ -1530,12 +2044,12 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 							WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 								"bridge": {
 									NetworkID:  "bridge_network_id",
-									MacAddress: "02:42:ac:11:00:02",
-									IPAddress:  "172.17.0.2",
+									MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+									IPAddress:  netip.MustParseAddr("172.17.0.2"),
 								},
 								"custom_network": {
 									NetworkID: "custom_network_id",
-									IPAddress: "10.0.0.5",
+									IPAddress: netip.MustParseAddr("10.0.0.5"),
 								},
 							}),
 						)
@@ -1543,12 +2057,12 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 							EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 								"bridge": {
 									NetworkID:  "bridge_network_id",
-									MacAddress: "02:42:ac:11:00:02",
-									IPAddress:  "172.17.0.2",
+									MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+									IPAddress:  netip.MustParseAddr("172.17.0.2"),
 								},
 								"custom_network": {
 									NetworkID: "custom_network_id",
-									IPAddress: "10.0.0.5",
+									IPAddress: netip.MustParseAddr("10.0.0.5"),
 								},
 							},
 						}
@@ -1574,7 +2088,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID: "bridge_network_id",
-								IPAddress: "172.17.0.2",
+								IPAddress: netip.MustParseAddr("172.17.0.2"),
 							},
 						}),
 					)
@@ -1582,7 +2096,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID: "bridge_network_id",
-								IPAddress: "172.17.0.2",
+								IPAddress: netip.MustParseAddr("172.17.0.2"),
 							},
 						},
 					}
@@ -1603,7 +2117,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						WithNetworkSettings(map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID: "bridge_network_id",
-								IPAddress: "172.17.0.2",
+								IPAddress: netip.MustParseAddr("172.17.0.2"),
 							},
 						}),
 					)
@@ -1611,7 +2125,7 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 						EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
 							"bridge": {
 								NetworkID: "bridge_network_id",
-								IPAddress: "172.17.0.2",
+								IPAddress: netip.MustParseAddr("172.17.0.2"),
 							},
 						},
 					}
@@ -1638,7 +2152,13 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{},
 			}
 
-			err := validateMacAddresses(config, container.ID(), "1.50", false, container)
+			err := validateMacAddresses(
+				config,
+				container.ID(),
+				"1.50",
+				false,
+				container,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err).To(gomega.MatchError(errNoMacInNonHost))
 		})
@@ -1648,7 +2168,13 @@ var _ = ginkgo.Describe("validateMacAddresses", func() {
 				WithContainerState(dockerContainer.State{Running: true, Status: "running"}),
 			)
 
-			err := validateMacAddresses(nil, container.ID(), "1.50", false, container)
+			err := validateMacAddresses(
+				nil,
+				container.ID(),
+				"1.50",
+				false,
+				container,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err).To(gomega.MatchError(errNoMacInNonHost))
 		})
@@ -1667,7 +2193,9 @@ var _ = ginkgo.Describe("filterAliases", func() {
 		shortID := testShortID
 		aliases := []string{"custom-alias", "another-alias", "third-alias"}
 		result := filterAliases(aliases, shortID)
-		gomega.Expect(result).To(gomega.ConsistOf("custom-alias", "another-alias", "third-alias"))
+		gomega.Expect(result).To(gomega.ConsistOf(
+			"custom-alias", "another-alias", "third-alias",
+		))
 	})
 
 	ginkgo.It("handles empty alias list", func() {
@@ -1704,7 +2232,9 @@ var _ = ginkgo.Describe("filterAliases", func() {
 		shortID := testShortID
 		aliases := []string{"abc123def4567", "abc123def45", testShortID, "custom-alias"}
 		result := filterAliases(aliases, shortID)
-		gomega.Expect(result).To(gomega.ConsistOf("abc123def4567", "abc123def45", "custom-alias"))
+		gomega.Expect(result).To(gomega.ConsistOf(
+			"abc123def4567", "abc123def45", "custom-alias",
+		))
 	})
 
 	ginkgo.It("handles case-sensitive matching", func() {
@@ -1733,10 +2263,13 @@ var _ = ginkgo.Describe("StopSourceContainer", func() {
 
 		var err error
 
-		docker, err = dockerClient.NewClientWithOpts(
+		docker, err = dockerClient.New(
 			dockerClient.WithHost(mockServer.URL()),
-			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()))
+			dockerClient.WithHTTPClient(mockServer.HTTPTestServer.Client()),
+		)
 		require.NoError(ginkgo.GinkgoT(), err)
+
+		mockServer.AppendHandlers(APIVersionPingHandler())
 	})
 
 	ginkgo.AfterEach(func() {
@@ -1762,7 +2295,12 @@ var _ = ginkgo.Describe("StopSourceContainer", func() {
 			resetLogrus, logbuf := captureLogrus(logrus.InfoLevel)
 			defer resetLogrus()
 
-			err := StopSourceContainer(context.Background(), docker, container, 10*time.Second)
+			err := StopSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Eventually(logbuf).Should(gbytes.Say("Stopping linked container"))
 		})
@@ -1785,7 +2323,12 @@ var _ = ginkgo.Describe("StopSourceContainer", func() {
 				),
 			)
 
-			err := StopSourceContainer(context.Background(), docker, container, 10*time.Second)
+			err := StopSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 	})
@@ -1807,7 +2350,12 @@ var _ = ginkgo.Describe("StopSourceContainer", func() {
 				),
 			)
 
-			err := StopSourceContainer(context.Background(), docker, container, 10*time.Second)
+			err := StopSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+			)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("failed to stop container"))
 		})
@@ -1851,7 +2399,12 @@ var _ = ginkgo.Describe("StopSourceContainer", func() {
 				WithContainerState(dockerContainer.State{Running: false}),
 			)
 
-			err := StopSourceContainer(context.Background(), docker, container, 10*time.Second)
+			err := StopSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(mockServer.ReceivedRequests()).To(gomega.BeEmpty())
 		})
@@ -1874,7 +2427,12 @@ var _ = ginkgo.Describe("StopSourceContainer", func() {
 				),
 			)
 
-			err := StopSourceContainer(context.Background(), docker, container, 10*time.Second)
+			err := StopSourceContainer(
+				context.Background(),
+				docker,
+				container,
+				10*time.Second,
+			)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		})
 	})
@@ -1888,7 +2446,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 			ginkgo.It("should log 'Unexpected MAC address in legacy config'", func() {
 				config := &dockerNetwork.NetworkingConfig{
 					EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-						"bridge": {MacAddress: "02:42:ac:11:00:02"},
+						"bridge": {
+							MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						},
 					},
 				}
 				containerID := types.ContainerID("test-container")
@@ -1896,7 +2456,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 				defer resetLogrus()
 
-				debugLogMacAddress(config, containerID, "1.40", minSupportedVersion, false)
+				debugLogMacAddress(
+					config,
+					containerID,
+					"1.40",
+					minSupportedVersion,
+					false,
+				)
 
 				gomega.Eventually(logbuf).
 					Should(gbytes.Say("Unexpected MAC address in legacy config"))
@@ -1915,7 +2481,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 				defer resetLogrus()
 
-				debugLogMacAddress(config, containerID, "1.40", minSupportedVersion, false)
+				debugLogMacAddress(
+					config,
+					containerID,
+					"1.40",
+					minSupportedVersion,
+					false,
+				)
 
 				gomega.Eventually(logbuf).
 					Should(gbytes.Say("No MAC address in legacy config, Docker will handle"))
@@ -1928,7 +2500,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				func() {
 					config := &dockerNetwork.NetworkingConfig{
 						EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-							"host": {MacAddress: "02:42:ac:11:00:02"},
+							"host": {
+								MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+							},
 						},
 					}
 					containerID := types.ContainerID("test-container")
@@ -1936,7 +2510,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 					resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 					defer resetLogrus()
 
-					debugLogMacAddress(config, containerID, "1.40", minSupportedVersion, true)
+					debugLogMacAddress(
+						config,
+						containerID,
+						"1.40",
+						minSupportedVersion,
+						true,
+					)
 
 					gomega.Eventually(logbuf).
 						Should(gbytes.Say("Unexpected MAC address in legacy config"))
@@ -1952,7 +2532,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 			ginkgo.It("should log 'Unexpected MAC address in legacy config'", func() {
 				config := &dockerNetwork.NetworkingConfig{
 					EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-						"bridge": {MacAddress: "02:42:ac:11:00:02"},
+						"bridge": {
+							MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						},
 					},
 				}
 				containerID := types.ContainerID("test-container")
@@ -1960,7 +2542,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 				defer resetLogrus()
 
-				debugLogMacAddress(config, containerID, "1.40", minSupportedVersion, false)
+				debugLogMacAddress(
+					config,
+					containerID,
+					"1.40",
+					minSupportedVersion,
+					false,
+				)
 
 				gomega.Eventually(logbuf).
 					Should(gbytes.Say("Unexpected MAC address in legacy config"))
@@ -1979,7 +2567,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 				defer resetLogrus()
 
-				debugLogMacAddress(config, containerID, "1.40", minSupportedVersion, false)
+				debugLogMacAddress(
+					config,
+					containerID,
+					"1.40",
+					minSupportedVersion,
+					false,
+				)
 
 				gomega.Eventually(logbuf).
 					Should(gbytes.Say("No MAC address in legacy config, as expected"))
@@ -1994,7 +2588,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 			ginkgo.It("should log 'Verified MAC address configuration'", func() {
 				config := &dockerNetwork.NetworkingConfig{
 					EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-						"bridge": {MacAddress: "02:42:ac:11:00:02"},
+						"bridge": {
+							MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						},
 					},
 				}
 				containerID := types.ContainerID("test-container")
@@ -2002,16 +2598,28 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 				defer resetLogrus()
 
-				debugLogMacAddress(config, containerID, "1.50", minSupportedVersion, false)
+				debugLogMacAddress(
+					config,
+					containerID,
+					"1.50",
+					minSupportedVersion,
+					false,
+				)
 
-				gomega.Eventually(logbuf).Should(gbytes.Say("Verified MAC address configuration"))
+				gomega.Eventually(logbuf).Should(gbytes.Say(
+					"Verified MAC address configuration",
+				))
 			})
 
 			ginkgo.It("should log MAC address details for each network", func() {
 				config := &dockerNetwork.NetworkingConfig{
 					EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-						"bridge":         {MacAddress: "02:42:ac:11:00:02"},
-						"custom_network": {MacAddress: "aa:bb:cc:dd:ee:ff"},
+						"bridge": {
+							MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+						},
+						"custom_network": {
+							MacAddress: dockerNetwork.HardwareAddr("aa:bb:cc:dd:ee:ff"),
+						},
 					},
 				}
 				containerID := types.ContainerID("test-container")
@@ -2019,7 +2627,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 				resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 				defer resetLogrus()
 
-				debugLogMacAddress(config, containerID, "1.50", minSupportedVersion, false)
+				debugLogMacAddress(
+					config,
+					containerID,
+					"1.50",
+					minSupportedVersion,
+					false,
+				)
 
 				gomega.Eventually(logbuf).Should(gbytes.Say("Found MAC address in config"))
 				gomega.Eventually(logbuf).Should(gbytes.Say("network"))
@@ -2042,7 +2656,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 
 					debugLogMacAddress(config, containerID, "1.50", minSupportedVersion, false)
 
-					gomega.Eventually(logbuf).Should(gbytes.Say("No MAC address found in config"))
+					gomega.Eventually(logbuf).Should(gbytes.Say(
+						"No MAC address found in config",
+					))
 				})
 			})
 
@@ -2058,7 +2674,13 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 					resetLogrus, logbuf := captureLogrus(logrus.DebugLevel)
 					defer resetLogrus()
 
-					debugLogMacAddress(config, containerID, "1.50", minSupportedVersion, true)
+					debugLogMacAddress(
+						config,
+						containerID,
+						"1.50",
+						minSupportedVersion,
+						true,
+					)
 
 					gomega.Eventually(logbuf).
 						Should(gbytes.Say("No MAC address in host network mode, as expected"))
@@ -2103,7 +2725,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 		ginkgo.It("should check all networks for MAC addresses", func() {
 			config := &dockerNetwork.NetworkingConfig{
 				EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-					"bridge":         {MacAddress: "02:42:ac:11:00:02"},
+					"bridge": {
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					},
 					"custom_network": {NetworkID: "custom_net_id"},
 				},
 			}
@@ -2123,7 +2747,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 		ginkgo.It("should handle Podman-style version strings", func() {
 			config := &dockerNetwork.NetworkingConfig{
 				EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-					"bridge": {MacAddress: "02:42:ac:11:00:02"},
+					"bridge": {
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					},
 				},
 			}
 			containerID := types.ContainerID("test-container")
@@ -2139,7 +2765,9 @@ var _ = ginkgo.Describe("debugLogMacAddress", func() {
 		ginkgo.It("should handle version strings with patch levels", func() {
 			config := &dockerNetwork.NetworkingConfig{
 				EndpointsConfig: map[string]*dockerNetwork.EndpointSettings{
-					"bridge": {MacAddress: "02:42:ac:11:00:02"},
+					"bridge": {
+						MacAddress: dockerNetwork.HardwareAddr("02:42:ac:11:00:02"),
+					},
 				},
 			}
 			containerID := types.ContainerID("test-container")
@@ -2195,3 +2823,17 @@ var _ = ginkgo.Describe("IsWatchtowerParent", func() {
 		gomega.Expect(result).To(gomega.BeTrue())
 	})
 })
+
+func getStatusFilterKeys(f dockerClient.Filters) []string {
+	inner, ok := f["status"]
+	if !ok {
+		return nil
+	}
+
+	keys := make([]string, 0, len(inner))
+	for k := range inner {
+		keys = append(keys, k)
+	}
+
+	return keys
+}

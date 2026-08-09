@@ -3,13 +3,13 @@ package actions
 import (
 	"context"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/nicholas-fedor/watchtower/internal/api/handlers/events"
+	"github.com/nicholas-fedor/watchtower/internal/metrics"
 	"github.com/nicholas-fedor/watchtower/pkg/container"
-	"github.com/nicholas-fedor/watchtower/pkg/metrics"
 	"github.com/nicholas-fedor/watchtower/pkg/notifications"
 	"github.com/nicholas-fedor/watchtower/pkg/session"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -34,31 +34,23 @@ const (
 	ContainerRemainsRunningMessage = "Container remains running (monitor-only mode)"
 )
 
-// RunUpdatesWithNotificationsParams holds the parameters for RunUpdatesWithNotifications.
+// RunUpdatesWithNotificationsParams holds runtime dependencies and update policy.
+//
+// Update carries the full types.UpdateParams snapshot from config.UpdateParams
+// (or an equivalent complete construction).
 type RunUpdatesWithNotificationsParams struct {
-	Client                       container.Client  // Docker client for container operations
-	Notifier                     types.Notifier    // Notification system for sending update status messages
-	NotificationSplitByContainer bool              // Enable separate notifications for each updated container
-	NotificationReport           bool              // Enable report-based notifications
-	Filter                       types.Filter      // Container filter determining which containers are targeted
-	Cleanup                      bool              // Remove old images after container updates
-	NoRestart                    bool              // Prevent containers from being restarted after updates
-	MonitorOnly                  bool              // Monitor containers without performing updates
-	LifecycleHooks               bool              // Enable pre- and post-update lifecycle hook commands
-	RollingRestart               bool              // Update containers sequentially rather than all at once
-	LabelPrecedence              bool              // Give container label settings priority over global flags
-	NoPull                       bool              // Skip pulling new images from registry during updates
-	Timeout                      time.Duration     // Maximum duration for container stop operations
-	LifecycleUID                 int               // Default UID to run lifecycle hooks as
-	LifecycleGID                 int               // Default GID to run lifecycle hooks as
-	CPUCopyMode                  string            // CPU settings handling when recreating containers
-	PullFailureDelay             time.Duration     // Delay after failed Watchtower self-update pulls
-	RunOnce                      bool              // Perform one-time update and exit
-	CurrentContainerID           types.ContainerID // ID of the current Watchtower container for self-update logic
-	UseComposeDependsOn          bool              // Enable Docker Compose depends_on label processing
-	SkipSelfUpdate               bool              // Skip Watchtower self-update
-	EphemeralSelfUpdate          bool              // Use ephemeral container for self-update if true
-	CooldownDelay                time.Duration     // Minimum time since image creation before allowing updates.
+	// Client is the Docker client for container operations.
+	Client container.Client
+	// Notifier sends update status messages to configured channels.
+	Notifier types.Notifier
+	// NotificationSplitByContainer enables a separate notification per updated container.
+	NotificationSplitByContainer bool
+	// NotificationReport enables report-based notification templates.
+	NotificationReport bool
+	// EventBroadcaster publishes SSE events during the update session.
+	EventBroadcaster *events.Broadcaster
+	// Update is the complete update policy for this invocation (filter, cleanup, timeouts, etc.).
+	Update types.UpdateParams
 }
 
 // RunUpdatesWithNotifications performs container updates and sends notifications about the results.
@@ -78,30 +70,18 @@ func RunUpdatesWithNotifications(
 ) *metrics.Metric {
 	logrus.Debug("Starting RunUpdatesWithNotifications")
 
-	// Initiate notification batching
+	// Initiate notification batching.
 	startNotifications(params.Notifier, params.NotificationSplitByContainer)
 
-	// Configure update parameters based on provided flags
-	updateConfig := types.UpdateParams{
-		Filter:              params.Filter,              // Container filter determining which containers are targeted
-		Cleanup:             params.Cleanup,             // Remove old images after container updates
-		NoRestart:           params.NoRestart,           // Prevent containers from being restarted after updates
-		MonitorOnly:         params.MonitorOnly,         // Monitor containers without performing updates
-		LifecycleHooks:      params.LifecycleHooks,      // Enable pre- and post-update lifecycle hook commands
-		RollingRestart:      params.RollingRestart,      // Update containers sequentially rather than all at once
-		LabelPrecedence:     params.LabelPrecedence,     // Give container label settings priority over global flags
-		NoPull:              params.NoPull,              // Skip pulling new images from registry during updates
-		Timeout:             params.Timeout,             // Maximum duration for container stop operations
-		PullFailureDelay:    params.PullFailureDelay,    // Delay after failed Watchtower self-update pulls
-		LifecycleUID:        params.LifecycleUID,        // Default UID to run lifecycle hooks as
-		LifecycleGID:        params.LifecycleGID,        // Default GID to run lifecycle hooks as
-		CPUCopyMode:         params.CPUCopyMode,         // CPU settings handling when recreating containers
-		RunOnce:             params.RunOnce,             // Perform one-time update and exit
-		CurrentContainerID:  params.CurrentContainerID,  // ID of the current Watchtower container for self-update logic
-		UseComposeDependsOn: params.UseComposeDependsOn, // Enable Docker Compose depends_on label processing
-		SkipSelfUpdate:      params.SkipSelfUpdate,      // Skip Watchtower self-update
-		EphemeralSelfUpdate: params.EphemeralSelfUpdate, // Use ephemeral container for self-update if true
-		CooldownDelay:       params.CooldownDelay,       // Minimum time since image creation before allowing updates
+	updateConfig := params.Update
+
+	// Publish redacted policy flags only to avoid UpdateParams leaking internal IDs.
+	if params.EventBroadcaster != nil {
+		params.EventBroadcaster.Publish(events.Event{
+			Type:      "scan_started",
+			Timestamp: time.Now().UTC(),
+			Data:      events.NewScanStartedData(updateConfig),
+		})
 	}
 
 	// Execute the container update operation
@@ -111,17 +91,54 @@ func RunUpdatesWithNotifications(
 		updateConfig,
 	)
 	// Process update result, return metric on failure
-	if metric := handleUpdateResult(result, err, params.Notifier); metric != nil {
+	metric := handleUpdateResult(result, err, params.Notifier)
+	if metric != nil {
+		if params.EventBroadcaster != nil {
+			errMsg := "unknown error"
+			if err != nil {
+				errMsg = err.Error()
+			}
+
+			params.EventBroadcaster.Publish(events.Event{
+				Type:      "scan_failed",
+				Timestamp: time.Now().UTC(),
+				Data: events.ScanFailedData{
+					Error: errMsg,
+				},
+			})
+		}
+
 		return metric
 	}
 
-	// Perform image cleanup if enabled
+	// Perform image cleanup if enabled.
 	cleanedImages := performImageCleanup(
 		ctx,
 		params.Client,
-		params.Cleanup,
+		updateConfig.Cleanup,
 		cleanupImageInfosPtr,
 	)
+
+	// Publish image cleanup event
+	if params.EventBroadcaster != nil && len(cleanedImages) > 0 {
+		entries := make([]events.ImageCleanupEntry, len(cleanedImages))
+		for i, img := range cleanedImages {
+			entries[i] = events.ImageCleanupEntry{
+				ImageID:       string(img.ImageID),
+				ImageName:     img.ImageName,
+				ContainerID:   string(img.ContainerID),
+				ContainerName: img.ContainerName,
+			}
+		}
+
+		params.EventBroadcaster.Publish(events.Event{
+			Type:      "image_cleanup",
+			Timestamp: time.Now().UTC(),
+			Data: events.ImageCleanupData{
+				Images: entries,
+			},
+		})
+	}
 
 	// Log update report details for debugging
 	logUpdateReport(result)
@@ -140,6 +157,26 @@ func RunUpdatesWithNotifications(
 		result,
 		cleanedImages,
 	)
+
+	// Publish scan completed event
+	if params.EventBroadcaster != nil {
+		scanned, updated, failed := 0, 0, 0
+		if result != nil {
+			scanned = len(result.Scanned())
+			updated = len(result.Updated())
+			failed = len(result.Failed())
+		}
+
+		params.EventBroadcaster.Publish(events.Event{
+			Type:      "scan_completed",
+			Timestamp: time.Now().UTC(),
+			Data: events.ScanCompletedData{
+				Scanned: scanned,
+				Updated: updated,
+				Failed:  failed,
+			},
+		})
+	}
 
 	// Generate and return metric summarizing the session
 	return generateAndLogMetric(result)
@@ -168,7 +205,7 @@ func (emptyReport) All() []types.ContainerReport       { return nil }
 // Parameters:
 //   - result: The report from the update operation.
 //   - err: Any error encountered during the update.
-//   - notifier: The notification system for sending error alerts; may be nil.
+//   - notifier: The notification system for sending error alerts. It may be nil.
 //
 // Returns:
 //   - *metrics.Metric: A zero metric if an error occurred or result is nil, nil otherwise.
@@ -356,7 +393,7 @@ func buildUpdateEntries(
 	if cooldownPassed && cooldownAge != "" {
 		entries = append(entries, &logrus.Entry{
 			Level:   logrus.InfoLevel,
-			Message: "Image age exceeds cooldown - proceeding with update",
+			Message: "Image age exceeds cooldown - eligible for update",
 			Data: logrus.Fields{
 				"image":     containerReport.ImageName(),
 				"image_age": cooldownAge,
@@ -567,17 +604,8 @@ func sendNotifications(
 		// Check if notifications should be split by container
 		if notificationSplitByContainer {
 			sendSplitNotifications(notifier, notificationReport, result, cleanedImages)
-		} else {
-			// Send grouped notification asynchronously with proper synchronization
-			var waitGroup sync.WaitGroup
-
-			waitGroup.Go(func() {
-				if notifier.ShouldSendNotification(result) {
-					notifier.SendNotification(result)
-				}
-			})
-
-			waitGroup.Wait()
+		} else if notifier.ShouldSendNotification(result) {
+			notifier.SendNotification(result)
 		}
 	}
 }
@@ -811,7 +839,8 @@ func sendSplitNotifications(
 
 			var cdPassed bool
 
-			if cs, ok := report.(*session.ContainerStatus); ok {
+			cs, ok := report.(*session.ContainerStatus)
+			if ok {
 				cdAge = cs.CooldownAge()
 				cdDelay = cs.CooldownDelay()
 				cdPassed = cs.CooldownPassed()
@@ -1022,19 +1051,20 @@ func sendSplitNotifications(
 			if containerStatus.CooldownAge() != "" {
 				entry = &logrus.Entry{
 					Level:   logrus.InfoLevel,
-					Message: "Image is within cooldown period - deferring update",
+					Message: "Image is within cooldown period - not eligible for update",
 					Data: logrus.Fields{
 						"image":       report.ImageName(),
 						"image_age":   containerStatus.CooldownAge(),
 						"cooldown":    containerStatus.CooldownDelay(),
 						"eligible_in": containerStatus.CooldownRemaining(),
+						"eligible_at": containerStatus.CooldownEligibleAt().Format(time.RFC3339),
 					},
 					Time: now,
 				}
 			} else {
 				entry = &logrus.Entry{
 					Level:   logrus.InfoLevel,
-					Message: "Image creation time unavailable - deferring update",
+					Message: "Image creation time unavailable - update check unavailable",
 					Data: logrus.Fields{
 						"image":    report.ImageName(),
 						"cooldown": containerStatus.CooldownDelay(),
