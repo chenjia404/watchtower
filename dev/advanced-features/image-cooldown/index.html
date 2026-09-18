@@ -17,7 +17,7 @@
         <link rel="prev" href="../ephemeral-self-updates/">
       
       
-        <link rel="next" href="../lifecycle-hooks/">
+        <link rel="next" href="../disk-usage-monitor/">
       
       
         
@@ -2623,6 +2623,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../disk-usage-monitor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Usage Monitor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../copy-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copy Files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../lifecycle-hooks/" class="md-nav__link">
         
   
@@ -3197,24 +3253,24 @@ When set, the label value takes precedence over the global configuration.</p>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">    </span><span class="nt">nginx</span><span class="p">:</span>
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">        </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nginx</span>
 <a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">        </span><span class="nt">labels</span><span class="p">:</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">            </span><span class="nt">com.centurylinklabs.watchtower.cooldown-delay</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;48h&quot;</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">            </span><span class="nt">com.centurylinklabs.watchtower.cooldown-delay</span><span class="p">:</span><span class="w"> </span><span class="s">"48h"</span>
 <a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">        </span><span class="l l-Scalar l-Scalar-Plain">...</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
 <div class="highlight"><span class="filename">docker run</span><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>--label<span class="o">=</span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">&quot;48h&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>--label<span class="o">=</span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">"48h"</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>nginx
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><span class="filename">Dockerfile</span><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">LABEL</span><span class="w"> </span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">&quot;48h&quot;</span>
+<div class="highlight"><span class="filename">Dockerfile</span><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">LABEL</span><span class="w"> </span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">"48h"</span>
 </code></pre></div>
 </div>
 </div>
 </div>
 <p>Setting the label to <code>"0"</code> disables cooldown for that container, even when a global cooldown is configured.</p>
-<div class="highlight"><span class="filename">Disable cooldown for this container</span><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">LABEL</span><span class="w"> </span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">&quot;0&quot;</span>
+<div class="highlight"><span class="filename">Disable cooldown for this container</span><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">LABEL</span><span class="w"> </span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">"0"</span>
 </code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">If a container's cooldown label cannot be parsed as a valid duration, Watchtower falls back to the global cooldown value and logs a warning.</p>
@@ -3292,21 +3348,21 @@ If you rely on cooldown as a supply-chain defense, ensure that no-pull mode is n
 <a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">  </span><span class="nt">web</span><span class="p">:</span>
 <a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nginx:latest</span>
 <a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;80:80&quot;</span>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"80:80"</span>
 <a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>
 <a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="w">  </span><span class="c1"># Override: requires image to be 48 hours old</span>
 <a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="w">  </span><span class="nt">api</span><span class="p">:</span>
 <a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">myorg/api:latest</span>
 <a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
-<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8080:8080&quot;</span>
+<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"8080:8080"</span>
 <a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a><span class="w">    </span><span class="nt">labels</span><span class="p">:</span>
-<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;com.centurylinklabs.watchtower.cooldown-delay=48h&quot;</span>
+<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"com.centurylinklabs.watchtower.cooldown-delay=48h"</span>
 <a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a>
 <a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="w">  </span><span class="c1"># Override: cooldown disabled — update immediately</span>
 <a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a><span class="w">  </span><span class="nt">redis</span><span class="p">:</span>
 <a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">redis:latest</span>
 <a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a><span class="w">    </span><span class="nt">labels</span><span class="p">:</span>
-<a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;com.centurylinklabs.watchtower.cooldown-delay=0&quot;</span>
+<a id="__codelineno-7-27" name="__codelineno-7-27" href="#__codelineno-7-27"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">"com.centurylinklabs.watchtower.cooldown-delay=0"</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
@@ -3318,7 +3374,7 @@ If you rely on cooldown as a supply-chain defense, ensure that no-pull mode is n
 </code></pre></div>
 <div class="highlight"><span class="filename">Monitor a container with a 72-hour per-container cooldown</span><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>docker<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>--name<span class="w"> </span>myapp<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>--label<span class="o">=</span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">&quot;72h&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>--label<span class="o">=</span>com.centurylinklabs.watchtower.cooldown-delay<span class="o">=</span><span class="s2">"72h"</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span>myorg/myapp:latest
 </code></pre></div>
 </div>
@@ -3382,7 +3438,7 @@ If you rely on cooldown as a supply-chain defense, ensure that no-pull mode is n
 </tr>
 <tr>
 <td><strong>Deferring</strong></td>
-<td>Image age ≤ cooldown duration</td>
+<td>Image age &lt;= cooldown duration</td>
 <td>The update is skipped; the container remains on its current image</td>
 </tr>
 <tr>
@@ -3497,8 +3553,9 @@ The cooldown age check uses <code>GET</code> requests for manifests, which do co
 <p>Users running Watchtower against Docker Hub with many monitored containers or short polling intervals should be aware that each stale image detected during a cooldown window consumes one or two pulls.
 Authenticating with a Docker Hub account raises the limit from 100 to 200 pulls, and paid tiers have unlimited pulls.</p>
 <h4 id="github_container_registry_ghcrio">GitHub Container Registry (ghcr.io)<a class="headerlink" href="#github_container_registry_ghcrio" title="Permanent link">&para;</a></h4>
-<p>GHCR.io does not publish explicit pull rate limits and currently provides free storage and bandwidth for container images.
-Observed limits are in the range of tens of thousands of requests per minute, which is well beyond what Watchtower's cooldown feature would generate under any realistic deployment.</p>
+<p>GHCR.io does not publish Docker Hub-style pull quotas. Anonymous pulls of a public org share an undocumented edge token bucket, observed as <code>allowed: 44000/minute</code> with a sub-millisecond <code>retry-after</code>. That includes <code>lscr.io/linuxserver/*</code> images, which Watchtower remaps to <code>ghcr.io</code> for digest and auth.</p>
+<p>Unauthenticated GHCR checks reuse one anonymous token across public images and run one at a time. Later images in that token lifetime skip the registry challenge. Tiny waits are floored to 100ms and retried for up to 30 seconds. Those retries and the exhaustion of that window stay at debug so they do not become notifications. The container is <strong>failed</strong> for the cycle. A Retry-After longer than 30 seconds is logged as a warning and is not retried until the next run.</p>
+<p><code>docker login ghcr.io</code> (or equivalent credentials in <code>config.json</code> / <code>REPO_USER</code> and <code>REPO_PASS</code>) uses a per-user bucket and restores parallel GHCR checks. Login to <code>lscr.io</code> alone does not count. Credential lookup uses <code>ghcr.io</code> after the remap.</p>
 <h4 id="per-registry_impact_summary">Per-Registry Impact Summary<a class="headerlink" href="#per-registry_impact_summary" title="Permanent link">&para;</a></h4>
 <table>
 <thead>
@@ -3526,8 +3583,8 @@ Observed limits are in the range of tens of thousands of requests per minute, wh
 </tr>
 <tr>
 <td>GHCR.io</td>
-<td>~44,000 / minute (observed)</td>
-<td>None</td>
+<td>~44,000 / minute fill rate (small burst, org-scoped when anonymous)</td>
+<td>Low — unauthenticated checks are sequential and retry for up to 30s. Authenticate to <code>ghcr.io</code> for a per-user bucket and parallel checks.</td>
 </tr>
 </tbody>
 </table>
@@ -3579,7 +3636,7 @@ The output varies depending on the outcome:</p>
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="July 14, 2026 14:36:11 UTC"><span class="timeago" datetime="2026-07-14T14:36:11+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="July 14, 2026 14:36:11 UTC">2026-07-14</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="September 10, 2026 11:59:37 UTC"><span class="timeago" datetime="2026-09-10T11:59:37+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="September 10, 2026 11:59:37 UTC">2026-09-10</span>
   </span>
 
     
