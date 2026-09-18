@@ -10,6 +10,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/ghttp"
+	"github.com/rs/zerolog"
 
 	dockerContainer "github.com/moby/moby/api/types/container"
 	dockerClient "github.com/moby/moby/client"
@@ -18,6 +19,12 @@ import (
 	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
+
+func nopLogger() *zerolog.Logger {
+	nop := zerolog.Nop()
+
+	return &nop
+}
 
 var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 	ginkgo.Describe("parseEnvVar", func() {
@@ -56,35 +63,35 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 
 	ginkgo.Describe("isLocalDockerHost", func() {
 		ginkgo.It("should return true for unix:// scheme", func() {
-			gomega.Expect(isLocalDockerHost("unix:///var/run/docker.sock")).To(gomega.BeTrue())
+			gomega.Expect(isLocalDockerHost(testLog(), "unix:///var/run/docker.sock")).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("should return true for npipe:// scheme", func() {
-			gomega.Expect(isLocalDockerHost("npipe:////./pipe/docker_engine")).To(gomega.BeTrue())
+			gomega.Expect(isLocalDockerHost(testLog(), "npipe:////./pipe/docker_engine")).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("should return true for absolute Unix path", func() {
-			gomega.Expect(isLocalDockerHost("/path/to/docker.sock")).To(gomega.BeTrue())
+			gomega.Expect(isLocalDockerHost(testLog(), "/path/to/docker.sock")).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("should return true for Windows pipe path", func() {
-			gomega.Expect(isLocalDockerHost("//./pipe/docker_engine")).To(gomega.BeTrue())
+			gomega.Expect(isLocalDockerHost(testLog(), "//./pipe/docker_engine")).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("should return false for tcp:// scheme", func() {
-			gomega.Expect(isLocalDockerHost("tcp://host:2375")).To(gomega.BeFalse())
+			gomega.Expect(isLocalDockerHost(testLog(), "tcp://host:2375")).To(gomega.BeFalse())
 		})
 
 		ginkgo.It("should return false for http:// scheme", func() {
-			gomega.Expect(isLocalDockerHost("http://host:2375")).To(gomega.BeFalse())
+			gomega.Expect(isLocalDockerHost(testLog(), "http://host:2375")).To(gomega.BeFalse())
 		})
 
 		ginkgo.It("should return false for https:// scheme", func() {
-			gomega.Expect(isLocalDockerHost("https://host:2376")).To(gomega.BeFalse())
+			gomega.Expect(isLocalDockerHost(testLog(), "https://host:2376")).To(gomega.BeFalse())
 		})
 
 		ginkgo.It("should return false for ssh:// scheme", func() {
-			gomega.Expect(isLocalDockerHost("ssh://user@host")).To(gomega.BeFalse())
+			gomega.Expect(isLocalDockerHost(testLog(), "ssh://user@host")).To(gomega.BeFalse())
 		})
 	})
 
@@ -169,7 +176,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					WithName("watchtower"),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config).NotTo(gomega.BeNil())
 				gomega.Expect(config.IsLocal).To(gomega.BeTrue())
@@ -193,7 +200,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.IsLocal).To(gomega.BeTrue())
 				gomega.Expect(config.Host).To(gomega.Equal("unix:///custom/docker.sock"))
@@ -216,7 +223,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.IsLocal).To(gomega.BeTrue())
 				gomega.Expect(config.Host).To(gomega.Equal("npipe:////./pipe/docker_engine"))
@@ -236,7 +243,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.IsLocal).To(gomega.BeFalse())
 				gomega.Expect(config.Host).To(gomega.Equal("tcp://remote-host:2375"))
@@ -255,7 +262,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.IsLocal).To(gomega.BeFalse())
 				gomega.Expect(config.Host).To(gomega.Equal("https://remote-host:2376"))
@@ -272,7 +279,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.IsLocal).To(gomega.BeFalse())
 				gomega.Expect(config.Host).To(gomega.Equal("ssh://user@remote-host"))
@@ -291,7 +298,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.TLSVerify).To(gomega.Equal("1"))
 				gomega.Expect(config.CertPath).To(gomega.Equal("/certs"))
@@ -309,7 +316,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.APIVersion).To(gomega.Equal("1.41"))
 			})
@@ -326,7 +333,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					}),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config.IsLocal).To(gomega.BeTrue())
 				gomega.Expect(config.SocketBind).To(gomega.Equal(
@@ -342,7 +349,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					WithName("watchtower"),
 				)
 
-				config := extractDockerConnectionConfig(source)
+				config := extractDockerConnectionConfig(source, nopLogger())
 
 				gomega.Expect(config).NotTo(gomega.BeNil())
 				gomega.Expect(config.IsLocal).To(gomega.BeTrue())
@@ -364,7 +371,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					SocketBind: "/var/run/docker.sock:/var/run/docker.sock",
 				}
 
-				config := buildOrchestratorConfig(source, "watchtower:v2", "old1,old2", connConfig)
+				config := buildOrchestratorConfig(source, "watchtower:v2", "old1,old2", connConfig, false)
 
 				gomega.Expect(config).NotTo(gomega.BeNil())
 				gomega.Expect(config.Image).To(gomega.Equal("watchtower:v2"))
@@ -384,10 +391,29 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 				gomega.Expect(config.Env).To(gomega.ContainElement(
 					"WT_ORCHESTRATOR_CONTAINER_CHAIN=old1,old2",
 				))
+				gomega.Expect(config.Env).To(gomega.ContainElement(
+					"WT_ORCHESTRATOR_CLEANUP=false",
+				))
 
 				// Verify the orchestrator label is set but the watchtower label is NOT set.
 				gomega.Expect(config.Labels).To(gomega.HaveKeyWithValue(OrchestratorLabel, "true"))
 				gomega.Expect(config.Labels).NotTo(gomega.HaveKey("com.centurylinklabs.watchtower"))
+			})
+		})
+
+		ginkgo.When("cleanup is enabled", func() {
+			ginkgo.It("should set WT_ORCHESTRATOR_CLEANUP to true", func() {
+				source := MockContainer(
+					WithID("abc123"),
+					WithName("watchtower"),
+					WithImageName("watchtower:latest"),
+				)
+
+				config := buildOrchestratorConfig(source, "watchtower:v2", "", nil, true)
+
+				gomega.Expect(config.Env).To(gomega.ContainElement(
+					"WT_ORCHESTRATOR_CLEANUP=true",
+				))
 			})
 		})
 
@@ -403,7 +429,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					SocketBind: "/var/run/docker.sock:/var/run/docker.sock",
 				}
 
-				config := buildOrchestratorConfig(source, "watchtower:v2", "", connConfig)
+				config := buildOrchestratorConfig(source, "watchtower:v2", "", connConfig, false)
 
 				gomega.Expect(config.Env).To(gomega.ContainElement(
 					"WT_ORCHESTRATOR_CONTAINER_CHAIN=",
@@ -426,7 +452,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					IsLocal:    false,
 				}
 
-				config := buildOrchestratorConfig(source, "watchtower:v2", "chain1", connConfig)
+				config := buildOrchestratorConfig(source, "watchtower:v2", "chain1", connConfig, false)
 
 				gomega.Expect(config.Env).To(gomega.ContainElement(
 					"DOCKER_HOST=tcp://remote:2375",
@@ -451,7 +477,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					WithImageName("watchtower:latest"),
 				)
 
-				config := buildOrchestratorConfig(source, "watchtower:v2", "chain1", nil)
+				config := buildOrchestratorConfig(source, "watchtower:v2", "chain1", nil, false)
 
 				// Should still have orchestrator env vars but no Docker env vars.
 				gomega.Expect(config.Env).To(gomega.ContainElement(
@@ -607,7 +633,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 			mockServer.AppendHandlers(APIVersionPingHandler())
 
 			dockerAPI = docker
-			testClient = &client{api: dockerAPI}
+			testClient = &client{log: testLog(), api: dockerAPI}
 			source = MockContainer(
 				WithID("source123"),
 				WithName("watchtower-source"),
@@ -658,7 +684,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 
 			ginkgo.It("should return the orchestrator container ID", func() {
 				orchestratorID, err := testClient.CreateEphemeralOrchestrator(
-					ctx, source, "watchtower:v2", "chain1",
+					ctx, source, "watchtower:v2", "chain1", false,
 				)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -680,7 +706,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 
 			ginkgo.It("should return an error wrapping ErrEphemeralCreateFailed", func() {
 				orchestratorID, err := testClient.CreateEphemeralOrchestrator(
-					ctx, source, "watchtower:v2", "chain1",
+					ctx, source, "watchtower:v2", "chain1", false,
 				)
 
 				gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring(
@@ -736,7 +762,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 
 			ginkgo.It("should attempt cleanup and return ErrEphemeralStartFailed", func() {
 				orchestratorID, err := testClient.CreateEphemeralOrchestrator(
-					ctx, source, "watchtower:v2", "chain1",
+					ctx, source, "watchtower:v2", "chain1", false,
 				)
 
 				gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring(
@@ -763,7 +789,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					ListContainers(ctx).
 					Return([]types.Container{}, nil)
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				gomega.Expect(count).To(gomega.Equal(0))
@@ -785,7 +811,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					ListContainers(ctx).
 					Return([]types.Container{regularContainer}, nil)
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				gomega.Expect(count).To(gomega.Equal(0))
@@ -814,7 +840,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					).
 					Return(nil)
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				gomega.Expect(count).To(gomega.Equal(1))
@@ -861,7 +887,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					).
 					Return(nil)
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				gomega.Expect(count).To(gomega.Equal(2))
@@ -875,7 +901,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					ListContainers(ctx).
 					Return(nil, errors.New("docker daemon unavailable"))
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring(
 					"failed to list containers",
@@ -920,7 +946,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					).
 					Return(nil)
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				gomega.Expect(count).To(gomega.Equal(1))
@@ -939,7 +965,7 @@ var _ = ginkgo.Describe("Ephemeral Orchestrator", func() {
 					ListContainers(ctx).
 					Return([]types.Container{noLabelContainer}, nil)
 
-				count, err := RemoveOrphanedOrchestrators(ctx, mockAPIClient)
+				count, err := RemoveOrphanedOrchestrators(testLog(), ctx, mockAPIClient)
 
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				gomega.Expect(count).To(gomega.Equal(0))

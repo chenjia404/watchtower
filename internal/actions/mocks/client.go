@@ -39,7 +39,7 @@ type TestData struct {
 	LastRenameTarget             string                                // Last new name passed to RenameContainer.
 	RenameTargets                []string                              // Ordered list of rename targets.
 	UpdateContainerCount         atomic.Int32                          // Number of times UpdateContainer was called.
-	SetNoRestartPolicyCount      atomic.Int32                          // Number of times SetNoRestartPolicy was called.
+	SetRestartPolicyCount        atomic.Int32                          // Number of times SetRestartPolicy was called.
 	IsContainerStaleCount        atomic.Int32                          // Number of times IsContainerStale was called.
 	WaitForContainerHealthyCount atomic.Int32                          // Number of times WaitForContainerHealthy was called.
 	ListContainersCount          atomic.Int32                          // Number of times ListContainers was called.
@@ -66,16 +66,21 @@ type TestData struct {
 	RemoveContainerCount        atomic.Int32                  // Number of times RemoveContainer was called.
 	SimulatedLatency            time.Duration                 // Simulated latency for operations (default 0 for fast tests, set for context cancellation tests).
 	LastContainerChain          string                        // Last container chain passed to CreateEphemeralOrchestrator.
+	LastCleanup                 bool                          // Last cleanup flag passed to CreateEphemeralOrchestrator.
 	LastUpdateConfig            *dockerContainer.UpdateConfig // Last UpdateContainer config received.
 	LastStartedContainer        types.Container               // Last container passed to StartContainer.
 	LastStartedContainerID      types.ContainerID             // ID returned by the last successful StartContainer call.
-	SetNoRestartPolicyContainer types.Container               // Last container passed to SetNoRestartPolicy.
-	SetNoRestartPolicyCtx       context.Context               // Last context passed to SetNoRestartPolicy.
+	SetRestartPolicyContainer types.Container               // Last container passed to SetRestartPolicy.
+	SetRestartPolicyCtx       context.Context               // Last context passed to SetRestartPolicy.
+	LastRestartPolicy         dockerContainer.RestartPolicy // Last policy passed to SetRestartPolicy.
 	CreateContainerCtx          context.Context               // Last context passed to CreateContainer.
 	RenameContainerCtx          context.Context               // Last context passed to RenameContainer.
 	StartContainerByIDCtx       context.Context               // Last context passed to StartContainerByID.
 	GetContainerCtx             context.Context               // Last context passed to GetContainer.
 	StopAndRemoveContainerCtx   context.Context               // Last context passed to StopAndRemoveContainer.
+	GetImageDiskUsageCount      atomic.Int32                  // Number of times GetImageDiskUsage was called.
+	ImageDiskUsage              types.ImageDiskUsage          // Usage returned by GetImageDiskUsage.
+	GetImageDiskUsageError      error                         // Error to return from GetImageDiskUsage.
 }
 
 // recordOperation appends an operation name to OperationOrder for sequencing tests.
@@ -387,13 +392,17 @@ func (client MockClient) UpdateContainer(ctx context.Context, _ types.Container,
 	return client.TestData.UpdateContainerError
 }
 
-// SetNoRestartPolicy simulates setting a container's restart policy to "no".
-// It increments the SetNoRestartPolicyCount and records the container and context for test assertions.
-func (client MockClient) SetNoRestartPolicy(ctx context.Context, container types.Container) {
-	client.TestData.SetNoRestartPolicyCount.Add(1)
-	client.TestData.SetNoRestartPolicyContainer = container
-	client.TestData.SetNoRestartPolicyCtx = ctx
-	client.TestData.recordOperation("SetNoRestartPolicy")
+// SetRestartPolicy simulates updating a container's restart policy.
+func (client MockClient) SetRestartPolicy(
+	ctx context.Context,
+	container types.Container,
+	policy dockerContainer.RestartPolicy,
+) {
+	client.TestData.SetRestartPolicyCount.Add(1)
+	client.TestData.SetRestartPolicyContainer = container
+	client.TestData.SetRestartPolicyCtx = ctx
+	client.TestData.LastRestartPolicy = policy
+	client.TestData.recordOperation("SetRestartPolicy")
 }
 
 // RemoveImageByID increments the count of image removal attempts in TestData.
@@ -552,27 +561,47 @@ func (client MockClient) CreateEphemeralOrchestrator(
 	_ types.Container,
 	_ string,
 	containerChain string,
+	cleanup bool,
 ) (types.ContainerID, error) {
 	if err := client.checkContextCancellation(ctx); err != nil {
 		return "", err
 	}
 
 	client.TestData.LastContainerChain = containerChain
+	client.TestData.LastCleanup = cleanup
 
 	return types.ContainerID("mock-ephemeral-orchestrator"), nil
 }
 
-// GetInfo returns mock system information for testing.
-// It provides a basic map with mock Docker/Podman info.
-func (client MockClient) GetInfo(ctx context.Context) (map[string]any, error) {
-	if err := client.checkContextCancellation(ctx); err != nil {
-		return nil, err
+// GetImageDiskUsage returns configured mock image usage for testing.
+func (client MockClient) GetImageDiskUsage(ctx context.Context) (types.ImageDiskUsage, error) {
+	if client.TestData == nil {
+		return types.ImageDiskUsage{}, nil
 	}
 
-	return map[string]any{
-		"Name":          "docker",
-		"ServerVersion": "1.50",
-		"OSType":        "linux",
+	if err := client.checkContextCancellation(ctx); err != nil {
+		return types.ImageDiskUsage{}, err
+	}
+
+	client.TestData.GetImageDiskUsageCount.Add(1)
+
+	if client.TestData.GetImageDiskUsageError != nil {
+		return types.ImageDiskUsage{}, client.TestData.GetImageDiskUsageError
+	}
+
+	return client.TestData.ImageDiskUsage, nil
+}
+
+// GetInfo returns mock system information for testing.
+func (client MockClient) GetInfo(ctx context.Context) (types.SystemInfo, error) {
+	if err := client.checkContextCancellation(ctx); err != nil {
+		return types.SystemInfo{}, err
+	}
+
+	return types.SystemInfo{
+		Name:          "docker",
+		ServerVersion: "1.50",
+		OSType:        "linux",
 	}, nil
 }
 

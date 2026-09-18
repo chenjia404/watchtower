@@ -7,18 +7,13 @@ import (
 	"strings"
 
 	"github.com/distribution/reference"
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
+
+	"github.com/nicholas-fedor/watchtower/pkg/registry/hosts"
 )
 
 // ChallengeHeader is the HTTP Header containing challenge instructions.
 const ChallengeHeader = "WWW-Authenticate"
-
-const (
-	DockerRegistryDomain = "docker.io"       // Primary domain for Docker Hub image references.
-	DockerRegistryHost   = "index.docker.io" // Current Docker Hub registry API endpoint.
-	GitHubRegistryDomain = "ghcr.io"         // Canonical domain for GitHub Container Registry.
-	LSCRRegistryDomain   = "lscr.io"         // LinuxServer's vanity domain - images are hosted on ghcr.io.
-)
 
 // Errors for registry operations.
 var (
@@ -125,30 +120,29 @@ func splitQuoted(input string, delim rune) []string {
 	return parts
 }
 
-// extractChallengeHost extracts the host from a realm URL (e.g., "https://ghcr.io/token" -> "ghcr.io").
+// extractChallengeHost extracts the host from a realm URL.
 //
-// It parses the trimmed realm with the URL parser and returns the parsed URL's
-// Host for valid http/https URLs. Realms containing queries, fragments, or other
-// URL components are handled correctly. Invalid or unsupported realms return an
-// empty string and log the failure.
+// For example, "https://ghcr.io/token" yields "ghcr.io". It parses the trimmed
+// realm with the URL parser and returns the parsed URL's Host for valid http or
+// https URLs. Invalid or unsupported realms return an empty string.
 //
 // Parameters:
+//   - log: Contextual logger.
 //   - realm: The realm URL from the WWW-Authenticate header.
-//   - fields: Logging fields for context.
 //
 // Returns:
 //   - string: The extracted host, or empty if extraction fails.
-func extractChallengeHost(realm string, fields logrus.Fields) string {
+func extractChallengeHost(log *zerolog.Logger, realm string) string {
 	realm = strings.TrimSpace(realm)
-	logrus.WithFields(fields).
-		WithField("trimmed_realm", realm).
-		Debug("Trimmed realm for host extraction")
+	log.Debug().
+		Str("trimmed_realm", realm).
+		Msg("Trimmed realm for host extraction")
 
 	parsed, err := url.Parse(realm)
 	if err != nil || parsed.Host == "" {
-		logrus.WithFields(fields).
-			WithField("realm", realm).
-			Debug("Failed to extract challenge host from realm")
+		log.Debug().
+			Str("realm", realm).
+			Msg("Failed to extract challenge host from realm")
 
 		return ""
 	}
@@ -158,9 +152,10 @@ func extractChallengeHost(realm string, fields logrus.Fields) string {
 		return parsed.Host
 	}
 
-	logrus.WithFields(fields).
-		WithField("realm", realm).
-		Debug("Failed to extract challenge host from realm")
+	log.Debug().
+		Str("realm", realm).
+		Str("scheme", parsed.Scheme).
+		Msg("Unsupported realm URL scheme for challenge host extraction")
 
 	return ""
 }
@@ -168,23 +163,24 @@ func extractChallengeHost(realm string, fields logrus.Fields) string {
 // GetRegistryAddress extracts the registry address from an image reference.
 //
 // It returns the domain part of the reference, mapping Docker Hub's default
-// domain to its canonical host if needed.
-// lscr.io is mapped to ghcr.io since lscr.io images are hosted on GitHub
-// Container Registry.
+// domain to its canonical host if needed. [hosts.LSCRRegistryDomain] is mapped
+// to [hosts.GitHubRegistryDomain] since those images are hosted on GHCR.
 //
 // Parameters:
-//   - imageRef: Image reference string (e.g., "docker.io/library/alpine").
+//   - log: Logger for diagnostics.
+//   - imageRef: Image reference string (for example "docker.io/library/alpine").
 //
 // Returns:
-//   - string: Registry address (e.g., "index.docker.io") if successful.
+//   - string: Registry address (for example "index.docker.io") if successful.
 //   - error: Non-nil if parsing fails, nil on success.
-func GetRegistryAddress(imageRef string) (string, error) {
+func GetRegistryAddress(log *zerolog.Logger, imageRef string) (string, error) {
 	// Parse the image reference into a normalized form for consistent domain extraction.
 	normalizedRef, err := reference.ParseNormalizedNamed(imageRef)
 	if err != nil {
-		logrus.WithError(err).
-			WithField("image_ref", imageRef).
-			Debug("Failed to parse image reference")
+		log.Debug().
+			Err(err).
+			Str("image_ref", imageRef).
+			Msg("Failed to parse image reference")
 
 		return "", fmt.Errorf("%w: %w", errFailedParseImageReference, err)
 	}
@@ -193,30 +189,30 @@ func GetRegistryAddress(imageRef string) (string, error) {
 	domain := reference.Domain(normalizedRef)
 
 	// Map Docker Hub's default domain to its canonical host for registry requests.
-	if domain == DockerRegistryDomain {
-		logrus.WithFields(logrus.Fields{
-			"image_ref": imageRef,
-			"address":   domain,
-		}).Debug("Mapped Docker Hub domain to canonical host")
+	if domain == hosts.DockerRegistryDomain {
+		domain = hosts.DockerRegistryHost
 
-		domain = DockerRegistryHost
+		log.Debug().
+			Str("image_ref", imageRef).
+			Str("address", domain).
+			Msg("Mapped Docker Hub domain to canonical host")
 	}
 
 	// lscr.io images are hosted on GitHub Container Registry (ghcr.io).
 	// Map here so all callers benefit, including GetChallengeURL and GetAuthURL.
-	if domain == LSCRRegistryDomain {
-		logrus.WithFields(logrus.Fields{
-			"image_ref": imageRef,
-			"address":   domain,
-		}).Debug("Mapped lscr.io to ghcr.io")
+	if domain == hosts.LSCRRegistryDomain {
+		domain = hosts.GitHubRegistryDomain
 
-		domain = GitHubRegistryDomain
+		log.Debug().
+			Str("image_ref", imageRef).
+			Str("address", domain).
+			Msg("Mapped lscr.io to ghcr.io")
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"image_ref": imageRef,
-		"address":   domain,
-	}).Debug("Extracted registry address")
+	log.Debug().
+		Str("image_ref", imageRef).
+		Str("address", domain).
+		Msg("Extracted registry address")
 
 	return domain, nil
 }

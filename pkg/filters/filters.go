@@ -4,10 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/distribution/reference"
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
@@ -54,11 +55,7 @@ var (
 // Returns:
 //   - bool: True if container is Watchtower, false otherwise.
 func WatchtowerContainersFilter(c types.FilterableContainer) bool {
-	clog := logrus.WithField("container", c.Name())
-	isWatchtower := c.IsWatchtower()
-	clog.WithField("is_watchtower", isWatchtower).Debug("Filtering for Watchtower container")
-
-	return isWatchtower
+	return c.IsWatchtower()
 }
 
 // UnscopedWatchtowerContainersFilter selects only unscoped Watchtower containers.
@@ -66,30 +63,16 @@ func WatchtowerContainersFilter(c types.FilterableContainer) bool {
 // Returns:
 //   - bool: True if container is Watchtower and has no scope or scope "none", false otherwise.
 func UnscopedWatchtowerContainersFilter(c types.FilterableContainer) bool {
-	clog := logrus.WithField("container", c.Name())
-
 	if !c.IsWatchtower() {
-		clog.Debug("Container is not Watchtower")
-
 		return false
 	}
 
 	containerScope, containerHasScope := c.Scope()
 	if !containerHasScope || containerScope == "" {
-		containerScope = noScope // Default to "none" if unset.
+		containerScope = noScope
 	}
 
-	if containerScope == noScope {
-		clog.WithField("container_scope", containerScope).
-			Debug("Filtering for unscoped Watchtower container")
-
-		return true
-	}
-
-	clog.WithField("container_scope", containerScope).
-		Debug("Container has scope, excluding from unscoped filter")
-
-	return false
+	return containerScope == noScope
 }
 
 // ExcludeOldWatchtowerFilter rejects containers that are old Watchtower
@@ -108,9 +91,6 @@ func ExcludeOldWatchtowerFilter(c types.FilterableContainer) bool {
 	}
 
 	if IsOldWatchtower(c) {
-		logrus.WithField("container", c.Name()).
-			Debug("Excluding old Watchtower container from update cycle")
-
 		return false
 	}
 
@@ -154,40 +134,48 @@ func ExcludeOldWatchtowerFilterChain(baseFilter types.Filter) types.Filter {
 // Returns:
 //   - bool: Always true.
 func NoFilter(c types.FilterableContainer) bool {
-	logrus.WithField("container", c.Name()).Debug("No filter applied")
-
 	return true
 }
 
 // FilterByNames selects containers matching specified names.
 //
+// Name patterns are compiled once when the filter is built.
+//
 // Parameters:
+//   - log: Logger for debug output.
 //   - normalizedNames: List of normalized names or regex patterns to match.
 //   - baseFilter: Base filter to chain.
 //
 // Returns:
 //   - types.Filter: Filter function combining name check with base filter.
-func FilterByNames(normalizedNames []string, baseFilter types.Filter) types.Filter {
+func FilterByNames(log *zerolog.Logger, normalizedNames []string, baseFilter types.Filter) types.Filter {
 	if len(normalizedNames) == 0 {
 		return baseFilter
 	}
 
+	// Compile once. The returned closure only evaluates the compiled matchers.
+	compiled := compileNamePatterns(normalizedNames, true)
+
 	return func(c types.FilterableContainer) bool {
-		containerName := c.Name() // Normalized name
-		clog := logrus.WithFields(logrus.Fields{
-			"container": c.Name(),
-			"names":     normalizedNames,
-		})
+		containerName := c.Name()
 
-		for _, pattern := range normalizedNames {
-			if matchesName(containerName, pattern) {
-				clog.Debug("Matched container by name/pattern")
-
-				return baseFilter(c)
+		if compiled.match(containerName) {
+			if debugEnabled(log) {
+				log.Debug().
+					Str("container", containerName).
+					Strs("names", normalizedNames).
+					Msg("Matched container by name/pattern")
 			}
+
+			return baseFilter(c)
 		}
 
-		clog.Debug("Container name did not match any filter")
+		if debugEnabled(log) {
+			log.Debug().
+				Str("container", containerName).
+				Strs("names", normalizedNames).
+				Msg("Container name did not match any filter")
+		}
 
 		return false
 	}
@@ -195,33 +183,43 @@ func FilterByNames(normalizedNames []string, baseFilter types.Filter) types.Filt
 
 // FilterByDisableNames excludes containers matching specified names.
 //
+// Name patterns are compiled once when the filter is built.
+//
 // Parameters:
+//   - log: Logger for debug output.
 //   - normalizedDisableNames: Names or regex patterns to exclude.
 //   - baseFilter: Base filter to chain.
 //
 // Returns:
 //   - types.Filter: Filter function excluding names and applying base filter.
-func FilterByDisableNames(normalizedDisableNames []string, baseFilter types.Filter) types.Filter {
+func FilterByDisableNames(log *zerolog.Logger, normalizedDisableNames []string, baseFilter types.Filter) types.Filter {
 	if len(normalizedDisableNames) == 0 {
 		return baseFilter
 	}
 
+	// Compile once. The returned closure only evaluates the compiled matchers.
+	compiled := compileNamePatterns(normalizedDisableNames, true)
+
 	return func(c types.FilterableContainer) bool {
-		containerName := c.Name() // Normalized name
-		clog := logrus.WithFields(logrus.Fields{
-			"container":    c.Name(),
-			"disableNames": normalizedDisableNames,
-		})
+		containerName := c.Name()
 
-		for _, pattern := range normalizedDisableNames {
-			if matchesName(containerName, pattern) {
-				clog.Debug("Container excluded by disable name/pattern")
-
-				return false
+		if compiled.match(containerName) {
+			if debugEnabled(log) {
+				log.Debug().
+					Str("container", containerName).
+					Strs("disableNames", normalizedDisableNames).
+					Msg("Container excluded by disable name/pattern")
 			}
+
+			return false
 		}
 
-		clog.Debug("Container not excluded by disable names")
+		if debugEnabled(log) {
+			log.Debug().
+				Str("container", containerName).
+				Strs("disableNames", normalizedDisableNames).
+				Msg("Container not excluded by disable names")
+		}
 
 		return baseFilter(c)
 	}
@@ -230,35 +228,46 @@ func FilterByDisableNames(normalizedDisableNames []string, baseFilter types.Filt
 // FilterByMonitoredImageNamePatterns restricts monitoring to containers whose image name
 // matches specified patterns. When set, only matching containers are monitored.
 //
+// Image patterns are compiled once when the filter is built.
+//
 // Parameters:
+//   - log: Logger for debug output.
 //   - namePatterns: Image name regex patterns.
 //   - baseFilter: Base filter to chain.
 //
 // Returns:
 //   - types.Filter: Filter function restricting to matching image names, then
 //     applying base filter.
-func FilterByMonitoredImageNamePatterns(namePatterns []string, baseFilter types.Filter) types.Filter {
+func FilterByMonitoredImageNamePatterns(log *zerolog.Logger, namePatterns []string, baseFilter types.Filter) types.Filter {
 	if len(namePatterns) == 0 {
 		return baseFilter
 	}
 
+	// Compile once. The returned closure only evaluates the compiled matchers.
+	compiled := compileNamePatterns(namePatterns, false)
+
 	return func(c types.FilterableContainer) bool {
 		imageName := c.ImageName()
-		clog := logrus.WithFields(logrus.Fields{
-			"container":    c.Name(),
-			"image":        imageName,
-			"namePatterns": namePatterns,
-		})
 
-		for _, pattern := range namePatterns {
-			if matchesImageName(imageName, pattern) {
-				clog.Debug("Container image matched pattern")
-
-				return baseFilter(c)
+		if compiled.match(imageName) {
+			if debugEnabled(log) {
+				log.Debug().
+					Str("container", c.Name()).
+					Str("image", imageName).
+					Strs("namePatterns", namePatterns).
+					Msg("Container image matched pattern")
 			}
+
+			return baseFilter(c)
 		}
 
-		clog.Debug("Container image did not match any pattern")
+		if debugEnabled(log) {
+			log.Debug().
+				Str("container", c.Name()).
+				Str("image", imageName).
+				Strs("namePatterns", namePatterns).
+				Msg("Container image did not match any pattern")
+		}
 
 		return false
 	}
@@ -267,35 +276,46 @@ func FilterByMonitoredImageNamePatterns(namePatterns []string, baseFilter types.
 // FilterBySkippedImageNamePatterns prevents monitoring of containers whose image name
 // matches specified patterns. Matching containers are excluded from monitoring.
 //
+// Image patterns are compiled once when the filter is built.
+//
 // Parameters:
+//   - log: Logger for debug output.
 //   - namePatterns: Image name regex patterns.
 //   - baseFilter: Base filter to chain.
 //
 // Returns:
 //   - types.Filter: Filter function excluding matching image names, then applying
 //     base filter.
-func FilterBySkippedImageNamePatterns(namePatterns []string, baseFilter types.Filter) types.Filter {
+func FilterBySkippedImageNamePatterns(log *zerolog.Logger, namePatterns []string, baseFilter types.Filter) types.Filter {
 	if len(namePatterns) == 0 {
 		return baseFilter
 	}
 
+	// Compile once. The returned closure only evaluates the compiled matchers.
+	compiled := compileNamePatterns(namePatterns, false)
+
 	return func(c types.FilterableContainer) bool {
 		imageName := c.ImageName()
-		clog := logrus.WithFields(logrus.Fields{
-			"container":    c.Name(),
-			"image":        imageName,
-			"namePatterns": namePatterns,
-		})
 
-		for _, pattern := range namePatterns {
-			if matchesImageName(imageName, pattern) {
-				clog.Debug("Container image matched skip pattern")
-
-				return false
+		if compiled.match(imageName) {
+			if debugEnabled(log) {
+				log.Debug().
+					Str("container", c.Name()).
+					Str("image", imageName).
+					Strs("namePatterns", namePatterns).
+					Msg("Container image matched skip pattern")
 			}
+
+			return false
 		}
 
-		clog.Debug("Container not skipped by image name patterns")
+		if debugEnabled(log) {
+			log.Debug().
+				Str("container", c.Name()).
+				Str("image", imageName).
+				Strs("namePatterns", namePatterns).
+				Msg("Container not skipped by image name patterns")
+		}
 
 		return baseFilter(c)
 	}
@@ -304,7 +324,7 @@ func FilterBySkippedImageNamePatterns(namePatterns []string, baseFilter types.Fi
 // parseLabelPairs parses a slice of "key=value" strings into a map.
 //
 // Values are trimmed of surrounding whitespace for consistency with key
-// trimming. Only the first '=' separates key from value; any additional '='
+// trimming. Only the first '=' separates key from value and any additional '='
 // characters are retained as part of the value. Entries without at least one
 // '=', empty keys, or pairs exceeding the maximum combined byte length are
 // rejected with an error rather than silently skipped, so callers can surface
@@ -366,16 +386,17 @@ func parseLabelPairs(pairs []string) (map[string]string, error) {
 //
 // Returns:
 //   - types.Filter: Filter function matching labels and applying base filter.
-func FilterByEnabledLabels(labels map[string]string, baseFilter types.Filter) types.Filter {
+func FilterByEnabledLabels(log *zerolog.Logger, labels map[string]string, baseFilter types.Filter) types.Filter {
 	if len(labels) == 0 {
 		return baseFilter
 	}
 
 	return func(c types.FilterableContainer) bool {
-		clog := logrus.WithFields(logrus.Fields{
-			"container": c.Name(),
-			"labels":    labels,
-		})
+		clogVal := log.With().
+			Str("container", c.Name()).
+			Interface("labels", labels).
+			Logger()
+		clog := &clogVal
 
 		for key, expectedValue := range labels {
 			labelValue, ok := c.GetLabel(key)
@@ -387,12 +408,14 @@ func FilterByEnabledLabels(labels map[string]string, baseFilter types.Filter) ty
 				continue
 			}
 
-			clog.WithField("matched_label", key).Debug("Container matched enabled label")
+			clog.Debug().
+				Str("matched_label", key).
+				Msg("Container matched enabled label")
 
 			return baseFilter(c)
 		}
 
-		clog.Debug("Container did not match any enabled label")
+		clog.Debug().Msg("Container did not match any enabled label")
 
 		return false
 	}
@@ -413,16 +436,17 @@ func FilterByEnabledLabels(labels map[string]string, baseFilter types.Filter) ty
 //
 // Returns:
 //   - types.Filter: Filter function excluding matching labels and applying base filter.
-func FilterByDisabledLabels(labels map[string]string, baseFilter types.Filter) types.Filter {
+func FilterByDisabledLabels(log *zerolog.Logger, labels map[string]string, baseFilter types.Filter) types.Filter {
 	if len(labels) == 0 {
 		return baseFilter
 	}
 
 	return func(c types.FilterableContainer) bool {
-		clog := logrus.WithFields(logrus.Fields{
-			"container": c.Name(),
-			"labels":    labels,
-		})
+		clogVal := log.With().
+			Str("container", c.Name()).
+			Interface("labels", labels).
+			Logger()
+		clog := &clogVal
 
 		for key, expectedValue := range labels {
 			labelValue, ok := c.GetLabel(key)
@@ -434,12 +458,14 @@ func FilterByDisabledLabels(labels map[string]string, baseFilter types.Filter) t
 				continue
 			}
 
-			clog.WithField("matched_label", key).Debug("Container excluded by disabled label")
+			clog.Debug().
+				Str("matched_label", key).
+				Msg("Container excluded by disabled label")
 
 			return false
 		}
 
-		clog.Debug("Container not excluded by disabled labels")
+		clog.Debug().Msg("Container not excluded by disabled labels")
 
 		return baseFilter(c)
 	}
@@ -482,12 +508,13 @@ func FilterByEnableLabel(enable bool, baseFilter types.Filter) types.Filter {
 //
 // Returns:
 //   - types.Filter: Filter function matching scope and applying base filter.
-func FilterByScope(scope string, baseFilter types.Filter) types.Filter {
+func FilterByScope(log *zerolog.Logger, scope string, baseFilter types.Filter) types.Filter {
 	return func(c types.FilterableContainer) bool {
-		clog := logrus.WithFields(logrus.Fields{
-			"container": c.Name(),
-			"scope":     scope,
-		})
+		clogVal := log.With().
+			Str("container", c.Name()).
+			Str("scope", scope).
+			Logger()
+		clog := &clogVal
 
 		containerScope, containerHasScope := c.Scope()
 		if !containerHasScope || containerScope == "" {
@@ -495,12 +522,16 @@ func FilterByScope(scope string, baseFilter types.Filter) types.Filter {
 		}
 
 		if containerScope == scope {
-			clog.WithField("container_scope", containerScope).Debug("Container matched scope")
+			clog.Debug().
+				Str("container_scope", containerScope).
+				Msg("Container matched scope")
 
 			return baseFilter(c)
 		}
 
-		clog.WithField("container_scope", containerScope).Debug("Container scope mismatch")
+		clog.Debug().
+			Str("container_scope", containerScope).
+			Msg("Container scope mismatch")
 
 		return false
 	}
@@ -514,29 +545,116 @@ func FilterByScope(scope string, baseFilter types.Filter) types.Filter {
 //
 // Returns:
 //   - types.Filter: Filter function matching images and applying base filter.
-func FilterByImage(images []string, baseFilter types.Filter) types.Filter {
+func FilterByImage(log *zerolog.Logger, images []string, baseFilter types.Filter) types.Filter {
 	if len(images) == 0 {
 		return baseFilter // No images specified, apply base filter only.
 	}
 
 	return func(c types.FilterableContainer) bool {
-		clog := logrus.WithFields(logrus.Fields{
-			"container": c.Name(),
-			"images":    images,
-		})
+		clogVal := log.With().
+			Str("container", c.Name()).
+			Strs("images", images).
+			Logger()
+		clog := &clogVal
 
 		for _, targetImage := range images {
 			if matchImageAndTag(c.ImageName(), targetImage) {
-				clog.WithField("image", c.ImageName()).Debug("Container matched image")
+				clog.Debug().
+					Str("image", c.ImageName()).
+					Msg("Container matched image")
 
 				return baseFilter(c) // Image matches, proceed with base filter.
 			}
 		}
 
-		clog.WithField("image", c.ImageName()).Debug("Container image did not match")
+		clog.Debug().
+			Str("image", c.ImageName()).
+			Msg("Container image did not match")
 
 		return false // No matching image found.
 	}
+}
+
+// compiledPatterns holds precompiled name or image matchers.
+type compiledPatterns struct {
+	exact   []string
+	regexes []*regexp.Regexp
+}
+
+// compileNamePatterns compiles name or image filter patterns once.
+//
+// Patterns without regex metacharacters are stored as exact literals.
+// Invalid regex patterns are also kept as exact literals.
+//
+// Parameters:
+//   - patterns: Name or image patterns.
+//   - trimSlash: Strip a leading slash from each pattern for container names.
+//
+// Returns:
+//   - compiledPatterns: Exact literals and compiled regexes.
+func compileNamePatterns(patterns []string, trimSlash bool) compiledPatterns {
+	compiled := compiledPatterns{
+		exact:   make([]string, 0, len(patterns)),
+		regexes: make([]*regexp.Regexp, 0, len(patterns)),
+	}
+
+	for _, pattern := range patterns {
+		// Container names are stored without a leading slash.
+		if trimSlash {
+			pattern = strings.TrimPrefix(pattern, "/")
+		}
+
+		// Literal names skip compilation. Only patterns with metacharacters become regexes.
+		if regexp.QuoteMeta(pattern) == pattern {
+			compiled.exact = append(compiled.exact, pattern)
+
+			continue
+		}
+
+		// Invalid regex stays an exact literal, matching matchesName behavior.
+		patternRe, err := regexp.Compile("^" + pattern + "$")
+		if err != nil {
+			compiled.exact = append(compiled.exact, pattern)
+
+			continue
+		}
+
+		compiled.regexes = append(compiled.regexes, patternRe)
+	}
+
+	return compiled
+}
+
+// match reports whether value matches an exact literal or compiled regex.
+//
+// Parameters:
+//   - value: Container name or image name to test.
+//
+// Returns:
+//   - bool: True when value matches a literal or regex.
+func (p compiledPatterns) match(value string) bool {
+	if slices.Contains(p.exact, value) {
+		return true
+	}
+
+	for _, re := range p.regexes {
+		if re.MatchString(value) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// debugEnabled reports whether debug logging is active on log.
+//
+// Parameters:
+//   - log: Logger to inspect. Nil is treated as disabled.
+//
+// Returns:
+//   - bool: True when debug-level logging is enabled.
+func debugEnabled(log *zerolog.Logger) bool {
+	return log != nil && log.GetLevel() <= zerolog.DebugLevel
 }
 
 // matchesImageName checks if a container's image name matches a given pattern (exact or regex).
@@ -646,7 +764,7 @@ func matchImageAndTag(containerImage, targetImage string) bool {
 //   - types.Filter: Combined filter function.
 //   - string: Description of the filter.
 //   - error: Non-nil if any enabled or disabled label pair is malformed.
-func BuildFilter(
+func BuildFilter(log *zerolog.Logger,
 	normalizedNames []string,
 	normalizedDisableNames []string,
 	monitoredImageNamePatterns []string,
@@ -666,26 +784,27 @@ func BuildFilter(
 		return nil, "", err
 	}
 
-	clog := logrus.WithFields(logrus.Fields{
-		"names":                      normalizedNames,
-		"disableNames":               normalizedDisableNames,
-		"monitoredImageNamePatterns": monitoredImageNamePatterns,
-		"skippedImageNamePatterns":   skippedImageNamePatterns,
-		"enabledLabels":              enabledLabelMap,
-		"disabledLabels":             disabledLabelMap,
-		"enableLabel":                enableLabel,
-		"scope":                      scope,
-	})
-	clog.Debug("Building container filter")
+	clogVal := log.With().
+		Strs("names", normalizedNames).
+		Strs("disableNames", normalizedDisableNames).
+		Strs("monitoredImageNamePatterns", monitoredImageNamePatterns).
+		Strs("skippedImageNamePatterns", skippedImageNamePatterns).
+		Interface("enabledLabels", enabledLabelMap).
+		Interface("disabledLabels", disabledLabelMap).
+		Bool("enableLabel", enableLabel).
+		Str("scope", scope).
+		Logger()
+	clog := &clogVal
+	clog.Debug().Msg("Building container filter")
 
 	stringBuilder := strings.Builder{}
 	filter := NoFilter
-	filter = FilterByNames(normalizedNames, filter)
-	filter = FilterByDisableNames(normalizedDisableNames, filter)
-	filter = FilterByMonitoredImageNamePatterns(monitoredImageNamePatterns, filter)
-	filter = FilterBySkippedImageNamePatterns(skippedImageNamePatterns, filter)
-	filter = FilterByEnabledLabels(enabledLabelMap, filter)
-	filter = FilterByDisabledLabels(disabledLabelMap, filter)
+	filter = FilterByNames(log, normalizedNames, filter)
+	filter = FilterByDisableNames(log, normalizedDisableNames, filter)
+	filter = FilterByMonitoredImageNamePatterns(log, monitoredImageNamePatterns, filter)
+	filter = FilterBySkippedImageNamePatterns(log, skippedImageNamePatterns, filter)
+	filter = FilterByEnabledLabels(log, enabledLabelMap, filter)
+	filter = FilterByDisabledLabels(log, disabledLabelMap, filter)
 	filter = FilterByEnableLabel(enableLabel, filter)
 
 	// Add name-based filter description.
@@ -801,11 +920,11 @@ func BuildFilter(
 	}
 
 	if scope == noScope || scope == "" {
-		filter = FilterByScope(noScope, filter)
+		filter = FilterByScope(log, noScope, filter)
 
 		stringBuilder.WriteString(`without a scope`)
 	} else if scope != "" {
-		filter = FilterByScope(scope, filter)
+		filter = FilterByScope(log, scope, filter)
 
 		stringBuilder.WriteString(`in scope `)
 		stringBuilder.WriteString(scope)
@@ -823,7 +942,9 @@ func BuildFilter(
 		filterDesc = strings.TrimSuffix(filterDesc, ", ")
 	}
 
-	clog.WithField("filter_desc", filterDesc).Debug("Filter built")
+	clog.Debug().
+		Str("filter_desc", filterDesc).
+		Msg("Filter built")
 
 	return filter, filterDesc, nil
 }

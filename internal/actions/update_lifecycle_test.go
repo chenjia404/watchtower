@@ -35,7 +35,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										"com.centurylinklabs.watchtower.lifecycle.pre-update":         "/PreUpdateReturn1.sh",
 									},
 									ExposedPorts: dockerNetwork.PortSet{},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -44,7 +45,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				client.TestData.Staleness = map[string]bool{
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -78,7 +79,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										"com.centurylinklabs.watchtower.lifecycle.pre-update": "/PreUpdateReturn0.sh",
 									},
 									ExposedPorts: dockerNetwork.PortSet{},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -87,7 +89,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				client.TestData.Staleness = map[string]bool{
 					"test-container-uid-gid": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -126,7 +128,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										"com.centurylinklabs.watchtower.lifecycle.pre-update":         "/PreUpdateReturn75.sh",
 									},
 									ExposedPorts: dockerNetwork.PortSet{},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -135,7 +138,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				client.TestData.Staleness = map[string]bool{
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -170,7 +173,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										"com.centurylinklabs.watchtower.lifecycle.pre-update":         "/PreUpdateReturn0.sh",
 									},
 									ExposedPorts: dockerNetwork.PortSet{},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -179,7 +183,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				client.TestData.Staleness = map[string]bool{
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -210,7 +214,8 @@ var _ = ginkgo.Describe("the update action", func() {
 					&dockerContainer.Config{
 						Labels:       map[string]string{},
 						ExposedPorts: dockerNetwork.PortSet{},
-					})
+					},
+				)
 
 				provider.SetStale(true)
 
@@ -226,7 +231,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"com.centurylinklabs.watchtower.depends-on": "test-container-provider",
 						},
 						ExposedPorts: dockerNetwork.PortSet{},
-					})
+					},
+				)
 
 				containers := []types.Container{
 					provider,
@@ -236,7 +242,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				gomega.Expect(provider.ToRestart()).To(gomega.BeTrue())
 				gomega.Expect(consumer.ToRestart()).To(gomega.BeFalse())
 
-				actions.UpdateImplicitRestart(containers, containers, true)
+				actions.UpdateImplicitRestart(testLogger(), containers, containers, true)
 
 				gomega.Expect(containers[0].ToRestart()).To(gomega.BeTrue())
 				gomega.Expect(containers[1].ToRestart()).To(gomega.BeTrue())
@@ -254,7 +260,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					gomega.Expect(containers[0].ToRestart()).To(gomega.BeTrue())  // db
 					gomega.Expect(containers[1].ToRestart()).To(gomega.BeFalse()) // web
 
-					actions.UpdateImplicitRestart(containers, containers, true)
+					actions.UpdateImplicitRestart(testLogger(), containers, containers, true)
 
 					// web should be marked for restart because it depends on db
 					gomega.Expect(containers[0].ToRestart()).To(gomega.BeTrue())
@@ -275,7 +281,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					gomega.Expect(containers[1].ToRestart()).To(gomega.BeFalse()) // db
 					gomega.Expect(containers[2].ToRestart()).To(gomega.BeFalse()) // app
 
-					actions.UpdateImplicitRestart(containers, containers, true)
+					actions.UpdateImplicitRestart(testLogger(), containers, containers, true)
 
 					// All should be marked for restart: cache -> db -> app
 					gomega.Expect(containers[0].ToRestart()).To(gomega.BeTrue())
@@ -295,7 +301,8 @@ var _ = ginkgo.Describe("the update action", func() {
 					&dockerContainer.Config{
 						Labels:       map[string]string{},
 						ExposedPorts: dockerNetwork.PortSet{},
-					})
+					},
+				)
 
 				containerB := mockActions.CreateMockContainerWithConfig(
 					"test-container-b",
@@ -309,7 +316,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"com.centurylinklabs.watchtower.depends-on": "test-container-c",
 						},
 						ExposedPorts: dockerNetwork.PortSet{},
-					})
+					},
+				)
 
 				containerA := mockActions.CreateMockContainerWithConfig(
 					"test-container-a",
@@ -323,7 +331,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"com.centurylinklabs.watchtower.depends-on": "test-container-b",
 						},
 						ExposedPorts: dockerNetwork.PortSet{},
-					})
+					},
+				)
 
 				containers := []types.Container{
 					containerC,
@@ -338,7 +347,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				gomega.Expect(containerA.ToRestart()).To(gomega.BeFalse())
 
 				// Run UpdateImplicitRestart to propagate restart through the chain
-				actions.UpdateImplicitRestart(containers, containers, true)
+				actions.UpdateImplicitRestart(testLogger(), containers, containers, true)
 
 				// Verify that restart propagates: A and B should now be marked for restart
 				gomega.Expect(containers[0].ToRestart()).To(gomega.BeTrue()) // C
@@ -365,7 +374,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										"com.centurylinklabs.watchtower.lifecycle.pre-update":         "/PreUpdateReturn1.sh",
 									},
 									ExposedPorts: dockerNetwork.PortSet{},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -374,7 +384,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				client.TestData.Staleness = map[string]bool{
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -411,7 +421,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										"com.centurylinklabs.watchtower.lifecycle.pre-update":         "/PreUpdateReturn1.sh",
 									},
 									ExposedPorts: dockerNetwork.PortSet{},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -420,7 +431,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				client.TestData.Staleness = map[string]bool{
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{

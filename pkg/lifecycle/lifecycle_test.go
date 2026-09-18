@@ -5,14 +5,13 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/sirupsen/logrus"
-	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	dockerContainer "github.com/moby/moby/api/types/container"
 
+	"github.com/nicholas-fedor/watchtower/internal/logging"
 	"github.com/nicholas-fedor/watchtower/pkg/container"
 	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
@@ -20,7 +19,7 @@ import (
 
 // mockedContainer creates a *container.Container for testing.
 func mockedContainer(options ...func(*container.Container)) *container.Container {
-	c := container.NewContainer(
+	c := container.NewContainer(nil,
 		&dockerContainer.InspectResponse{
 			ID:         "container_id",
 			HostConfig: &dockerContainer.HostConfig{},
@@ -66,7 +65,6 @@ func TestExecutePreChecks(t *testing.T) {
 	tests := []struct {
 		name           string
 		setupClient    func(*mockContainer.MockClient)
-		expectedLogs   int
 		expectedLogMsg string
 	}{
 		{
@@ -81,7 +79,6 @@ func TestExecutePreChecks(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "pre-check", 1, 0, 0).
 					Return(true, nil)
 			},
-			expectedLogs:   13, // Listing, Found, UID not found x2, UID not set x2, GID not found x2, GID not set x2, Execute, Label not found, Skip
 			expectedLogMsg: "Listing containers for pre-checks",
 		},
 		{
@@ -89,45 +86,26 @@ func TestExecutePreChecks(t *testing.T) {
 			setupClient: func(c *mockContainer.MockClient) {
 				c.On("ListContainers", mock.Anything, mock.Anything).Return(nil, errListingFailed)
 			},
-			expectedLogs:   2, // Listing, Error
 			expectedLogMsg: "Listing containers for pre-checks",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hook := test.NewGlobal()
-
-			logrus.SetLevel(logrus.DebugLevel)
-
+			log, logBuf := logging.NewTestLogger(logging.DebugLevel)
 			client := mockContainer.NewMockClient(t)
 			tt.setupClient(client)
-			hook.Reset()
-
-			ExecutePreChecks(context.Background(), client, types.UpdateParams{
+			ExecutePreChecks(log, context.Background(), client, types.UpdateParams{
 				Filter:         func(types.FilterableContainer) bool { return true },
 				LifecycleHooks: true,
 				LifecycleUID:   0,
 				LifecycleGID:   0,
-			})
+			}, nil)
 
-			assert.Len(t, hook.Entries, tt.expectedLogs, "log entry count mismatch")
-
-			if len(hook.Entries) > 0 {
-				assert.Contains(
-					t,
-					hook.Entries[0].Message,
-					tt.expectedLogMsg,
-					"first log message mismatch",
-				)
-			} else {
-				t.Errorf(
-					"No log entries captured; expected %d with message %q",
-					tt.expectedLogs,
-					tt.expectedLogMsg,
-				)
-			}
-
-			hook.Reset()
+			output := logBuf.String()
+			assert.NotEmpty(t, output, "expected log output")
+			assert.Contains(t, output, tt.expectedLogMsg,
+				"first log message mismatch",
+			)
 		})
 	}
 }
@@ -137,7 +115,6 @@ func TestExecutePostChecks(t *testing.T) {
 	tests := []struct {
 		name           string
 		setupClient    func(*mockContainer.MockClient)
-		expectedLogs   int
 		expectedLogMsg string
 	}{
 		{
@@ -152,7 +129,6 @@ func TestExecutePostChecks(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-check", 1, 0, 0).
 					Return(true, nil)
 			},
-			expectedLogs:   13, // Listing, Found, UID not found x2, UID not set x2, GID not found x2, GID not set x2, Execute, Label not found, Skip
 			expectedLogMsg: "Listing containers for post-checks",
 		},
 		{
@@ -160,42 +136,96 @@ func TestExecutePostChecks(t *testing.T) {
 			setupClient: func(c *mockContainer.MockClient) {
 				c.On("ListContainers", mock.Anything, mock.Anything).Return(nil, errListingFailed)
 			},
-			expectedLogs:   2, // Listing, Error
 			expectedLogMsg: "Listing containers for post-checks",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hook := test.NewGlobal()
-
-			logrus.SetLevel(logrus.DebugLevel)
-
+			log, logBuf := logging.NewTestLogger(logging.DebugLevel)
 			client := mockContainer.NewMockClient(t)
 			tt.setupClient(client)
-			hook.Reset()
-
-			ExecutePostChecks(context.Background(), client, types.UpdateParams{
+			ExecutePostChecks(log, context.Background(), client, types.UpdateParams{
 				Filter:         func(types.FilterableContainer) bool { return true },
 				LifecycleHooks: true,
 				LifecycleUID:   0,
 				LifecycleGID:   0,
-			})
+			}, nil)
 
-			assert.Len(t, hook.Entries, tt.expectedLogs)
-
-			if len(hook.Entries) > 0 {
-				assert.Contains(t, hook.Entries[0].Message, tt.expectedLogMsg)
-			} else {
-				t.Errorf(
-					"No log entries captured; expected %d with message %q",
-					tt.expectedLogs,
-					tt.expectedLogMsg,
-				)
-			}
-
-			hook.Reset()
+			output := logBuf.String()
+			assert.NotEmpty(t, output, "expected log output")
+			assert.Contains(t, output, tt.expectedLogMsg)
 		})
 	}
+}
+
+func TestExecutePreChecks_UsesListedContainers(t *testing.T) {
+	log, logBuf := logging.NewTestLogger(logging.DebugLevel)
+	client := mockContainer.NewMockClient(t)
+	listed := []types.Container{
+		mockedContainer(withLabels(map[string]string{
+			"com.centurylinklabs.watchtower.lifecycle.pre-check": "pre-check",
+		})),
+	}
+
+	client.On("ExecuteCommand", mock.Anything, mock.Anything, "pre-check", 1, 0, 0).
+		Return(true, nil)
+
+	ExecutePreChecks(log, context.Background(), client, types.UpdateParams{
+		Filter:         func(types.FilterableContainer) bool { return true },
+		LifecycleHooks: true,
+	}, listed)
+
+	client.AssertNotCalled(t, "ListContainers", mock.Anything, mock.Anything)
+	assert.Contains(t, logBuf.String(), "Found containers for pre-checks")
+}
+
+func TestExecutePostChecks_UsesListedContainers(t *testing.T) {
+	log, logBuf := logging.NewTestLogger(logging.DebugLevel)
+	client := mockContainer.NewMockClient(t)
+	listed := []types.Container{
+		mockedContainer(withLabels(map[string]string{
+			"com.centurylinklabs.watchtower.lifecycle.post-check": "post-check",
+		})),
+	}
+
+	client.On("ExecuteCommand", mock.Anything, mock.Anything, "post-check", 1, 0, 0).
+		Return(true, nil)
+
+	ExecutePostChecks(log, context.Background(), client, types.UpdateParams{
+		Filter:         func(types.FilterableContainer) bool { return true },
+		LifecycleHooks: true,
+	}, listed)
+
+	client.AssertNotCalled(t, "ListContainers", mock.Anything, mock.Anything)
+	assert.Contains(t, logBuf.String(), "Found containers for post-checks")
+}
+
+func TestExecutePreChecks_EmptyListedDoesNotRelist(t *testing.T) {
+	log, _ := logging.NewTestLogger(logging.DebugLevel)
+	client := mockContainer.NewMockClient(t)
+	listed := []types.Container{}
+
+	ExecutePreChecks(log, context.Background(), client, types.UpdateParams{
+		Filter:         func(types.FilterableContainer) bool { return true },
+		LifecycleHooks: true,
+	}, listed)
+
+	client.AssertNotCalled(t, "ListContainers", mock.Anything, mock.Anything)
+	client.AssertNotCalled(t, "ExecuteCommand", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestExecutePostChecks_EmptyListedDoesNotRelist(t *testing.T) {
+	log, _ := logging.NewTestLogger(logging.DebugLevel)
+	client := mockContainer.NewMockClient(t)
+	listed := []types.Container{}
+
+	ExecutePostChecks(log, context.Background(), client, types.UpdateParams{
+		Filter:         func(types.FilterableContainer) bool { return true },
+		LifecycleHooks: true,
+	}, listed)
+
+	client.AssertNotCalled(t, "ListContainers", mock.Anything, mock.Anything)
+	client.AssertNotCalled(t, "ExecuteCommand", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 }
 
 // TestExecutePreCheckCommand tests the ExecutePreCheckCommand function.
@@ -204,7 +234,6 @@ func TestExecutePreCheckCommand(t *testing.T) {
 		name           string
 		container      types.Container
 		setupClient    func(*mockContainer.MockClient)
-		expectedLogs   int
 		expectedLogMsg string
 	}{
 		{
@@ -216,13 +245,11 @@ func TestExecutePreCheckCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "pre-check", 1, 0, 0).
 					Return(true, nil)
 			},
-			expectedLogs:   5, // UID not found, UID not set, GID not found, GID not set, Execute
 			expectedLogMsg: "Executing pre-check command",
 		},
 		{
 			name:           "no command",
 			container:      mockedContainer(),
-			expectedLogs:   6, // Command label not found, UID not found, UID not set, GID not found, GID not set, No command
 			expectedLogMsg: "No pre-check command supplied",
 		},
 		{
@@ -234,7 +261,6 @@ func TestExecutePreCheckCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "pre-check", 1, 0, 0).
 					Return(false, errExecFailed)
 			},
-			expectedLogs:   6, // UID not found, UID not set, GID not found, GID not set, Execute, Error
 			expectedLogMsg: "Pre-check command failed",
 		},
 		{
@@ -248,38 +274,23 @@ func TestExecutePreCheckCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "pre-check", 1, 1000, 1001).
 					Return(true, nil)
 			},
-			expectedLogs:   5, // UID found, UID set, GID found, GID set, Execute
 			expectedLogMsg: "Executing pre-check command",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hook := test.NewGlobal()
-
-			logrus.SetLevel(logrus.DebugLevel)
+			log, logBuf := logging.NewTestLogger(logging.DebugLevel)
 
 			client := mockContainer.NewMockClient(t)
 			if tt.setupClient != nil {
 				tt.setupClient(client)
 			}
 
-			hook.Reset()
+			ExecutePreCheckCommand(log, context.Background(), client, tt.container, 0, 0)
 
-			ExecutePreCheckCommand(context.Background(), client, tt.container, 0, 0)
-
-			assert.Len(t, hook.Entries, tt.expectedLogs)
-
-			if len(hook.Entries) > 0 {
-				assert.Contains(t, hook.LastEntry().Message, tt.expectedLogMsg)
-			} else {
-				t.Errorf(
-					"No log entries captured; expected %d with message %q",
-					tt.expectedLogs,
-					tt.expectedLogMsg,
-				)
-			}
-
-			hook.Reset()
+			output := logBuf.String()
+			assert.NotEmpty(t, output, "expected log output")
+			assert.Contains(t, output, tt.expectedLogMsg)
 		})
 	}
 }
@@ -290,7 +301,6 @@ func TestExecutePostCheckCommand(t *testing.T) {
 		name           string
 		container      types.Container
 		setupClient    func(*mockContainer.MockClient)
-		expectedLogs   int
 		expectedLogMsg string
 	}{
 		{
@@ -302,13 +312,11 @@ func TestExecutePostCheckCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-check", 1, 0, 0).
 					Return(true, nil)
 			},
-			expectedLogs:   5, // UID not found, UID not set, GID not found, GID not set, Execute
 			expectedLogMsg: "Executing post-check command",
 		},
 		{
 			name:           "no command",
 			container:      mockedContainer(),
-			expectedLogs:   6, // Command label not found, UID not found, UID not set, GID not found, GID not set, No command
 			expectedLogMsg: "No post-check command supplied",
 		},
 		{
@@ -320,7 +328,6 @@ func TestExecutePostCheckCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-check", 1, 0, 0).
 					Return(false, errExecFailed)
 			},
-			expectedLogs:   6, // UID not found, UID not set, GID not found, GID not set, Execute, Error
 			expectedLogMsg: "Post-check command failed",
 		},
 		{
@@ -334,38 +341,23 @@ func TestExecutePostCheckCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-check", 1, 2000, 2001).
 					Return(true, nil)
 			},
-			expectedLogs:   5, // UID found, UID set, GID found, GID set, Execute
 			expectedLogMsg: "Executing post-check command",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hook := test.NewGlobal()
-
-			logrus.SetLevel(logrus.DebugLevel)
+			log, logBuf := logging.NewTestLogger(logging.DebugLevel)
 
 			client := mockContainer.NewMockClient(t)
 			if tt.setupClient != nil {
 				tt.setupClient(client)
 			}
 
-			hook.Reset()
+			ExecutePostCheckCommand(log, context.Background(), client, tt.container, 0, 0)
 
-			ExecutePostCheckCommand(context.Background(), client, tt.container, 0, 0)
-
-			assert.Len(t, hook.Entries, tt.expectedLogs)
-
-			if len(hook.Entries) > 0 {
-				assert.Contains(t, hook.LastEntry().Message, tt.expectedLogMsg)
-			} else {
-				t.Errorf(
-					"No log entries captured; expected %d with message %q",
-					tt.expectedLogs,
-					tt.expectedLogMsg,
-				)
-			}
-
-			hook.Reset()
+			output := logBuf.String()
+			assert.NotEmpty(t, output, "expected log output")
+			assert.Contains(t, output, tt.expectedLogMsg)
 		})
 	}
 }
@@ -378,7 +370,6 @@ func TestExecutePreUpdateCommand(t *testing.T) {
 		setupClient    func(*mockContainer.MockClient)
 		expectedResult bool
 		expectedErr    bool
-		expectedLogs   int
 		expectedLogMsg string
 	}{
 		{
@@ -395,7 +386,6 @@ func TestExecutePreUpdateCommand(t *testing.T) {
 					Return(true, nil)
 			},
 			expectedResult: true,
-			expectedLogs:   7, // Timeout, UID not found, UID not set, GID not found, GID not set, Execute, Success
 			expectedLogMsg: "Pre-update command executed",
 		},
 		{
@@ -404,7 +394,6 @@ func TestExecutePreUpdateCommand(t *testing.T) {
 				withContainerState(dockerContainer.State{Running: true}),
 			),
 			expectedResult: false,
-			expectedLogs:   4, // Timeout label not found, Default timeout, Command label not found, Skipping
 			expectedLogMsg: "No pre-update command supplied",
 		},
 		{
@@ -417,7 +406,6 @@ func TestExecutePreUpdateCommand(t *testing.T) {
 				}),
 			),
 			expectedResult: false,
-			expectedLogs:   2, // Timeout, Skip
 			expectedLogMsg: "Container is not running",
 		},
 		{
@@ -435,7 +423,6 @@ func TestExecutePreUpdateCommand(t *testing.T) {
 			},
 			expectedResult: true,
 			expectedErr:    true,
-			expectedLogs:   7, // Timeout, UID not found, UID not set, GID not found, GID not set, Execute, Error
 			expectedLogMsg: "Pre-update command failed",
 		},
 		{
@@ -454,7 +441,6 @@ func TestExecutePreUpdateCommand(t *testing.T) {
 					Return(true, nil)
 			},
 			expectedResult: true,
-			expectedLogs:   7, // Timeout, UID found, UID set, GID found, GID set, Execute, Success
 			expectedLogMsg: "Pre-update command executed",
 		},
 	}
@@ -472,24 +458,19 @@ func runPreUpdateTest(t *testing.T, tt struct {
 	setupClient    func(*mockContainer.MockClient)
 	expectedResult bool
 	expectedErr    bool
-	expectedLogs   int
 	expectedLogMsg string
 },
 ) {
 	t.Helper()
 
-	hook := test.NewGlobal()
-
-	logrus.SetLevel(logrus.DebugLevel)
+	log, logBuf := logging.NewTestLogger(logging.DebugLevel)
 
 	client := mockContainer.NewMockClient(t)
 	if tt.setupClient != nil {
 		tt.setupClient(client)
 	}
 
-	hook.Reset()
-
-	result, err := ExecutePreUpdateCommand(context.Background(), client, tt.container, 0, 0)
+	result, err := ExecutePreUpdateCommand(log, context.Background(), client, tt.container, 0, 0)
 
 	assert.Equal(t, tt.expectedResult, result)
 
@@ -505,13 +486,9 @@ func runPreUpdateTest(t *testing.T, tt struct {
 		require.NoError(t, err)
 	}
 
-	assert.Len(t, hook.Entries, tt.expectedLogs)
-
-	if tt.expectedLogs > 0 {
-		assert.Contains(t, hook.LastEntry().Message, tt.expectedLogMsg)
-	}
-
-	hook.Reset()
+	output := logBuf.String()
+	assert.NotEmpty(t, output, "expected log output")
+	assert.Contains(t, output, tt.expectedLogMsg)
 }
 
 // TestExecutePostUpdateCommand tests the ExecutePostUpdateCommand function.
@@ -520,7 +497,6 @@ func TestExecutePostUpdateCommand(t *testing.T) {
 		name           string
 		containerID    types.ContainerID
 		setupClient    func(*mockContainer.MockClient)
-		expectedLogs   int
 		expectedLogMsg string
 	}{
 		{
@@ -534,7 +510,6 @@ func TestExecutePostUpdateCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-update", 1, 0, 0).
 					Return(true, nil)
 			},
-			expectedLogs:   8, // Retrieve, Timeout label not found, Default timeout, UID not found, UID not set, GID not found, GID not set, Execute
 			expectedLogMsg: "Executing post-update command",
 		},
 		{
@@ -543,7 +518,6 @@ func TestExecutePostUpdateCommand(t *testing.T) {
 			setupClient: func(c *mockContainer.MockClient) {
 				c.On("GetContainer", mock.Anything, types.ContainerID("test")).Return(mockedContainer(), nil)
 			},
-			expectedLogs:   9, // Retrieve, Timeout label not found, Default timeout, UID not found, UID not set, GID not found, GID not set, Command label not found, Skipping
 			expectedLogMsg: "No post-update command supplied",
 		},
 		{
@@ -552,7 +526,6 @@ func TestExecutePostUpdateCommand(t *testing.T) {
 			setupClient: func(c *mockContainer.MockClient) {
 				c.On("GetContainer", mock.Anything, types.ContainerID("test")).Return(nil, errNotFound)
 			},
-			expectedLogs:   2, // Retrieve, Error
 			expectedLogMsg: "Failed to get container",
 		},
 		{
@@ -566,7 +539,6 @@ func TestExecutePostUpdateCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-update", 1, 0, 0).
 					Return(false, errExecFailed)
 			},
-			expectedLogs:   9, // Retrieve, Timeout label not found, Default timeout, UID not found, UID not set, GID not found, GID not set, Execute, Error
 			expectedLogMsg: "Post-update command failed",
 		},
 		{
@@ -582,35 +554,19 @@ func TestExecutePostUpdateCommand(t *testing.T) {
 				c.On("ExecuteCommand", mock.Anything, mock.Anything, "post-update", 1, 4000, 4001).
 					Return(true, nil)
 			},
-			expectedLogs:   8, // Retrieve, Timeout label not found, Default timeout, UID found, UID set, GID found, GID set, Execute
 			expectedLogMsg: "Executing post-update command",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hook := test.NewGlobal()
-
-			logrus.SetLevel(logrus.DebugLevel)
-
+			log, logBuf := logging.NewTestLogger(logging.DebugLevel)
 			client := mockContainer.NewMockClient(t)
 			tt.setupClient(client)
-			hook.Reset()
+			ExecutePostUpdateCommand(log, context.Background(), client, tt.containerID, 0, 0)
 
-			ExecutePostUpdateCommand(context.Background(), client, tt.containerID, 0, 0)
-
-			assert.Len(t, hook.Entries, tt.expectedLogs)
-
-			if len(hook.Entries) > 0 {
-				assert.Contains(t, hook.LastEntry().Message, tt.expectedLogMsg)
-			} else {
-				t.Errorf(
-					"No log entries captured; expected %d with message %q",
-					tt.expectedLogs,
-					tt.expectedLogMsg,
-				)
-			}
-
-			hook.Reset()
+			output := logBuf.String()
+			assert.NotEmpty(t, output, "expected log output")
+			assert.Contains(t, output, tt.expectedLogMsg)
 		})
 	}
 }

@@ -7,12 +7,13 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
 
 	dockerContainer "github.com/moby/moby/api/types/container"
 	dockerMount "github.com/moby/moby/api/types/mount"
 	dockerNetwork "github.com/moby/moby/api/types/network"
 
+	"github.com/nicholas-fedor/watchtower/internal/logging"
 	"github.com/nicholas-fedor/watchtower/pkg/compose"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
@@ -353,6 +354,65 @@ var _ = ginkgo.Describe("Container", func() {
 				container = MockContainer(WithImageName(name))
 				gomega.Expect(container.ImageName()).To(gomega.Equal(name + ":latest"))
 			})
+
+			ginkgo.It("returns unknown:latest for a nil receiver", func() {
+				var nilContainer *Container
+
+				gomega.Expect(nilContainer.ImageName()).To(gomega.Equal("unknown:latest"))
+			})
+		})
+
+		ginkgo.Context("setting image name", func() {
+			ginkgo.It("is a no-op on a nil receiver", func() {
+				var nilContainer *Container
+
+				gomega.Expect(func() {
+					nilContainer.SetImageName("app:v2")
+				}).NotTo(gomega.Panic())
+			})
+
+			ginkgo.It("pins a tagged name on config and cache", func() {
+				container = NewContainer(testLog(), &dockerContainer.InspectResponse{
+					Name: "/app",
+					Config: &dockerContainer.Config{
+						Image: "app:v1",
+					},
+				}, nil)
+
+				container.SetImageName("app:v2")
+
+				gomega.Expect(container.ContainerInfo()).NotTo(gomega.BeNil())
+				gomega.Expect(container.ContainerInfo().Config.Image).To(gomega.Equal("app:v2"))
+				gomega.Expect(container.ImageName()).To(gomega.Equal("app:v2"))
+			})
+
+			ginkgo.It("appends latest when the pinned name is untagged", func() {
+				container = NewContainer(testLog(), &dockerContainer.InspectResponse{
+					Name: "/app",
+					Config: &dockerContainer.Config{
+						Image: "app:v1",
+					},
+				}, nil)
+
+				container.SetImageName("app")
+
+				gomega.Expect(container.ContainerInfo().Config.Image).To(gomega.Equal("app:latest"))
+				gomega.Expect(container.ImageName()).To(gomega.Equal("app:latest"))
+			})
+
+			ginkgo.It("appends latest without treating a registry port as a tag", func() {
+				container = NewContainer(testLog(), &dockerContainer.InspectResponse{
+					Name: "/app",
+					Config: &dockerContainer.Config{
+						Image: "app:v1",
+					},
+				}, nil)
+
+				container.SetImageName("registry.example:5000/app")
+
+				gomega.Expect(container.ContainerInfo().Config.Image).To(gomega.Equal("registry.example:5000/app:latest"))
+				gomega.Expect(container.ImageName()).To(gomega.Equal("registry.example:5000/app:latest"))
+			})
 		})
 
 		ginkgo.Context("fetching image ID", func() {
@@ -674,18 +734,10 @@ var _ = ginkgo.Describe("Container", func() {
 
 			ginkgo.It("warns and skips invalid link format without colon", func() {
 				logOutput := &bytes.Buffer{}
-				originalOutput := logrus.StandardLogger().Out
-				originalLevel := logrus.GetLevel()
-
-				logrus.SetOutput(logOutput)
-				logrus.SetLevel(logrus.WarnLevel)
-
-				defer func() {
-					logrus.SetOutput(originalOutput)
-					logrus.SetLevel(originalLevel)
-				}()
-
+				w := logging.LogfmtWriter(logOutput)
+				l := zerolog.New(w).Level(zerolog.DebugLevel).With().Timestamp().Logger()
 				container = MockContainer(WithLinks([]string{"invalidlink"}))
+				container.log = &l
 				links := container.Links(true)
 				gomega.Expect(links).To(gomega.BeEmpty())
 				gomega.Expect(logOutput.String()).
@@ -694,18 +746,10 @@ var _ = ginkgo.Describe("Container", func() {
 
 			ginkgo.It("warns and skips link with empty container name", func() {
 				logOutput := &bytes.Buffer{}
-				originalOutput := logrus.StandardLogger().Out
-				originalLevel := logrus.GetLevel()
-
-				logrus.SetOutput(logOutput)
-				logrus.SetLevel(logrus.WarnLevel)
-
-				defer func() {
-					logrus.SetOutput(originalOutput)
-					logrus.SetLevel(originalLevel)
-				}()
-
+				w := logging.LogfmtWriter(logOutput)
+				l := zerolog.New(w).Level(zerolog.DebugLevel).With().Timestamp().Logger()
 				container = MockContainer(WithLinks([]string{":alias"}))
+				container.log = &l
 				links := container.Links(true)
 				gomega.Expect(links).To(gomega.BeEmpty())
 				gomega.Expect(logOutput.String()).
@@ -739,7 +783,52 @@ var _ = ginkgo.Describe("Container", func() {
 					WithLabels(map[string]string{"com.docker.compose.project": "myproject"}),
 				)
 				links := container.Links(true)
-				gomega.Expect(links).To(gomega.ContainElement("myproject-other"))
+				gomega.Expect(links).To(gomega.ContainElement("other"))
+				gomega.Expect(links).NotTo(gomega.ContainElement("myproject-other"))
+			})
+
+			ginkgo.It("includes the bare network mode container name", func() {
+				// The network mode holds a real container name, including when
+				// that container belongs to another Compose project.
+				container = MockContainer(
+					WithNetworkMode("container:gluetun"),
+					WithLabels(map[string]string{"com.docker.compose.project": "qbittorrent"}),
+				)
+				links := container.Links(true)
+				gomega.Expect(links).To(gomega.ConsistOf("gluetun"))
+			})
+
+			ginkgo.It("strips a leading slash from the network mode container name", func() {
+				// Inspect rewrite stores container: plus the Docker name, which
+				// includes a leading slash.
+				container = MockContainer(
+					WithNetworkMode("container:/gluetun"),
+					WithLabels(map[string]string{"com.docker.compose.project": "qbittorrent"}),
+				)
+				links := container.Links(true)
+				gomega.Expect(links).To(gomega.ConsistOf("gluetun"))
+			})
+
+			ginkgo.It("does not double-prefix an already project-qualified network mode name", func() {
+				container = MockContainer(
+					WithNetworkMode("container:gluetun-vpn-1"),
+					WithLabels(map[string]string{"com.docker.compose.project": "gluetun"}),
+				)
+				links := container.Links(true)
+				gomega.Expect(links).To(gomega.ConsistOf("gluetun-vpn-1"))
+			})
+
+			ginkgo.It("does not prefix a network mode container ID", func() {
+				// Moby inspect stores container:<id> after create. Prefixing
+				// that ID with the dependent's project would never match.
+				const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+				container = MockContainer(
+					WithNetworkMode("container:"+providerID),
+					WithLabels(map[string]string{"com.docker.compose.project": "qbittorrent"}),
+				)
+				links := container.Links(true)
+				gomega.Expect(links).To(gomega.ConsistOf(providerID))
 			})
 		})
 

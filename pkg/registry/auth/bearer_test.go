@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	mockAuth "github.com/nicholas-fedor/watchtower/pkg/registry/auth/mocks"
+	"github.com/nicholas-fedor/watchtower/pkg/registry/ratelimit"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
@@ -57,7 +58,7 @@ func Test_tokenExpiryCalculator_ExpireAfterRead(t *testing.T) {
 
 func Test_initTokenCache(t *testing.T) {
 	assert.NotPanics(t, func() {
-		initTokenCache()
+		initTokenCache(testLog())
 	})
 }
 
@@ -115,7 +116,7 @@ func Test_computeTokenExpiry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeTokenExpiry(tt.args)
+			got := computeTokenExpiry(testLog(), tt.args)
 			assert.InDelta(t, tt.want.Unix(), got.Unix(), 2)
 		})
 	}
@@ -175,7 +176,7 @@ func Test_readBearerTokenWithExpiry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _, err := readBearerTokenWithExpiry(strings.NewReader(tt.body), tt.image)
+			got, _, err := readBearerTokenWithExpiry(testLog(), strings.NewReader(tt.body), tt.image)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -238,7 +239,7 @@ func Test_addBasicAuth(t *testing.T) {
 			viper.Set("WATCHTOWER_REGISTRY_TLS_SKIP", tt.tlsSkip)
 			defer viper.Set("WATCHTOWER_REGISTRY_TLS_SKIP", originalTLSSkip)
 
-			addBasicAuth(tt.request, tt.imageName, tt.registryAuth)
+			addBasicAuth(testLog(), tt.request, tt.imageName, tt.registryAuth)
 			assert.Equal(t, tt.wantHeader, tt.request.Header.Get("Authorization"))
 		})
 	}
@@ -280,7 +281,7 @@ func Test_newBearerRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := newBearerRequest(tt.ctx(), tt.authURL, tt.imageName)
+			got, err := newBearerRequest(testLog(), tt.ctx(), tt.authURL, tt.imageName)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -296,38 +297,34 @@ func Test_newBearerRequest(t *testing.T) {
 
 func Test_resolveService(t *testing.T) {
 	tests := []struct {
-		name      string
-		values    challengeValues
-		image     string
-		challenge string
-		want      string
+		name   string
+		values challengeValues
+		image  string
+		want   string
 	}{
 		{
-			name:      "returns service when present",
-			values:    challengeValues{service: "ghcr.io"},
-			image:     "test/image",
-			challenge: "bearer realm=\"https://ghcr.io/token\",service=\"ghcr.io\"",
-			want:      "ghcr.io",
+			name:   "returns service when present",
+			values: challengeValues{service: "ghcr.io"},
+			image:  "test/image",
+			want:   "ghcr.io",
 		},
 		{
-			name:      "derives service from realm when service is empty",
-			values:    challengeValues{realm: "https://ghcr.io/token"},
-			image:     "test/image",
-			challenge: "bearer realm=\"https://ghcr.io/token\"",
-			want:      "ghcr.io",
+			name:   "derives service from realm when service is empty",
+			values: challengeValues{realm: "https://ghcr.io/token"},
+			image:  "test/image",
+			want:   "ghcr.io",
 		},
 		{
-			name:      "returns empty when both service and realm are empty",
-			values:    challengeValues{},
-			image:     "test/image",
-			challenge: "bearer",
-			want:      "",
+			name:   "returns empty when both service and realm are empty",
+			values: challengeValues{},
+			image:  "test/image",
+			want:   "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveService(tt.values, tt.image, tt.challenge)
+			got := resolveService(testLog(), tt.values, tt.image)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -373,7 +370,7 @@ func Test_validateRequiredChallengeValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateRequiredChallengeValues(tt.values, tt.image, tt.challenge)
+			err := validateRequiredChallengeValues(testLog(), tt.values, tt.image, tt.challenge)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -413,7 +410,7 @@ func Test_buildAuthQuery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildAuthQuery(tt.authURL, tt.values, tt.imageRef)
+			got := buildAuthQuery(testLog(), tt.authURL, tt.values, tt.imageRef)
 			require.NotNil(t, got)
 			assert.Equal(t, tt.want, got.RawQuery)
 		})
@@ -494,7 +491,7 @@ func TestGetAuthURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GetAuthURL(tt.challenge, tt.imageRef, tt.registryAuth)
+			got, err := GetAuthURL(testLog(), tt.challenge, tt.imageRef, tt.registryAuth)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -551,7 +548,7 @@ func TestGetBearerToken(t *testing.T) {
 				mockClient.On("Do", mock.Anything).Return(tt.onDo, tt.doErr).Once()
 			}
 
-			got, err := GetBearerToken(ctx, tt.challenge, tt.imageRef, tt.registryAuth, mockClient)
+			got, err := GetBearerToken(testLog(), ctx, tt.challenge, tt.imageRef, tt.registryAuth, mockClient)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -575,7 +572,7 @@ func Test_executeBearerTokenRequest_cacheMiss(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(`{"token":"cached-token","expires_in":3600}`)),
 	}, nil).Once()
 
-	got, err := executeBearerTokenRequest(ctx, authURL, imageName, "", mockClient)
+	got, err := executeBearerTokenRequest(testLog(), ctx, authURL, imageName, "", mockClient)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer cached-token", got)
 }
@@ -586,8 +583,7 @@ func Test_executeBearerTokenRequest_cacheHit(t *testing.T) {
 	imageName := "test/image"
 	mockClient := mockAuth.NewMockClient(t)
 
-	initTokenCache()
-	tokenCache.InvalidateAll()
+	resetTokenCache(t)
 
 	cacheKey := authURL.String() + "|"
 	tokenCache.SetIfAbsent(cacheKey, tokenCacheEntry{
@@ -595,9 +591,180 @@ func Test_executeBearerTokenRequest_cacheHit(t *testing.T) {
 		expiresAt: time.Now().Add(time.Hour),
 	})
 
-	got, err := executeBearerTokenRequest(ctx, authURL, imageName, "", mockClient)
+	got, err := executeBearerTokenRequest(testLog(), ctx, authURL, imageName, "", mockClient)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer cached-token", got)
+}
+
+func resetTokenCache(t *testing.T) {
+	t.Helper()
+	initTokenCache(testLog())
+	tokenCache.InvalidateAll()
+}
+
+const testAnonymousGHCRToken = "Bearer cached-ghcr-token"
+
+func seedAnonymousGHCRToken(t *testing.T) {
+	t.Helper()
+	resetTokenCache(t)
+
+	authURL := mustParseURL("https://ghcr.io/token?service=ghcr.io")
+	tokenCache.SetIfAbsent(bearerCacheKey(authURL, ""), tokenCacheEntry{
+		token:     testAnonymousGHCRToken,
+		expiresAt: time.Now().Add(time.Hour),
+	})
+}
+
+func Test_bearerCacheKey(t *testing.T) {
+	tests := []struct {
+		name         string
+		rawURL       string
+		registryAuth string
+		want         string
+	}{
+		{
+			name:         "anonymous GHCR drops repository scope",
+			rawURL:       "https://ghcr.io/token?scope=repository%3Alinuxserver%2Fprowlarr%3Apull&service=ghcr.io",
+			registryAuth: "",
+			want:         "https://ghcr.io/token?service=ghcr.io|",
+		},
+		{
+			name:         "anonymous GHCR shares key across images",
+			rawURL:       "https://ghcr.io/token?scope=repository%3Alinuxserver%2Fsonarr%3Apull&service=ghcr.io",
+			registryAuth: "",
+			want:         "https://ghcr.io/token?service=ghcr.io|",
+		},
+		{
+			name:         "anonymous lscr.io token host shares with GHCR mapping",
+			rawURL:       "https://lscr.io/token?scope=repository%3Alinuxserver%2Fsonarr%3Apull&service=ghcr.io",
+			registryAuth: "",
+			want:         "https://lscr.io/token?service=ghcr.io|",
+		},
+		{
+			name:         "authenticated GHCR keeps per-image scope",
+			rawURL:       "https://ghcr.io/token?scope=repository%3Alinuxserver%2Fprowlarr%3Apull&service=ghcr.io",
+			registryAuth: "dXNlcjpwYXNz",
+			want:         "https://ghcr.io/token?scope=repository%3Alinuxserver%2Fprowlarr%3Apull&service=ghcr.io|dXNlcjpwYXNz",
+		},
+		{
+			name:         "anonymous Docker Hub keeps per-image scope",
+			rawURL:       "https://auth.docker.io/token?scope=repository%3Alibrary%2Falpine%3Apull&service=registry.docker.io",
+			registryAuth: "",
+			want:         "https://auth.docker.io/token?scope=repository%3Alibrary%2Falpine%3Apull&service=registry.docker.io|",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authURL, err := url.Parse(tt.rawURL)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, bearerCacheKey(authURL, tt.registryAuth))
+		})
+	}
+}
+
+func Test_executeBearerTokenRequest_anonymousGHCRSharesToken(t *testing.T) {
+	resetTokenCache(t)
+
+	ctx := context.Background()
+	mockClient := mockAuth.NewMockClient(t)
+	prowlarr := mustParseURL("https://ghcr.io/token?scope=repository%3Alinuxserver%2Fprowlarr%3Apull&service=ghcr.io")
+	sonarr := mustParseURL("https://ghcr.io/token?scope=repository%3Alinuxserver%2Fsonarr%3Apull&service=ghcr.io")
+
+	mockClient.On("Do", mock.MatchedBy(func(req *http.Request) bool {
+		return req.URL.Host == "ghcr.io" &&
+			req.URL.Query().Get("scope") == "repository:linuxserver/prowlarr:pull"
+	})).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"shared-anon-token","expires_in":3600}`)),
+	}, nil).Once()
+
+	first, err := executeBearerTokenRequest(testLog(), ctx, prowlarr, "ghcr.io/linuxserver/prowlarr", "", mockClient)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer shared-anon-token", first)
+
+	second, err := executeBearerTokenRequest(testLog(), ctx, sonarr, "ghcr.io/linuxserver/sonarr", "", mockClient)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer shared-anon-token", second)
+}
+
+func Test_executeBearerTokenRequest_authenticatedGHCRDoesNotShare(t *testing.T) {
+	resetTokenCache(t)
+
+	ctx := context.Background()
+	mockClient := mockAuth.NewMockClient(t)
+	registryAuth := "dXNlcjpwYXNz"
+	prowlarr := mustParseURL("https://ghcr.io/token?scope=repository%3Alinuxserver%2Fprowlarr%3Apull&service=ghcr.io")
+	sonarr := mustParseURL("https://ghcr.io/token?scope=repository%3Alinuxserver%2Fsonarr%3Apull&service=ghcr.io")
+
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"scoped-token","expires_in":3600}`)),
+	}, nil).Once()
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"scoped-token","expires_in":3600}`)),
+	}, nil).Once()
+
+	first, err := executeBearerTokenRequest(testLog(), ctx, prowlarr, "ghcr.io/linuxserver/prowlarr", registryAuth, mockClient)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer scoped-token", first)
+
+	second, err := executeBearerTokenRequest(testLog(), ctx, sonarr, "ghcr.io/linuxserver/sonarr", registryAuth, mockClient)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer scoped-token", second)
+}
+
+func Test_executeBearerTokenRequest_anonymousNonGHCRDoesNotShare(t *testing.T) {
+	resetTokenCache(t)
+
+	ctx := context.Background()
+	mockClient := mockAuth.NewMockClient(t)
+	alpine := mustParseURL("https://auth.docker.io/token?scope=repository%3Alibrary%2Falpine%3Apull&service=registry.docker.io")
+	nginx := mustParseURL("https://auth.docker.io/token?scope=repository%3Alibrary%2Fnginx%3Apull&service=registry.docker.io")
+
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"hub-token","expires_in":3600}`)),
+	}, nil).Once()
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"hub-token","expires_in":3600}`)),
+	}, nil).Once()
+
+	first, err := executeBearerTokenRequest(testLog(), ctx, alpine, "library/alpine", "", mockClient)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer hub-token", first)
+
+	second, err := executeBearerTokenRequest(testLog(), ctx, nginx, "library/nginx", "", mockClient)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer hub-token", second)
+}
+
+func TestGetBearerToken_anonymousGHCRSharesAcrossImages(t *testing.T) {
+	resetTokenCache(t)
+
+	ctx := context.Background()
+	mockClient := mockAuth.NewMockClient(t)
+	prowlarr, err := reference.ParseNormalizedNamed("ghcr.io/linuxserver/prowlarr:latest")
+	require.NoError(t, err)
+	sonarr, err := reference.ParseNormalizedNamed("ghcr.io/linuxserver/sonarr:latest")
+	require.NoError(t, err)
+	watchtower, err := reference.ParseNormalizedNamed("ghcr.io/nicholas-fedor/watchtower:latest")
+	require.NoError(t, err)
+
+	challenge := `bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:linuxserver/prowlarr:pull"`
+
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"shared-anon-token","expires_in":3600}`)),
+	}, nil).Once()
+
+	for _, image := range []reference.Named{prowlarr, sonarr, watchtower} {
+		got, getErr := GetBearerToken(testLog(), ctx, challenge, image, "", mockClient)
+		require.NoError(t, getErr)
+		assert.Equal(t, "Bearer shared-anon-token", got)
+	}
 }
 
 func Test_performBearerTokenFetch(t *testing.T) {
@@ -680,15 +847,116 @@ func Test_performBearerTokenFetch(t *testing.T) {
 				mockClient.On("Do", mock.Anything).Return(tt.onDo, tt.doErr).Once()
 			}
 
-			got, _, err := performBearerTokenFetch(ctx, tt.authURL, tt.imageName, tt.auth, mockClient)
+			got, _, err := performBearerTokenFetch(testLog(), ctx, tt.authURL, tt.imageName, tt.auth, mockClient)
 			if tt.wantErr {
 				assert.Error(t, err)
+
+				if tt.onDo != nil && tt.onDo.StatusCode == http.StatusTooManyRequests {
+					require.ErrorIs(t, err, ratelimit.ErrRateLimited)
+				}
 
 				return
 			}
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func Test_lookupAnonymousGHCRToken(t *testing.T) {
+	t.Run("miss when cache is empty", func(t *testing.T) {
+		resetTokenCache(t)
+
+		got, ok := lookupAnonymousGHCRToken(testLog())
+		assert.False(t, ok)
+		assert.Empty(t, got)
+	})
+
+	t.Run("hit returns unexpired shared token", func(t *testing.T) {
+		seedAnonymousGHCRToken(t)
+
+		got, ok := lookupAnonymousGHCRToken(testLog())
+		assert.True(t, ok)
+		assert.Equal(t, testAnonymousGHCRToken, got)
+	})
+
+	t.Run("expired entry is not returned", func(t *testing.T) {
+		resetTokenCache(t)
+
+		authURL := mustParseURL("https://ghcr.io/token?service=ghcr.io")
+		tokenCache.SetIfAbsent(bearerCacheKey(authURL, ""), tokenCacheEntry{
+			token:     "Bearer stale-token",
+			expiresAt: time.Now().Add(-time.Minute),
+		})
+
+		got, ok := lookupAnonymousGHCRToken(testLog())
+		assert.False(t, ok)
+		assert.Empty(t, got)
+	})
+}
+
+func Test_cachedAnonymousGHCRToken(t *testing.T) {
+	ghcrRef, err := reference.ParseNormalizedNamed("ghcr.io/linuxserver/sonarr:latest")
+	require.NoError(t, err)
+	lscrRef, err := reference.ParseNormalizedNamed("lscr.io/linuxserver/sonarr:latest")
+	require.NoError(t, err)
+	hubRef, err := reference.ParseNormalizedNamed("library/nginx:latest")
+	require.NoError(t, err)
+
+	seedAnonymousGHCRToken(t)
+
+	tests := []struct {
+		name         string
+		imageRef     reference.Named
+		registryAuth string
+		endpoint     string
+		wantOK       bool
+	}{
+		{
+			name:     "anonymous GHCR cache hit",
+			imageRef: ghcrRef,
+			wantOK:   true,
+		},
+		{
+			name:     "anonymous lscr.io cache hit",
+			imageRef: lscrRef,
+			wantOK:   true,
+		},
+		{
+			name:         "authenticated GHCR does not skip",
+			imageRef:     ghcrRef,
+			registryAuth: "dXNlcjpwYXNz",
+			wantOK:       false,
+		},
+		{
+			name:     "mirror endpoint does not skip",
+			imageRef: ghcrRef,
+			endpoint: "https://mirror.example.com",
+			wantOK:   false,
+		},
+		{
+			name:     "Docker Hub does not skip",
+			imageRef: hubRef,
+			wantOK:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := cachedAnonymousGHCRToken(testLog(), tt.imageRef, tt.registryAuth, tt.endpoint)
+			assert.Equal(t, tt.wantOK, ok)
+
+			if !tt.wantOK {
+				assert.Equal(t, TokenResult{}, got)
+
+				return
+			}
+
+			assert.Equal(t, TokenResult{
+				Token:         testAnonymousGHCRToken,
+				ChallengeHost: "ghcr.io",
+			}, got)
 		})
 	}
 }

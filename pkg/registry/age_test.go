@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,12 +15,46 @@ import (
 
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/ghttp"
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/nicholas-fedor/watchtower/internal/logging"
+	"github.com/nicholas-fedor/watchtower/pkg/registry/ratelimit"
 	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
 )
+
+func testLog() *zerolog.Logger {
+	return logging.NopLogger()
+}
+
+func TestRegistryRateLimitError(t *testing.T) {
+	ratelimit.ResetForTest()
+	t.Cleanup(ratelimit.ResetForTest)
+
+	assert.NoError(t, registryRateLimitError(nil))
+	assert.NoError(t, registryRateLimitError(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       http.NoBody,
+	}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://ghcr.io/v2/linuxserver/nginx/manifests/latest", nil)
+	require.NoError(t, err)
+
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{"Retry-After": []string{"2"}},
+		Body:       io.NopCloser(strings.NewReader("toomanyrequests: retry-after: 331.163µs, allowed: 44000/minute")),
+		Request:    req,
+	}
+
+	got := registryRateLimitError(resp)
+	require.Error(t, got)
+	require.ErrorIs(t, got, ratelimit.ErrRateLimited)
+
+	waitErr := ratelimit.Wait(t.Context(), "ghcr.io")
+	require.NoError(t, waitErr)
+}
 
 // newMockContainer creates a mockery-generated mock Container with the given image name.
 func newMockContainer(t *testing.T, imageName string) *mockTypes.MockContainer {
@@ -132,8 +167,7 @@ func TestFetchManifestForAge_SinglePlatform(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	got, _, err := fetchManifestForAge(
-		context.Background(),
+	got, _, err := fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -141,7 +175,49 @@ func TestFetchManifestForAge_SinglePlatform(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "single_platform"},
+		"",
+		map[string]any{"test": "single_platform"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, configDigest, got)
+}
+
+func TestFetchManifestForAge_RetriesSubMillisecondRateLimit(t *testing.T) {
+	server := ghttp.NewServer()
+	t.Cleanup(server.Close)
+
+	configDigest := "sha256:abc123def456789012345678901234567890123456789012345678901234567890"
+	limitKey := "age-retry-ghcr.io"
+
+	server.AppendHandlers(
+		ghttp.CombineHandlers(
+			ghttp.VerifyRequest("GET", "/v2/test/manifests/latest"),
+			ghttp.RespondWith(
+				http.StatusTooManyRequests,
+				"toomanyrequests: retry-after: 23.722µs, allowed: 44000/minute",
+			),
+		),
+		ghttp.CombineHandlers(
+			ghttp.VerifyRequest("GET", "/v2/test/manifests/latest"),
+			ghttp.RespondWith(http.StatusOK, validManifestJSON(configDigest),
+				http.Header{"Content-Type": {"application/vnd.docker.distribution.manifest.v2+json"}},
+			),
+		),
+	)
+
+	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
+	require.NoError(t, err)
+
+	got, _, err := fetchManifestForAge(testLog(), t.Context(),
+		server.HTTPTestServer.Client(),
+		parsedURL.String(),
+		"Bearer test-token",
+		parsedURL,
+		"", "", "",
+		"",
+		parsedURL.Host,
+		limitKey,
+		map[string]any{"test": "rate_limit_retry"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, got)
@@ -174,8 +250,7 @@ func TestFetchManifestForAge_MultiPlatformIndex(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	got, _, err := fetchManifestForAge(
-		context.Background(),
+	got, _, err := fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -183,7 +258,8 @@ func TestFetchManifestForAge_MultiPlatformIndex(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "multi_platform"},
+		"",
+		map[string]any{"test": "multi_platform"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, got)
@@ -205,8 +281,7 @@ func TestFetchManifestForAge_AuthFailure(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	_, _, err = fetchManifestForAge(
-		context.Background(),
+	_, _, err = fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -214,7 +289,8 @@ func TestFetchManifestForAge_AuthFailure(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "auth_failure"},
+		"",
+		map[string]any{"test": "auth_failure"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errFetchManifestFailed)
@@ -236,8 +312,7 @@ func TestFetchManifestForAge_NotFound(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	_, _, err = fetchManifestForAge(
-		context.Background(),
+	_, _, err = fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -245,7 +320,8 @@ func TestFetchManifestForAge_NotFound(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "not_found"},
+		"",
+		map[string]any{"test": "not_found"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errFetchManifestFailed)
@@ -271,8 +347,7 @@ func TestFetchManifestForAge_MissingConfigDigest(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	_, _, err = fetchManifestForAge(
-		context.Background(),
+	_, _, err = fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -280,7 +355,8 @@ func TestFetchManifestForAge_MissingConfigDigest(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "missing_digest"},
+		"",
+		map[string]any{"test": "missing_digest"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNoConfigDigest)
@@ -306,13 +382,13 @@ func TestFetchConfigBlob_Success(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/myrepo/manifests/latest")
 	require.NoError(t, err)
 
-	body, err := fetchConfigBlob(
-		context.Background(),
+	body, err := fetchConfigBlob(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL,
 		configDigest,
 		"Bearer test-token",
-		logrus.Fields{"test": "config_success"},
+		"",
+		map[string]any{"test": "config_success"},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
@@ -345,13 +421,13 @@ func TestFetchConfigBlob_Failure500(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/myrepo/manifests/latest")
 	require.NoError(t, err)
 
-	_, err = fetchConfigBlob(
-		context.Background(),
+	_, err = fetchConfigBlob(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL,
 		configDigest,
 		"Bearer test-token",
-		logrus.Fields{"test": "config_500"},
+		"",
+		map[string]any{"test": "config_500"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errFetchConfigFailed)
@@ -382,13 +458,13 @@ func TestFetchConfigBlob_Redirect(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/myrepo/manifests/latest")
 	require.NoError(t, err)
 
-	body, err := fetchConfigBlob(
-		context.Background(),
+	body, err := fetchConfigBlob(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL,
 		configDigest,
 		"Bearer test-token",
-		logrus.Fields{"test": "config_redirect"},
+		"",
+		map[string]any{"test": "config_redirect"},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
@@ -511,7 +587,7 @@ func TestBuildManifestURLForContainer(t *testing.T) {
 
 			container := newMockContainer(t, tc.imageName)
 
-			got, err := buildManifestURLForContainer(container, tc.scheme)
+			got, err := buildManifestURLForContainer(testLog(), container, tc.scheme)
 			if tc.wantErr {
 				require.Error(t, err)
 
@@ -534,7 +610,7 @@ func TestBuildManifestURLForAge(t *testing.T) {
 
 		container := newMockContainer(t, "alpine:3.19")
 
-		gotURL, gotHost, gotParsed, err := buildManifestURLForAge(container, "")
+		gotURL, gotHost, gotParsed, err := buildManifestURLForAge(testLog(), container, "")
 		require.NoError(t, err)
 
 		assert.Contains(t, gotURL, "/v2/library/alpine/manifests/3.19")
@@ -547,7 +623,7 @@ func TestBuildManifestURLForAge(t *testing.T) {
 
 		container := newMockContainer(t, "alpine:3.19")
 
-		gotURL, _, _, err := buildManifestURLForAge(container, "custom.registry.io")
+		gotURL, _, _, err := buildManifestURLForAge(testLog(), container, "custom.registry.io")
 		require.NoError(t, err)
 
 		assert.Contains(t, gotURL, "custom.registry.io")
@@ -559,7 +635,7 @@ func TestBuildManifestURLForAge(t *testing.T) {
 
 		container := newMockContainer(t, "lscr.io/owner/image:tag")
 
-		gotURL, gotHost, _, err := buildManifestURLForAge(container, "")
+		gotURL, gotHost, _, err := buildManifestURLForAge(testLog(), container, "")
 		require.NoError(t, err)
 
 		assert.Equal(t, "ghcr.io", gotHost)
@@ -616,15 +692,15 @@ func TestSelectPlatformManifest_PlatformMatch(t *testing.T) {
 		},
 	}
 
-	got, _, err := selectPlatformManifest(
-		context.Background(),
+	got, _, err := selectPlatformManifest(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		idx,
 		parsedURL,
 		"Bearer test-token",
 		"", "", "",
 		"",
-		logrus.Fields{"test": "platform_match"},
+		"",
+		map[string]any{"test": "platform_match"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, got)
@@ -652,15 +728,15 @@ func TestSelectPlatformManifest_NoMatch(t *testing.T) {
 		},
 	}
 
-	_, _, err = selectPlatformManifest(
-		context.Background(),
+	_, _, err = selectPlatformManifest(testLog(), context.Background(),
 		nil,
 		idx,
 		parsedURL,
 		"",
 		"", "", "",
 		"",
-		logrus.Fields{"test": "no_match"},
+		"",
+		map[string]any{"test": "no_match"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNoPlatformMatch)
@@ -715,15 +791,15 @@ func TestSelectPlatformManifest_SkipsAttestationManifests(t *testing.T) {
 		},
 	}
 
-	got, _, err := selectPlatformManifest(
-		context.Background(),
+	got, _, err := selectPlatformManifest(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		idx,
 		parsedURL,
 		"Bearer test-token",
 		"", "", "",
 		"",
-		logrus.Fields{"test": "skips_attestation"},
+		"",
+		map[string]any{"test": "skips_attestation"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, got)
@@ -767,15 +843,15 @@ func TestSelectPlatformManifest_MissingConfigDigest(t *testing.T) {
 		},
 	}
 
-	_, _, err = selectPlatformManifest(
-		context.Background(),
+	_, _, err = selectPlatformManifest(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		idx,
 		parsedURL,
 		"Bearer test-token",
 		"", "", "",
 		"",
-		logrus.Fields{"test": "missing_digest"},
+		"",
+		map[string]any{"test": "missing_digest"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNoConfigDigest)
@@ -809,13 +885,13 @@ func TestPipeline_SinglePlatformManifest_ReturnsCreationTime(t *testing.T) {
 
 	client := server.HTTPTestServer.Client()
 	ctx := context.Background()
-	fields := logrus.Fields{"test": "pipeline_single"}
+	fields := map[string]any{"test": "pipeline_single"}
 
-	digest, _, err := fetchManifestForAge(ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, fields)
+	digest, _, err := fetchManifestForAge(testLog(), ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, "", fields)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, digest)
 
-	body, err := fetchConfigBlob(ctx, client, parsedURL, digest, "", fields)
+	body, err := fetchConfigBlob(testLog(), ctx, client, parsedURL, digest, "", "", fields)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
 
@@ -863,13 +939,13 @@ func TestPipeline_MultiPlatformIndex_ReturnsCreationTime(t *testing.T) {
 
 	client := server.HTTPTestServer.Client()
 	ctx := context.Background()
-	fields := logrus.Fields{"test": "pipeline_multi"}
+	fields := map[string]any{"test": "pipeline_multi"}
 
-	digest, _, err := fetchManifestForAge(ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, fields)
+	digest, _, err := fetchManifestForAge(testLog(), ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, "", fields)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, digest)
 
-	body, err := fetchConfigBlob(ctx, client, parsedURL, digest, "", fields)
+	body, err := fetchConfigBlob(testLog(), ctx, client, parsedURL, digest, "", "", fields)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
 
@@ -909,12 +985,12 @@ func TestPipeline_MissingCreationTimestamp(t *testing.T) {
 
 	client := server.HTTPTestServer.Client()
 	ctx := context.Background()
-	fields := logrus.Fields{"test": "pipeline_missing_created"}
+	fields := map[string]any{"test": "pipeline_missing_created"}
 
-	digest, _, err := fetchManifestForAge(ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, fields)
+	digest, _, err := fetchManifestForAge(testLog(), ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, "", fields)
 	require.NoError(t, err)
 
-	body, err := fetchConfigBlob(ctx, client, parsedURL, digest, "", fields)
+	body, err := fetchConfigBlob(testLog(), ctx, client, parsedURL, digest, "", "", fields)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
 
@@ -953,12 +1029,12 @@ func TestPipeline_ConfigBlobNotFound(t *testing.T) {
 
 	client := server.HTTPTestServer.Client()
 	ctx := context.Background()
-	fields := logrus.Fields{"test": "pipeline_config_fail"}
+	fields := map[string]any{"test": "pipeline_config_fail"}
 
-	digest, _, err := fetchManifestForAge(ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, fields)
+	digest, _, err := fetchManifestForAge(testLog(), ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, "", fields)
 	require.NoError(t, err)
 
-	_, err = fetchConfigBlob(ctx, client, parsedURL, digest, "", fields)
+	_, err = fetchConfigBlob(testLog(), ctx, client, parsedURL, digest, "", "", fields)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errFetchConfigFailed)
 }
@@ -989,12 +1065,12 @@ func TestPipeline_InvalidConfigJSON(t *testing.T) {
 
 	client := server.HTTPTestServer.Client()
 	ctx := context.Background()
-	fields := logrus.Fields{"test": "pipeline_invalid_json"}
+	fields := map[string]any{"test": "pipeline_invalid_json"}
 
-	digest, _, err := fetchManifestForAge(ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, fields)
+	digest, _, err := fetchManifestForAge(testLog(), ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, "", fields)
 	require.NoError(t, err)
 
-	body, err := fetchConfigBlob(ctx, client, parsedURL, digest, "", fields)
+	body, err := fetchConfigBlob(testLog(), ctx, client, parsedURL, digest, "", "", fields)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
 
@@ -1038,12 +1114,12 @@ func TestPipeline_RedirectOnBlob(t *testing.T) {
 
 	client := server.HTTPTestServer.Client()
 	ctx := context.Background()
-	fields := logrus.Fields{"test": "pipeline_redirect"}
+	fields := map[string]any{"test": "pipeline_redirect"}
 
-	digest, _, err := fetchManifestForAge(ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, fields)
+	digest, _, err := fetchManifestForAge(testLog(), ctx, client, parsedURL.String(), "", parsedURL, "", "", "", "", parsedURL.Host, "", fields)
 	require.NoError(t, err)
 
-	body, err := fetchConfigBlob(ctx, client, parsedURL, digest, "", fields)
+	body, err := fetchConfigBlob(testLog(), ctx, client, parsedURL, digest, "", "", fields)
 	require.NoError(t, err)
 	t.Cleanup(func() { body.Close() })
 
@@ -1075,8 +1151,7 @@ func TestPipeline_ManifestNotFound(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/library/alpine/manifests/3.19")
 	require.NoError(t, err)
 
-	_, _, err = fetchManifestForAge(
-		context.Background(),
+	_, _, err = fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"",
@@ -1084,7 +1159,8 @@ func TestPipeline_ManifestNotFound(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "pipeline_not_found"},
+		"",
+		map[string]any{"test": "pipeline_not_found"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errFetchManifestFailed)
@@ -1108,8 +1184,7 @@ func TestPipeline_AuthFailure(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/library/alpine/manifests/3.19")
 	require.NoError(t, err)
 
-	_, _, err = fetchManifestForAge(
-		context.Background(),
+	_, _, err = fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer invalid",
@@ -1117,7 +1192,8 @@ func TestPipeline_AuthFailure(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "pipeline_auth_fail"},
+		"",
+		map[string]any{"test": "pipeline_auth_fail"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errFetchManifestFailed)
@@ -1153,8 +1229,7 @@ func TestFetchManifestForAge_OversizedManifest(t *testing.T) {
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	_, _, err = fetchManifestForAge(
-		context.Background(),
+	_, _, err = fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -1162,7 +1237,8 @@ func TestFetchManifestForAge_OversizedManifest(t *testing.T) {
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "oversized_manifest"},
+		"",
+		map[string]any{"test": "oversized_manifest"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errManifestTooLarge)
@@ -1203,15 +1279,15 @@ func TestSelectPlatformManifest_AmbiguousPlatformMatch(t *testing.T) {
 		},
 	}
 
-	_, _, err = selectPlatformManifest(
-		context.Background(),
+	_, _, err = selectPlatformManifest(testLog(), context.Background(),
 		nil,
 		idx,
 		parsedURL,
 		"",
 		"", "", "",
 		"",
-		logrus.Fields{"test": "ambiguous_platform_match"},
+		"",
+		map[string]any{"test": "ambiguous_platform_match"},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errAmbiguousPlatformMatch)
@@ -1267,8 +1343,7 @@ func TestSelectPlatformManifest_VariantSelection(t *testing.T) {
 		},
 	}
 
-	got, _, err := selectPlatformManifest(
-		context.Background(),
+	got, _, err := selectPlatformManifest(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		idx,
 		parsedURL,
@@ -1277,7 +1352,8 @@ func TestSelectPlatformManifest_VariantSelection(t *testing.T) {
 		runtime.GOARCH,
 		"v8", // Specify target variant
 		"",
-		logrus.Fields{"test": "variant_selection"},
+		"",
+		map[string]any{"test": "variant_selection"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, got)
@@ -1317,12 +1393,11 @@ func TestSelectPlatformCandidate_VariantFiltering(t *testing.T) {
 	t.Run("selects matching variant", func(t *testing.T) {
 		t.Parallel()
 
-		digest, err := selectPlatformCandidate(
-			idx,
+		digest, err := selectPlatformCandidate(testLog(), idx,
 			runtime.GOOS,
 			runtime.GOARCH,
 			"v8",
-			logrus.Fields{"test": "variant_filter_v8"},
+			map[string]any{"test": "variant_filter_v8"},
 		)
 		require.NoError(t, err)
 		assert.Equal(t, "sha256:digestv8variant002", digest)
@@ -1331,12 +1406,11 @@ func TestSelectPlatformCandidate_VariantFiltering(t *testing.T) {
 	t.Run("no matching variant returns no platform match", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := selectPlatformCandidate(
-			idx,
+		_, err := selectPlatformCandidate(testLog(), idx,
 			runtime.GOOS,
 			runtime.GOARCH,
 			"v9", // No v9 variant exists
-			logrus.Fields{"test": "variant_filter_no_match"},
+			map[string]any{"test": "variant_filter_no_match"},
 		)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errNoPlatformMatch)
@@ -1345,12 +1419,11 @@ func TestSelectPlatformCandidate_VariantFiltering(t *testing.T) {
 	t.Run("empty variant returns ambiguity error for multiple variants", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := selectPlatformCandidate(
-			idx,
+		_, err := selectPlatformCandidate(testLog(), idx,
 			runtime.GOOS,
 			runtime.GOARCH,
 			"", // No variant specified
-			logrus.Fields{"test": "variant_filter_empty"},
+			map[string]any{"test": "variant_filter_empty"},
 		)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errAmbiguousPlatformMatch)
@@ -1414,8 +1487,7 @@ func TestFetchManifestForAge_IndexWithoutMediaType_ContentTypeFallback(t *testin
 	parsedURL, err := url.Parse(server.URL() + "/v2/test/manifests/latest")
 	require.NoError(t, err)
 
-	got, _, err := fetchManifestForAge(
-		context.Background(),
+	got, _, err := fetchManifestForAge(testLog(), context.Background(),
 		server.HTTPTestServer.Client(),
 		parsedURL.String(),
 		"Bearer test-token",
@@ -1423,7 +1495,8 @@ func TestFetchManifestForAge_IndexWithoutMediaType_ContentTypeFallback(t *testin
 		"", "", "",
 		"",
 		parsedURL.Host,
-		logrus.Fields{"test": "index_no_mediatype"},
+		"",
+		map[string]any{"test": "index_no_mediatype"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, configDigest, got)

@@ -3,13 +3,20 @@ package compose
 import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/rs/zerolog"
 )
+
+func testLog() *zerolog.Logger {
+	n := zerolog.Nop()
+
+	return &n
+}
 
 var _ = ginkgo.Describe("Compose", func() {
 	ginkgo.DescribeTable(
 		"ParseDependsOnLabel",
 		func(input string, expected []string) {
-			result := ParseDependsOnLabel(input)
+			result := ParseDependsOnLabel(testLog(), input)
 			gomega.Expect(result).To(gomega.Equal(expected))
 		},
 		ginkgo.Entry("returns nil for empty label", "", nil),

@@ -3,7 +3,7 @@ package session
 import (
 	"sort"
 
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
 
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
@@ -110,20 +110,23 @@ func allFromSlices(
 	scanned, updated, restarted, failed, skipped, stale, fresh []types.ContainerReport,
 ) []types.ContainerReport {
 	// Calculate total capacity for all containers to pre-allocate slice efficiently.
-	allLen := len(scanned) + len(updated) + len(failed) + len(skipped) + len(stale) + len(fresh)
+	allLen := len(scanned) + len(updated) + len(restarted) + len(failed) + len(skipped) + len(stale) + len(fresh)
 	all := make([]types.ContainerReport, 0, allLen)
-	presentIDs := map[types.ContainerID][]string{} // Track container IDs to prevent duplicates
+	// Track container IDs to prevent duplicates.
+	presentIDs := make(map[types.ContainerID]struct{}, allLen)
 
 	// appendUnique adds containers from a slice only if they haven't been added before.
 	// This ensures deduplication while maintaining the priority order defined by the calling sequence.
 	appendUnique := func(reports []types.ContainerReport) {
 		for _, report := range reports {
 			if _, found := presentIDs[report.ID()]; found {
-				continue // Skip containers already added from higher-priority categories
+				// Skip containers already added from higher-priority categories.
+				continue
 			}
 
 			all = append(all, report)
-			presentIDs[report.ID()] = nil // Mark this container ID as processed
+			// Mark this container ID as processed.
+			presentIDs[report.ID()] = struct{}{}
 		}
 	}
 
@@ -159,7 +162,7 @@ func (r *report) All() []types.ContainerReport {
 //
 // Returns:
 //   - types.Report: Categorized and sorted report.
-func NewReport(progress Progress) types.Report {
+func NewReport(log *zerolog.Logger, progress Progress) types.Report {
 	report := &report{
 		scanned:   make([]types.ContainerReport, 0, len(progress)),
 		updated:   make([]types.ContainerReport, 0),
@@ -172,7 +175,7 @@ func NewReport(progress Progress) types.Report {
 
 	// Categorize each container status.
 	for _, update := range progress {
-		categorizeContainer(report, update)
+		categorizeContainer(log, report, update)
 	}
 
 	// Sort all categories by ID.
@@ -186,7 +189,7 @@ func NewReport(progress Progress) types.Report {
 // Parameters:
 //   - report: Report to update.
 //   - update: Container status to categorize.
-func categorizeContainer(report *report, update *ContainerStatus) {
+func categorizeContainer(log *zerolog.Logger, report *report, update *ContainerStatus) {
 	if update.state == SkippedState {
 		report.skipped = append(report.skipped, update)
 
@@ -196,21 +199,23 @@ func categorizeContainer(report *report, update *ContainerStatus) {
 	// Add non-skipped to scanned list.
 	report.scanned = append(report.scanned, update)
 
-	logrus.WithFields(logrus.Fields{
-		"container":                update.containerName,
-		"state_before_image_check": update.state,
-		"new_image":                update.newImage.ShortID(),
-		"old_image":                update.oldImage.ShortID(),
-		"images_equal":             update.newImage == update.oldImage,
-	}).Debug("Categorizing container status")
+	log.Debug().
+		Str("container", update.containerName).
+		Str("state_before_image_check", update.State()).
+		Str("new_image", update.newImage.ShortID()).
+		Str("old_image", update.oldImage.ShortID()).
+		Bool("images_equal", update.newImage == update.oldImage).
+		Msg("Categorizing container status")
 
 	// Categorize based on image or state.
-	if update.newImage == update.oldImage && update.state != RestartedState {
-		logrus.WithFields(logrus.Fields{
-			"container": update.containerName,
-			"old_state": update.state,
-			"new_state": FreshState,
-		}).Debug("Setting container state to fresh due to equal images")
+	if update.newImage == update.oldImage &&
+		update.state != RestartedState &&
+		update.state != FailedState {
+		log.Debug().
+			Str("container", update.containerName).
+			Str("old_state", update.State()).
+			Str("new_state", FreshStateString).
+			Msg("Setting container state to fresh due to equal images")
 		update.state = FreshState
 		report.fresh = append(report.fresh, update)
 
@@ -227,8 +232,9 @@ func categorizeContainer(report *report, update *ContainerStatus) {
 	case StaleState:
 		report.stale = append(report.stale, update)
 	case RestartedState:
-		logrus.WithField("container", update.containerName).
-			Debug("Adding container to restarted list")
+		log.Debug().
+			Str("container", update.containerName).
+			Msg("Adding container to restarted list")
 		report.restarted = append(report.restarted, update)
 	default:
 		update.state = StaleState

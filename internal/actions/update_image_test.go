@@ -11,6 +11,7 @@ import (
 	"github.com/nicholas-fedor/watchtower/internal/actions"
 	mockActions "github.com/nicholas-fedor/watchtower/internal/actions/mocks"
 	"github.com/nicholas-fedor/watchtower/pkg/filters"
+	"github.com/nicholas-fedor/watchtower/pkg/registry/ratelimit"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
@@ -38,7 +39,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"tagged-container",
 							"/tagged-container",
 							"image:1.0.0",
-							time.Now()),
+							time.Now(),
+						),
 					},
 					Staleness: map[string]bool{
 						"tagged-container": true,
@@ -46,7 +48,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				},
 				Stopped: make(map[string]bool),
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -70,7 +72,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"untagged-container",
 							"/untagged-container",
 							"image",
-							time.Now()),
+							time.Now(),
+						),
 					},
 					Staleness: map[string]bool{
 						"untagged-container": true,
@@ -78,7 +81,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				},
 				Stopped: make(map[string]bool),
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -111,7 +114,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				},
 				Stopped: make(map[string]bool),
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -146,7 +149,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				},
 				Stopped: make(map[string]bool),
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -180,7 +183,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					},
 					Stopped: make(map[string]bool),
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					config,
@@ -207,7 +210,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"invalid-container",
 							"/invalid-container",
 							":latest",
-							time.Now()),
+							time.Now(),
+						),
 					},
 					Staleness: map[string]bool{
 						"invalid-container": true,
@@ -215,7 +219,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				},
 				Stopped: make(map[string]bool),
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -251,7 +255,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					},
 					Stopped: make(map[string]bool),
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					config,
@@ -284,7 +288,8 @@ var _ = ginkgo.Describe("the update action", func() {
 							"InvalidContainer",
 							"/InvalidContainer",
 							":latest",
-							time.Now()),
+							time.Now(),
+						),
 					},
 					Staleness: map[string]bool{
 						"InvalidContainer": true,
@@ -292,7 +297,7 @@ var _ = ginkgo.Describe("the update action", func() {
 				},
 				Stopped: make(map[string]bool),
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -346,7 +351,7 @@ var _ = ginkgo.Describe("the update action", func() {
 			}
 			client.TestData.IsContainerStaleError = errors.New("stale check failed")
 
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -362,6 +367,46 @@ var _ = ginkgo.Describe("the update action", func() {
 				To(gomega.BeEmpty(), "No image IDs should be collected")
 			gomega.Expect(client.TestData.IsContainerStaleCount.Load()).
 				To(gomega.Equal(int32(3)), "IsContainerStale should be called for all three containers")
+		})
+
+		ginkgo.It("should count exhausted registry rate limits as failed", func() {
+			client = &mockActions.MockClient{
+				TestData: &mockActions.TestData{
+					Containers: []types.Container{
+						mockActions.CreateMockContainer(
+							"rate-limited-container",
+							"/rate-limited-container",
+							"lscr.io/linuxserver/sonarr:latest",
+							time.Now(),
+						),
+					},
+					Staleness: map[string]bool{
+						"rate-limited-container": true,
+					},
+				},
+				Stopped: make(map[string]bool),
+			}
+			client.TestData.IsContainerStaleError = &ratelimit.Error{
+				RetryAfter:    23722 * time.Nanosecond,
+				Allowed:       44000,
+				AllowedWindow: time.Minute,
+				Host:          "ghcr.io",
+			}
+
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
+				context.Background(),
+				client,
+				config,
+			)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(report.Failed()).
+				To(gomega.HaveLen(1), "Rate-limited staleness checks should be failed")
+			gomega.Expect(report.Skipped()).
+				To(gomega.BeEmpty(), "Rate-limited staleness checks should not be skipped")
+			gomega.Expect(report.Updated()).
+				To(gomega.BeEmpty())
+			gomega.Expect(cleanupImageInfos).
+				To(gomega.BeEmpty())
 		})
 	})
 })

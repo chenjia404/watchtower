@@ -16,6 +16,49 @@ import (
 
 var _ = ginkgo.Describe("DependencySorter", func() {
 	ginkgo.Describe("Sort", func() {
+		ginkgo.It("should sort a network_mode dependent after a provider referenced by Docker ID", func() {
+			const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+			gluetun := concreteLinkedContainer(providerID, "/gluetun", "gluetun", "vpn", "")
+			qbittorrent := concreteLinkedContainer(
+				"qbittorrent-id",
+				"/qbittorrent",
+				"qbittorrent",
+				"app",
+				"container:"+providerID,
+			)
+
+			containers := []types.Container{qbittorrent, gluetun}
+			err := DependencySorter{}.Sort(testLog(), containers, false)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			gomega.Expect(containers[0].Name()).To(gomega.Equal("gluetun"))
+			gomega.Expect(containers[1].Name()).To(gomega.Equal("qbittorrent"))
+		})
+
+		ginkgo.It("should resolve container ID network_mode to the ID owner when a peer reuses that ID as its name", func() {
+			const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+			gluetun := concreteLinkedContainer(providerID, "/gluetun", "gluetun", "vpn", "")
+			decoy := concreteLinkedContainer("decoy-id", "/"+providerID, "other", "svc", "")
+			qbittorrent := concreteLinkedContainer(
+				"qbittorrent-id",
+				"/qbittorrent",
+				"qbittorrent",
+				"app",
+				"container:"+providerID,
+			)
+
+			_, indegree, adjacency, _, err := buildDependencyGraph(
+				testLog(),
+				[]types.Container{qbittorrent, decoy, gluetun},
+				false,
+			)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			gomega.Expect(indegree["qbittorrent-app"]).To(gomega.Equal(1))
+			gomega.Expect(adjacency["gluetun-vpn"]).To(gomega.ContainElement("qbittorrent-app"))
+			gomega.Expect(adjacency["other-svc"]).NotTo(gomega.ContainElement("qbittorrent-app"))
+		})
+
 		ginkgo.It("should sort containers with no dependencies", func() {
 			c1 := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 			c1.EXPECT().Name().Return("c1")
@@ -45,7 +88,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c3", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2, c3}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(3))
 			// Order may vary since no dependencies
@@ -71,7 +114,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(2))
 			gomega.Expect(containers[0].Name()).To(gomega.Equal("c2"))
@@ -107,7 +150,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c3", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2, c3}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(3))
 			gomega.Expect(containers[0].Name()).To(gomega.Equal("c3"))
@@ -134,7 +177,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("circular reference detected"))
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("c1 -> c2 -> c1"))
@@ -165,7 +208,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 
 			containers := []types.Container{c1, c2}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, false)
+			err := ds.Sort(testLog(), containers, false)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(2))
 			// c1 depends on c2, so c2 must come before c1
@@ -197,7 +240,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{watchtower, c1, c2}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(3))
 			gomega.Expect(containers[0].Name()).To(gomega.Equal("c2"))
@@ -208,7 +251,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 		ginkgo.It("should handle empty container list", func() {
 			containers := []types.Container{}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.BeEmpty())
 		})
@@ -224,7 +267,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1}
 			ds := DependencySorter{}
-			err := ds.Sort(containers, true)
+			err := ds.Sort(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers).To(gomega.HaveLen(1))
 			gomega.Expect(containers[0].Name()).To(gomega.Equal("c1"))
@@ -249,7 +292,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 		})
@@ -271,7 +314,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			gomega.Expect(result[0].Name()).To(gomega.Equal("c2"))
@@ -303,7 +346,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{Name: "/c", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{a, b, c}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(3))
 			gomega.Expect(result[0].Name()).To(gomega.Equal("c"))
@@ -327,7 +370,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{Name: "/c2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1, c2}
-			_, err := sortByDependencies(containers, true)
+			_, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("circular reference detected"))
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("c1 -> c2 -> c1"))
@@ -335,7 +378,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 
 		ginkgo.It("should handle empty list", func() {
 			containers := []types.Container{}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.BeEmpty())
 		})
@@ -349,7 +392,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				ContainerInfo().
 				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 			containers := []types.Container{c1}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(1))
 			gomega.Expect(result[0].Name()).To(gomega.Equal("c1"))
@@ -391,7 +434,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/d", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{a, b, c, d}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(4))
 
@@ -414,7 +457,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/c1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).
 				ToNot(gomega.HaveOccurred())
 				// Self-reference is filtered, not a cycle
@@ -440,7 +483,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 					})
 
 				containers := []types.Container{myapp}
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 				gomega.Expect(containerMap).To(gomega.HaveLen(1))
 
@@ -469,7 +512,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 					})
 
 				containers := []types.Container{db}
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 				gomega.Expect(containerMap).To(gomega.HaveLen(1))
 
@@ -510,7 +553,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/test-web-1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{web, app, db} // Unsorted order
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(3))
 			// Dependencies first: db, then app (depends on db), then web (depends on app)
@@ -537,7 +580,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/container2", Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web"}}})
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			gomega.Expect(result[0].Name()).To(gomega.Equal("container2")) // web service
@@ -562,7 +605,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/myproject-web-2", Config: &dockerContainer.Config{Labels: map[string]string{"com.docker.compose.service": "web", "com.docker.compose.project": "myproject"}}})
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			// Order may vary since no dependencies
@@ -606,7 +649,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 					Return(&dockerContainer.InspectResponse{Name: "/db-3", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				containers := []types.Container{app, db1, db2, db3}
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 				gomega.Expect(containerMap).To(gomega.HaveLen(4))
 
@@ -644,7 +687,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				// Malformed service name with leading slash
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			gomega.Expect(result[0].Name()).
@@ -676,7 +719,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 					// Container name with leading slash
 
 				containers := []types.Container{c1, c2}
-				result, err := sortByDependencies(containers, true)
+				result, err := sortByDependencies(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 				gomega.Expect(result).To(gomega.HaveLen(2))
 				gomega.Expect(result[0].Name()).
@@ -705,7 +748,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			gomega.Expect(result[0].ID()).
@@ -738,7 +781,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "/container2", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			// Order may vary since no valid dependencies
@@ -769,7 +812,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				})
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(2))
 			gomega.Expect(result[0].Name()).To(gomega.Equal("web"))        // web container first
@@ -837,7 +880,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				})
 
 			containers := []types.Container{c1, c2, c3, c4, c5}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(5))
 			// Dependencies should come before dependents
@@ -862,7 +905,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 					Return(&dockerContainer.InspectResponse{Name: "/container1", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 				containers := []types.Container{c1}
-				result, err := sortByDependencies(containers, true)
+				result, err := sortByDependencies(testLog(), containers, true)
 				gomega.Expect(err).
 					ToNot(gomega.HaveOccurred())
 					// Self-reference is filtered, not a cycle
@@ -886,7 +929,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				containers[i] = c
 			}
 
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(result).To(gomega.HaveLen(100))
 		})
@@ -910,7 +953,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 				Return(&dockerContainer.InspectResponse{Name: "", Config: &dockerContainer.Config{Labels: map[string]string{}}})
 
 			containers := []types.Container{c1, c2}
-			result, err := sortByDependencies(containers, true)
+			result, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred()) // Should not detect false cycle
 			gomega.Expect(result).To(gomega.HaveLen(2))
 		})
@@ -956,7 +999,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 
 			containers := []types.Container{app, db1, db2}
 
-			containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+			containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 			// Graph builds successfully, but no dependency resolved since "db" doesn't match "project1-db" or "project2-db"
@@ -989,7 +1032,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 
 			containers := []types.Container{c1, c2}
 
-			_, err := sortByDependencies(containers, true)
+			_, err := sortByDependencies(testLog(), containers, true)
 			gomega.Expect(err).To(gomega.HaveOccurred())
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("circular reference detected"))
 			gomega.Expect(err.Error()).To(gomega.ContainSubstring("c1 -> c2 -> c1"))
@@ -1010,7 +1053,7 @@ var _ = ginkgo.Describe("DependencySorter", func() {
 			// Only app in containers list, db not included
 			containers := []types.Container{app}
 
-			containerMap, indegree, _, _, err := buildDependencyGraph(containers, true)
+			containerMap, indegree, _, _, err := buildDependencyGraph(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containerMap).To(gomega.HaveLen(1))
 			gomega.Expect(indegree["app"]).To(gomega.Equal(0))
@@ -1108,7 +1151,7 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 				})
 
 			containers := []types.Container{app, db1, db2}
-			containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+			containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containerMap).To(gomega.HaveLen(3))
 
@@ -1161,7 +1204,7 @@ var _ = ginkgo.Describe("Prefix Matching Issues", func() {
 			})
 
 		containers := []types.Container{app, db1, db2}
-		containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+		containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		gomega.Expect(containerMap).To(gomega.HaveLen(3))
 
@@ -1249,7 +1292,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 				containers := []types.Container{c1, c2}
 
-				containerMap, indegree, _, normalizedMap, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, _, normalizedMap, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				// Containers from different projects should have different identifiers
@@ -1327,8 +1370,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 				containers := []types.Container{app, db1}
 
-				containerMap, indegree, adjacency, normalizedMap, err := buildDependencyGraph(
-					containers,
+				containerMap, indegree, adjacency, normalizedMap, err := buildDependencyGraph(testLog(), containers,
 					true,
 				)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -1397,7 +1439,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 				containers := []types.Container{c1, c2}
 
-				_, _, _, _, err := buildDependencyGraph(containers, true)
+				_, _, _, _, err := buildDependencyGraph(testLog(), containers, true)
 
 				gomega.Expect(err).To(gomega.HaveOccurred())
 
@@ -1443,8 +1485,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 			containers := []types.Container{c1, c2}
 
-			containerMap, indegree, adjacency, normalizedMap, err := buildDependencyGraph(
-				containers,
+			containerMap, indegree, adjacency, normalizedMap, err := buildDependencyGraph(testLog(), containers,
 				true,
 			)
 
@@ -1476,7 +1517,7 @@ var _ = ginkgo.Describe("Identifier Collision Issues", func() {
 
 			containers := []types.Container{c1, c2}
 
-			_, err := sortByDependencies(containers, true)
+			_, err := sortByDependencies(testLog(), containers, true)
 
 			gomega.Expect(err).To(gomega.HaveOccurred())
 
@@ -1611,7 +1652,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 
 				containers := []types.Container{app, db}
 
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				// Verify containers are in the map
@@ -1659,7 +1700,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 
 				containers := []types.Container{app, postgres}
 
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				// Verify containers are in the map
@@ -1718,7 +1759,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 
 				containers := []types.Container{app, db1, db2}
 
-				containerMap, indegree, _, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, _, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				// Verify all containers are in the map
@@ -1778,7 +1819,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 
 				containers := []types.Container{app, db1, db2}
 
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				// Verify all containers are in the map
@@ -1833,7 +1874,7 @@ var _ = ginkgo.Describe("Service-Only Matching", func() {
 
 				containers := []types.Container{app, dbReplica, dbProject}
 
-				containerMap, indegree, adjacency, _, err := buildDependencyGraph(containers, true)
+				containerMap, indegree, adjacency, _, err := buildDependencyGraph(testLog(), containers, true)
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 				// Verify all containers are in the map
@@ -1898,8 +1939,36 @@ func mockLinkedContainer(
 	return c
 }
 
+// concreteLinkedContainer builds a *container.Container so Docker ID aliases
+// in buildLinkMatchIndexes are exercised. networkMode is the HostConfig
+// NetworkMode value, such as container:<id>.
+func concreteLinkedContainer(
+	id, name, project, service, networkMode string,
+) types.Container {
+	labels := map[string]string{}
+	if project != "" {
+		labels["com.docker.compose.project"] = project
+	}
+
+	if service != "" {
+		labels["com.docker.compose.service"] = service
+	}
+
+	hostConfig := &dockerContainer.HostConfig{}
+	if networkMode != "" {
+		hostConfig.NetworkMode = dockerContainer.NetworkMode(networkMode)
+	}
+
+	return container.NewContainer(nil, &dockerContainer.InspectResponse{
+		ID:         id,
+		Name:       name,
+		HostConfig: hostConfig,
+		Config:     &dockerContainer.Config{Labels: labels},
+	}, nil)
+}
+
 var _ = ginkgo.Describe("FindMatchingIdentifiers", func() {
-	// Exhaustive link × identifier permutations across Compose stacks, multi-segment
+	// Exhaustive link x identifier permutations across Compose stacks, multi-segment
 	// services, replicas, bare container names, and ambiguous cross-project cases.
 	ginkgo.DescribeTable(
 		"matches identifiers for each link form",
@@ -1992,7 +2061,7 @@ var _ = ginkgo.Describe("buildLinkMatchIndexes", func() {
 			"myproject-web":       app,
 		}
 
-		idSet, aliasToCanonical := buildLinkMatchIndexes(containerMap)
+		idSet, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
 		gomega.Expect(aliasToCanonical["myproject-net-proxy"]).To(gomega.Equal("myproject-net-proxy"))
 		gomega.Expect(aliasToCanonical["net-proxy"]).To(gomega.Equal("myproject-net-proxy"))
 		gomega.Expect(aliasToCanonical["web-app"]).To(gomega.Equal("myproject-web"))
@@ -2014,7 +2083,7 @@ var _ = ginkgo.Describe("buildLinkMatchIndexes", func() {
 			"project2-service": c2,
 		}
 
-		_, aliasToCanonical := buildLinkMatchIndexes(containerMap)
+		_, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
 		_, hasBare := aliasToCanonical["shared"]
 		gomega.Expect(hasBare).To(gomega.BeFalse())
 		gomega.Expect(aliasToCanonical["project1-service"]).To(gomega.Equal("project1-service"))
@@ -2022,7 +2091,8 @@ var _ = ginkgo.Describe("buildLinkMatchIndexes", func() {
 	})
 
 	ginkgo.It("should preserve canonical self-mapping when bare name equals another canonical key", func() {
-		// Container A is keyed by "shared"; container B's bare name is also "shared".
+		// Container A is keyed by "shared".
+		// Container B's bare name is also "shared".
 		// B must not overwrite or delete A's canonical self-mapping.
 		canonicalOwner := mockTypes.NewMockContainer(ginkgo.GinkgoT())
 		canonicalOwner.EXPECT().Name().Return("shared").Maybe()
@@ -2035,12 +2105,82 @@ var _ = ginkgo.Describe("buildLinkMatchIndexes", func() {
 			"project-service": bareClaimant,
 		}
 
-		idSet, aliasToCanonical := buildLinkMatchIndexes(containerMap)
+		idSet, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
 		gomega.Expect(aliasToCanonical["shared"]).To(gomega.Equal("shared"))
 		gomega.Expect(aliasToCanonical["project-service"]).To(gomega.Equal("project-service"))
 		gomega.Expect(idSet).To(gomega.HaveKey("shared"))
 		gomega.Expect(idSet).To(gomega.HaveKey("project-service"))
 		gomega.Expect(idSet).To(gomega.HaveLen(2))
+	})
+
+	ginkgo.It("should map a Docker ID alias for concrete containers", func() {
+		const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+		gluetun := concreteLinkedContainer(providerID, "/gluetun", "gluetun", "vpn", "")
+
+		containerMap := map[string]types.Container{
+			"gluetun-vpn": gluetun,
+		}
+
+		idSet, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
+		gomega.Expect(aliasToCanonical[providerID]).To(gomega.Equal("gluetun-vpn"))
+		gomega.Expect(idSet).To(gomega.HaveKey(providerID))
+	})
+
+	ginkgo.It("should skip an empty Docker ID", func() {
+		gluetun := concreteLinkedContainer("", "/gluetun", "gluetun", "vpn", "")
+
+		containerMap := map[string]types.Container{
+			"gluetun-vpn": gluetun,
+		}
+
+		idSet, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
+		gomega.Expect(aliasToCanonical["gluetun-vpn"]).To(gomega.Equal("gluetun-vpn"))
+		gomega.Expect(aliasToCanonical["gluetun"]).To(gomega.Equal("gluetun-vpn"))
+		gomega.Expect(idSet).To(gomega.HaveLen(2))
+	})
+
+	ginkgo.It("should skip a Docker ID that equals the canonical identifier", func() {
+		const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+		gluetun := concreteLinkedContainer(providerID, "/"+providerID, "", "", "")
+
+		containerMap := map[string]types.Container{
+			providerID: gluetun,
+		}
+
+		_, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
+		gomega.Expect(aliasToCanonical[providerID]).To(gomega.Equal(providerID))
+	})
+
+	ginkgo.It("should not overwrite an existing canonical key with a Docker ID", func() {
+		const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+		owner := concreteLinkedContainer("owner-id", "/owner", "owner", "svc", "")
+		claimant := concreteLinkedContainer(providerID, "/gluetun", "gluetun", "vpn", "")
+
+		containerMap := map[string]types.Container{
+			providerID:    owner,
+			"gluetun-vpn": claimant,
+		}
+
+		_, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
+		gomega.Expect(aliasToCanonical[providerID]).To(gomega.Equal(providerID))
+	})
+
+	ginkgo.It("should retain a Docker ID alias when another container uses that ID as its name", func() {
+		const providerID = "25e75393800b5c450a6841212a3b92ed28fa35414a586dec9f2c8a520d4910c2"
+
+		gluetun := concreteLinkedContainer(providerID, "/gluetun", "gluetun", "vpn", "")
+		decoy := concreteLinkedContainer("decoy-id", "/"+providerID, "other", "svc", "")
+
+		containerMap := map[string]types.Container{
+			"gluetun-vpn": gluetun,
+			"other-svc":   decoy,
+		}
+
+		_, aliasToCanonical := buildLinkMatchIndexes(testLog(), containerMap)
+		gomega.Expect(aliasToCanonical[providerID]).To(gomega.Equal("gluetun-vpn"))
 	})
 })
 
@@ -2103,7 +2243,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 			)
 
 			containers := []types.Container{dependent, dep}
-			err := DependencySorter{}.Sort(containers, useCompose)
+			err := DependencySorter{}.Sort(testLog(), containers, useCompose)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 			gomega.Expect(containers[0].Name()).To(gomega.Equal(depName),
 				"dependency must sort before dependent")
@@ -2189,7 +2329,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		clientB := mockLinkedContainer("client-b", "id-b", "stack", "client-b", []string{"vpn"}, true)
 
 		containers := []types.Container{clientA, clientB, vpn}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		gomega.Expect(containers[0].Name()).To(gomega.Equal("vpn"))
 		names := []string{containers[1].Name(), containers[2].Name()}
@@ -2202,7 +2342,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		web := mockLinkedContainer("web", "id-web", "app", "web", []string{"db", "cache"}, true)
 
 		containers := []types.Container{web, db, cache}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		gomega.Expect(containers[2].Name()).To(gomega.Equal("web"))
 
@@ -2217,7 +2357,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		app := mockLinkedContainer("myproject-app", "id-app", "myproject", "app", []string{"myproject-db"}, true)
 
 		containers := []types.Container{app, db1, db2}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		gomega.Expect(containers[2].Name()).To(gomega.Equal("myproject-app"))
 		gomega.Expect([]string{containers[0].Name(), containers[1].Name()}).
@@ -2230,7 +2370,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		app := mockLinkedContainer("project3-app", "id-3", "project3", "app", []string{"db"}, true)
 
 		containers := []types.Container{app, db1, db2}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 		names := []string{containers[0].Name(), containers[1].Name(), containers[2].Name()}
@@ -2242,7 +2382,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		standalone := mockLinkedContainer("other", "id-other", "myproject", "other", nil, true)
 
 		containers := []types.Container{app, standalone}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		gomega.Expect([]string{containers[0].Name(), containers[1].Name()}).
 			To(gomega.ConsistOf("app", "other"))
@@ -2263,7 +2403,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		}).Maybe()
 
 		containers := []types.Container{wt, web, db}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		gomega.Expect(containers[0].Name()).To(gomega.Equal("db"))
 		gomega.Expect(containers[1].Name()).To(gomega.Equal("web"))
@@ -2271,9 +2411,9 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 	})
 
 	ginkgo.It("should order independent stacks without cross-linking same service names", func() {
-		// Two Compose projects each have db→web. Bare link "db" is ambiguous and
-		// must not couple stacks; each web only orders relative to its own db when
-		// links use project-qualified or unique names.
+		// Two Compose projects each have db→web.
+		// Bare link "db" is ambiguous and must not couple stacks.
+		// Each web only orders relative to its own db when links use project-qualified or unique names.
 		dbA := mockLinkedContainer("stack-a-db", "id-da", "stack-a", "db", nil, true)
 		webA := mockLinkedContainer(
 			"stack-a-web", "id-wa", "stack-a", "web", []string{"stack-a-db"}, true,
@@ -2284,7 +2424,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		)
 
 		containers := []types.Container{webA, webB, dbA, dbB}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 		ordered := make([]string, len(containers))
@@ -2297,8 +2437,8 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 	})
 
 	ginkgo.It("should order cross-stack Watchtower depends-on by foreign container_name", func() {
-		// Provider stack owns the named network peer; consumer stack depends on it
-		// via Watchtower depends-on / network_mode container name.
+		// Provider stack owns the named network peer.
+		// Consumer stack depends on it via Watchtower depends-on / network_mode container name.
 		provider := mockLinkedContainer(
 			"shared-net-proxy", "id-prov", "infra", "net-proxy", nil, true,
 		)
@@ -2310,7 +2450,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		)
 
 		containers := []types.Container{consumer, unrelated, provider}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 		ordered := make([]string, len(containers))
@@ -2323,8 +2463,9 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 	})
 
 	ginkgo.It("should not couple stacks when multi-segment services share a trailing token", func() {
-		// stack-a has service net-proxy; stack-b has service other-proxy. A dependent
-		// linking to net-proxy must only wait on stack-a's peer, not other-proxy.
+		// stack-a has service net-proxy
+		// stack-b has service other-proxy.
+		// A dependent linking to net-proxy must only wait on stack-a's peer, not other-proxy.
 		proxyA := mockLinkedContainer(
 			"stack-a-net-proxy", "id-pa", "stack-a", "net-proxy", nil, true,
 		)
@@ -2336,7 +2477,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		)
 
 		containers := []types.Container{client, proxyB, proxyA}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 		ordered := make([]string, len(containers))
@@ -2346,15 +2487,14 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 
 		assertOrderBefore(ordered, "stack-a-net-proxy", "stack-a-client")
 		// other-proxy must not become a dependency of client (no edge).
-		// If wrongly linked, client would have indegree 2 and sort after both proxies
-		// with a fixed relative order; assert client is not forced after proxyB only
-		// when proxyA is already before client.
+		// If wrongly linked, client would have indegree 2 and sort after both proxies with a fixed relative order.
+		// Assert client is not forced after proxyB only when proxyA is already before client.
 		gomega.Expect(indexOf(ordered, "stack-a-client")).
 			To(gomega.BeNumerically(">", indexOf(ordered, "stack-a-net-proxy")))
 	})
 
 	ginkgo.It("should order multi-segment container_name dependency among multi-stack peers", func() {
-		// Explicit container_name equals multi-segment service; Compose keys differ.
+		// Explicit container_name equals multi-segment service and Compose keys differ.
 		provider := mockLinkedContainer(
 			"net-proxy", "id-np", "media", "net-proxy", nil, true,
 		)
@@ -2370,7 +2510,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		)
 
 		containers := []types.Container{dependent, foreign, decoy, provider}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 		ordered := make([]string, len(containers))
@@ -2393,7 +2533,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		)
 
 		containers := []types.Container{client, worker, db}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 		ordered := make([]string, len(containers))
@@ -2408,7 +2548,8 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 
 	ginkgo.It("should not create edge for hyphenated link against trailing-token-only peer", func() {
 		// Regression: ExtractServiceName("net-proxy") and ExtractServiceName("other-proxy")
-		// both yield "proxy"; matching must not treat them as the same dependency.
+		// both yield "proxy".
+		// Matching must not treat them as the same dependency.
 		decoy := mockLinkedContainer(
 			"other-proxy", "id-decoy", "other", "other-proxy", nil, true,
 		)
@@ -2417,7 +2558,7 @@ var _ = ginkgo.Describe("dependency link form permutations", func() {
 		)
 
 		containers := []types.Container{dependent, decoy}
-		err := DependencySorter{}.Sort(containers, true)
+		err := DependencySorter{}.Sort(testLog(), containers, true)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred())
 		// No dependency edge: both indegree 0. Order is reverse-alpha among keys.
 		gomega.Expect([]string{containers[0].Name(), containers[1].Name()}).

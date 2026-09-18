@@ -7,14 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distribution/reference"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dockerCliConfig "github.com/docker/cli/cli/config"
 
+	"github.com/nicholas-fedor/watchtower/internal/logging"
 	"github.com/nicholas-fedor/watchtower/pkg/registry/auth"
 )
 
@@ -26,7 +27,7 @@ func TestEncodedEnvAuth_ReturnsCredentialsWhenSet(t *testing.T) {
 	t.Setenv("REPO_USER", "watchtower-user")
 	t.Setenv("REPO_PASS", "watchtower-pass")
 
-	config, err := EncodedEnvAuth()
+	config, err := EncodedEnvAuth(testLog())
 	require.NoError(t, err)
 	assert.Equal(t, expected, config)
 }
@@ -37,7 +38,7 @@ func TestEncodedEnvAuth_ReturnsErrorWhenUnset(t *testing.T) {
 	t.Setenv("REPO_USER", "")
 	t.Setenv("REPO_PASS", "")
 
-	_, err := EncodedEnvAuth()
+	_, err := EncodedEnvAuth(testLog())
 	require.Error(t, err)
 }
 
@@ -66,7 +67,7 @@ func TestEncodedEnvAuth_PartialCredentials(t *testing.T) {
 			t.Setenv("REPO_USER", tt.repoUser)
 			t.Setenv("REPO_PASS", tt.repoPass)
 
-			credentials, err := EncodedEnvAuth()
+			credentials, err := EncodedEnvAuth(testLog())
 			require.Error(t, err)
 			assert.Empty(t, credentials)
 		})
@@ -79,7 +80,7 @@ func TestEncodedEnvAuth_PartialCredentials(t *testing.T) {
 func TestEncodedConfigAuth_ReturnsEmptyCredentialsWhenFileNotPresent(t *testing.T) {
 	t.Setenv("DOCKER_CONFIG", "/nonexistent/watchtower-test-path")
 
-	credentials, err := EncodedConfigCredentials("docker.io/library/nginx:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "docker.io/library/nginx:latest")
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -113,7 +114,7 @@ func TestEncodedConfigCredentials_FileStoreNoUsername(t *testing.T) {
 	normalizedRef, parseErr := reference.ParseNormalizedNamed("ghcr.io/test/image:latest")
 	require.NoError(t, parseErr)
 
-	credentials, err := EncodedConfigCredentials(normalizedRef.String())
+	credentials, err := EncodedConfigCredentials(testLog(), normalizedRef.String())
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -148,7 +149,7 @@ func TestEncodedConfigCredentials_FileStoreUsernameOnly(t *testing.T) {
 	normalizedRef, parseErr := reference.ParseNormalizedNamed("ghcr.io/test/image:latest")
 	require.NoError(t, parseErr)
 
-	credentials, err := EncodedConfigCredentials(normalizedRef.String())
+	credentials, err := EncodedConfigCredentials(testLog(), normalizedRef.String())
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -179,9 +180,7 @@ func TestEncodedConfigCredentials_IdentityToken(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	dockerCliConfig.SetDir(tempDir)
 
-	credentials, err := EncodedConfigCredentials(
-		"123456789012.dkr.ecr.us-east-1.amazonaws.com/app:latest",
-	)
+	credentials, err := EncodedConfigCredentials(testLog(), "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:latest")
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -190,7 +189,7 @@ func TestEncodedConfigCredentials_IdentityToken(t *testing.T) {
 
 	// End-to-end: TransformAuth must produce Basic credentials for the
 	// Authorization header used when exchanging for a registry bearer token.
-	basicEncoded := auth.TransformAuth(credentials)
+	basicEncoded := auth.TransformAuth(testLog(), credentials)
 	basicDecoded, decodeErr := base64.StdEncoding.DecodeString(basicEncoded)
 	require.NoError(t, decodeErr)
 	assert.Equal(t, ":"+identityToken, string(basicDecoded))
@@ -224,7 +223,7 @@ func TestEncodedConfigCredentials_RegistryTokenOnlyRejected(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	dockerCliConfig.SetDir(tempDir)
 
-	credentials, err := EncodedConfigCredentials("ghcr.io/org/app:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -253,7 +252,7 @@ func TestEncodedConfigCredentials_PasswordOnly(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	dockerCliConfig.SetDir(tempDir)
 
-	credentials, err := EncodedConfigCredentials("ghcr.io/org/app:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -290,7 +289,7 @@ func TestEncodedConfigCredentials_FileStoreValidCredentials(t *testing.T) {
 	normalizedRef, parseErr := reference.ParseNormalizedNamed("ghcr.io/test/image:latest")
 	require.NoError(t, parseErr)
 
-	credentials, err := EncodedConfigCredentials(normalizedRef.String())
+	credentials, err := EncodedConfigCredentials(testLog(), normalizedRef.String())
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -306,7 +305,7 @@ func TestEncodedConfigCredentials_NoConfigFile(t *testing.T) {
 	t.Setenv("DOCKER_CONFIG", "/nonexistent/watchtower-test-path")
 	dockerCliConfig.SetDir("/nonexistent/watchtower-test-path")
 
-	credentials, err := EncodedConfigCredentials("ghcr.io/test/image:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -327,7 +326,7 @@ func TestEncodedAuth_UsesConfigWhenEnvUnset(t *testing.T) {
 	t.Setenv("REPO_USER", "")
 	t.Setenv("REPO_PASS", "")
 
-	credentials, err := EncodedAuth("ghcr.io/test/image:latest")
+	credentials, err := EncodedAuth(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -381,7 +380,7 @@ func TestEncodedConfigCredentials_MultipleRegistries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			credentials, err := EncodedConfigCredentials(tt.imageRef)
+			credentials, err := EncodedConfigCredentials(testLog(), tt.imageRef)
 			require.NoError(t, err)
 
 			if tt.wantEmpty {
@@ -415,7 +414,7 @@ func TestEncodedAuth_ConfigPreferredOverEnv(t *testing.T) {
 	t.Setenv("REPO_USER", "env-user")
 	t.Setenv("REPO_PASS", "env-pass")
 
-	credentials, err := EncodedAuth("ghcr.io/test/image:latest")
+	credentials, err := EncodedAuth(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -439,7 +438,7 @@ func TestEncodedAuth_EnvUsedWhenConfigHasNoRegistryEntry(t *testing.T) {
 	t.Setenv("REPO_USER", "env-user")
 	t.Setenv("REPO_PASS", "env-pass")
 
-	credentials, err := EncodedAuth("quay.io/org/app:latest")
+	credentials, err := EncodedAuth(testLog(), "quay.io/org/app:latest")
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -469,7 +468,7 @@ func TestEncodedConfigCredentials_MultipleImagesSameRegistry(t *testing.T) {
 	var firstCredentials string
 
 	for _, ref := range imageRefs {
-		credentials, err := EncodedConfigCredentials(ref)
+		credentials, err := EncodedConfigCredentials(testLog(), ref)
 		require.NoError(t, err)
 		assert.NotEmpty(t, credentials)
 
@@ -495,7 +494,7 @@ func TestEncodedConfigCredentials_RegistryMissingFromConfig(t *testing.T) {
 
 	defer os.Unsetenv("DOCKER_CONFIG")
 
-	credentials, err := EncodedConfigCredentials("ghcr.io/test/image:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -507,7 +506,7 @@ func TestEncodedConfigCredentials_EmptyAuthsMap(t *testing.T) {
 
 	defer os.Unsetenv("DOCKER_CONFIG")
 
-	credentials, err := EncodedConfigCredentials("ghcr.io/test/image:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
@@ -528,7 +527,7 @@ func TestEncodedConfigCredentials_MalformedConfigJSON(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	dockerCliConfig.SetDir(tempDir)
 
-	credentials, err := EncodedConfigCredentials("ghcr.io/test/image:latest")
+	credentials, err := EncodedConfigCredentials(testLog(), "ghcr.io/test/image:latest")
 	require.Error(t, err)
 	assert.Empty(t, credentials)
 }
@@ -549,7 +548,7 @@ func TestEncodedAuth_FallsThroughToConfigWhenEnvPartiallySet(t *testing.T) {
 	t.Setenv("REPO_USER", "env-only-user")
 	t.Setenv("REPO_PASS", "")
 
-	credentials, err := EncodedAuth("ghcr.io/test/image:latest")
+	credentials, err := EncodedAuth(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.NotEmpty(t, credentials)
 
@@ -574,31 +573,48 @@ func TestEncodedAuth_EnvPartiallySetWithUnconfiguredRegistry(t *testing.T) {
 	t.Setenv("REPO_USER", "env-only-user")
 	t.Setenv("REPO_PASS", "")
 
-	credentials, err := EncodedAuth("ghcr.io/test/image:latest")
+	credentials, err := EncodedAuth(testLog(), "ghcr.io/test/image:latest")
 	require.NoError(t, err)
 	assert.Empty(t, credentials)
 }
 
+// TestGetPullOptions_TraceLogsOmitCredentials verifies that GetPullOptions trace
+// logging never includes the encoded registry credential payload.
+func TestGetPullOptions_TraceLogsOmitCredentials(t *testing.T) {
+	const secretPass = "super-secret-pull-pass"
+
+	log, logBuf := logging.NewTestLogger(logging.TraceLevel)
+
+	// Empty Docker config so EncodedAuth falls through to environment credentials.
+	tempDir := t.TempDir()
+	t.Setenv("DOCKER_CONFIG", tempDir)
+	t.Setenv("HOME", tempDir)
+	dockerCliConfig.SetDir(tempDir)
+
+	t.Setenv("REPO_USER", "pull-user")
+	t.Setenv("REPO_PASS", secretPass)
+
+	opts, err := GetPullOptions(log, "docker.io/library/alpine:latest")
+	require.NoError(t, err)
+	require.NotEmpty(t, opts.RegistryAuth)
+
+	out := logBuf.String()
+	assert.Contains(t, out, "Retrieved authentication credentials")
+	assert.Contains(t, out, "has_credentials")
+	assert.NotContains(t, out, secretPass)
+	assert.NotContains(t, out, opts.RegistryAuth)
+}
+
 // TestEncodedAuth_TraceLogsOmitSecrets verifies that trace-level credential logs
 // never include password or token material from config or environment sources.
+// The capture logger is Trace-level and is passed into production so Trace branches run.
 func TestEncodedAuth_TraceLogsOmitSecrets(t *testing.T) {
 	const (
 		secretPass  = "super-secret-repo-pass"
 		secretToken = "super-secret-identity-token"
 	)
 
-	var logBuf strings.Builder
-
-	origOut := logrus.StandardLogger().Out
-	origLevel := logrus.GetLevel()
-
-	logrus.SetOutput(&logBuf)
-	logrus.SetLevel(logrus.TraceLevel)
-
-	t.Cleanup(func() {
-		logrus.SetOutput(origOut)
-		logrus.SetLevel(origLevel)
-	})
+	log, logBuf := logging.NewTestLogger(logging.TraceLevel)
 
 	t.Run("environment credentials", func(t *testing.T) {
 		logBuf.Reset()
@@ -606,9 +622,16 @@ func TestEncodedAuth_TraceLogsOmitSecrets(t *testing.T) {
 		t.Setenv("REPO_USER", "env-user")
 		t.Setenv("REPO_PASS", secretPass)
 
-		_, err := EncodedEnvAuth()
+		_, err := EncodedEnvAuth(log)
 		require.NoError(t, err)
-		assert.NotContains(t, logBuf.String(), secretPass)
+
+		out := logBuf.String()
+		// Positive: Trace path ran and logged non-sensitive indicators.
+		assert.Contains(t, out, "Using environment credentials")
+		assert.Contains(t, out, "has_username=true")
+		assert.Contains(t, out, "has_password=true")
+		assert.NotContains(t, out, secretPass)
+		assert.NotContains(t, out, "env-user")
 	})
 
 	t.Run("config credentials", func(t *testing.T) {
@@ -624,9 +647,15 @@ func TestEncodedAuth_TraceLogsOmitSecrets(t *testing.T) {
 		t.Setenv("REPO_USER", "")
 		t.Setenv("REPO_PASS", "")
 
-		_, err := EncodedConfigCredentials("ghcr.io/org/app:latest")
+		_, err := EncodedConfigCredentials(log, "ghcr.io/org/app:latest")
 		require.NoError(t, err)
-		assert.NotContains(t, logBuf.String(), secretPass)
+
+		out := logBuf.String()
+		assert.Contains(t, out, "Using config credentials")
+		assert.Contains(t, out, "has_username=true")
+		assert.Contains(t, out, "has_password=true")
+		assert.NotContains(t, out, secretPass)
+		assert.NotContains(t, out, "cfg-user")
 	})
 
 	t.Run("identity token credentials", func(t *testing.T) {
@@ -651,9 +680,13 @@ func TestEncodedAuth_TraceLogsOmitSecrets(t *testing.T) {
 		t.Setenv("HOME", tempDir)
 		dockerCliConfig.SetDir(tempDir)
 
-		_, err = EncodedConfigCredentials("ghcr.io/org/app:latest")
+		_, err = EncodedConfigCredentials(log, "ghcr.io/org/app:latest")
 		require.NoError(t, err)
-		assert.NotContains(t, logBuf.String(), secretToken)
+
+		out := logBuf.String()
+		assert.Contains(t, out, "Using config credentials")
+		assert.Contains(t, out, "has_identity_tok")
+		assert.NotContains(t, out, secretToken)
 	})
 }
 
@@ -669,9 +702,90 @@ func TestEncodedConfigCredentials_InvalidImageRef(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	dockerCliConfig.SetDir(tempDir)
 
-	credentials, err := EncodedConfigCredentials("")
+	credentials, err := EncodedConfigCredentials(testLog(), "")
 	require.Error(t, err)
 	assert.Empty(t, credentials)
+}
+
+func TestEncodedConfigCredentials_CacheHitAndMtimeInvalidation(t *testing.T) {
+	resetEncodedAuthCache()
+	t.Cleanup(resetEncodedAuthCache)
+
+	tempDir := writeTestDockerConfig(t, map[string]map[string]string{
+		"ghcr.io": {
+			"username": "cache-user",
+			"password": "cache-pass",
+		},
+	})
+	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
+
+	first, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
+	require.NoError(t, err)
+	require.NotEmpty(t, first)
+
+	second, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+
+	configPath := filepath.Join(tempDir, "config.json")
+	updated, err := json.Marshal(map[string]any{
+		"auths": map[string]any{
+			"ghcr.io": map[string]string{
+				"username": "cache-user",
+				"password": "rotated-pass",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Ensure mtime changes even on coarse filesystems.
+	past := configFileModTime(tempDir) - int64(time.Second)
+	require.NoError(t, os.Chtimes(configPath, time.Unix(0, past), time.Unix(0, past)))
+	require.NoError(t, os.WriteFile(configPath, updated, 0o600))
+
+	future := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(configPath, future, future))
+
+	third, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
+	require.NoError(t, err)
+	require.NotEmpty(t, third)
+	assert.NotEqual(t, first, third)
+}
+
+func TestEncodedConfigCredentials_FailedLookupNotCached(t *testing.T) {
+	resetEncodedAuthCache()
+	t.Cleanup(resetEncodedAuthCache)
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	require.NoError(t, os.WriteFile(configPath, []byte("{"), 0o600))
+
+	t.Setenv("DOCKER_CONFIG", tempDir)
+	t.Setenv("HOME", tempDir)
+	dockerCliConfig.SetDir(tempDir)
+
+	mtime := configFileModTime(tempDir)
+
+	empty, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
+	require.Error(t, err)
+	require.ErrorIs(t, err, errFailedLoadDockerConfig)
+	assert.Empty(t, empty)
+
+	valid, err := json.Marshal(map[string]any{
+		"auths": map[string]any{
+			"ghcr.io": map[string]string{
+				"username": "later-user",
+				"password": "later-pass",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, valid, 0o600))
+	require.NoError(t, os.Chtimes(configPath, time.Unix(0, mtime), time.Unix(0, mtime)))
+
+	got, err := EncodedConfigCredentials(testLog(), "ghcr.io/org/app:latest")
+	require.NoError(t, err)
+	require.NotEmpty(t, got)
 }
 
 // writeTestDockerConfig writes a Docker config.json with the given auths map

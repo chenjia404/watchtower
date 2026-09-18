@@ -35,7 +35,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 								Labels: map[string]string{
 									"com.centurylinklabs.watchtower": "true",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -44,7 +45,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -62,12 +63,61 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				To(gomega.Equal(int32(0)), "RemoveImageByID should not be called during Update")
 			gomega.Expect(client.TestData.RenameContainerCount.Load()).
 				To(gomega.Equal(int32(1)), "RenameContainer should be called once")
-			gomega.Expect(client.TestData.SetNoRestartPolicyCount.Load()).
-				To(gomega.Equal(int32(1)), "SetNoRestartPolicy should be called once for old Watchtower")
+			gomega.Expect(client.TestData.SetRestartPolicyCount.Load()).
+				To(gomega.Equal(int32(1)), "SetRestartPolicy should be called once for old Watchtower")
+			gomega.Expect(client.TestData.LastRestartPolicy.Name).
+				To(gomega.Equal(dockerContainer.RestartPolicyDisabled))
 			gomega.Expect(client.TestData.StopContainerCount.Load()).
 				To(gomega.Equal(int32(0)), "StopContainer should not be called for old Watchtower (handled by cleanup logic)")
 			gomega.Expect(client.TestData.IsContainerStaleCount.Load()).
 				To(gomega.Equal(int32(1)), "IsContainerStale should be called once for Watchtower")
+		})
+
+		ginkgo.It("should not collect Watchtower image cleanup during ephemeral self-update", func() {
+			client := mockActions.CreateMockClient(
+				&mockActions.TestData{
+					Containers: []types.Container{
+						mockActions.CreateMockContainerWithConfig(
+							"watchtower",
+							"/watchtower",
+							"watchtower:latest",
+							true,
+							false,
+							time.Now(),
+							&dockerContainer.Config{
+								Labels: map[string]string{
+									"com.centurylinklabs.watchtower": "true",
+								},
+							},
+						),
+					},
+					Staleness: map[string]bool{
+						"watchtower": true,
+					},
+				},
+				false,
+				false,
+			)
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
+				context.Background(),
+				client,
+				types.UpdateParams{
+					Cleanup:             true,
+					EphemeralSelfUpdate: true,
+					Filter:              filters.WatchtowerContainersFilter,
+					CPUCopyMode:         "auto",
+					PullFailureDelay:    10 * time.Millisecond,
+				},
+			)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(report.Updated()).To(gomega.HaveLen(1))
+			gomega.Expect(cleanupImageInfos).
+				To(gomega.BeEmpty(), "Dying process must not collect the Watchtower image for cleanup")
+			gomega.Expect(client.TestData.TriedToRemoveImageCount.Load()).
+				To(gomega.Equal(int32(0)), "RemoveImageByID should not be called during Update")
+			gomega.Expect(client.TestData.RenameContainerCount.Load()).
+				To(gomega.Equal(int32(0)), "RenameContainer should not be called for ephemeral self-update")
+			gomega.Expect(client.TestData.LastCleanup).To(gomega.BeTrue())
 		})
 
 		ginkgo.It("should skip rename with no-restart for Watchtower", func() {
@@ -86,7 +136,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									"com.centurylinklabs.watchtower":              "true",
 									"com.centurylinklabs.watchtower.monitor-only": "true",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -101,7 +152,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				Filter:      filters.WatchtowerContainersFilter,
 				CPUCopyMode: "auto",
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -130,7 +181,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 							time.Now(),
 							&dockerContainer.Config{
 								Labels: map[string]string{},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"nginx": true,
@@ -139,7 +191,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -175,7 +227,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 							time.Now(),
 							&dockerContainer.Config{
 								Labels: map[string]string{},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"stopped-nginx": true,
@@ -184,7 +237,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -219,7 +272,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 							time.Now(),
 							&dockerContainer.Config{
 								Labels: map[string]string{},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"stopped-nginx": true,
@@ -228,7 +282,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -266,7 +320,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 								Labels: map[string]string{
 									"com.centurylinklabs.watchtower": "true",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -281,7 +336,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				Filter:      filters.WatchtowerContainersFilter,
 				CPUCopyMode: "auto",
 			}
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				config,
@@ -315,7 +370,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									"com.centurylinklabs.watchtower":       "true",
 									"com.centurylinklabs.watchtower.scope": "prod",
 								},
-							}),
+							},
+						),
 						mockActions.CreateMockContainerWithConfig(
 							"watchtower-unscoped",
 							"/watchtower-unscoped",
@@ -327,7 +383,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 								Labels: map[string]string{
 									"com.centurylinklabs.watchtower": "true",
 								},
-							}),
+							},
+						),
 					},
 				},
 				false,
@@ -336,7 +393,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 
 			var cleanupImageInfos []types.RemovedImageInfo
 
-			cleanupOccurred, err := actions.RemoveExcessWatchtowerInstances(
+			cleanupOccurred, err := actions.RemoveExcessWatchtowerInstances(testLogger(),
 				context.Background(),
 				client,
 				true, // cleanup=true
@@ -367,7 +424,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 							time.Now().Add(-time.Hour),
 							&dockerContainer.Config{
 								Labels: map[string]string{"com.centurylinklabs.watchtower": "true"},
-							}),
+							},
+						),
 						mockActions.CreateMockContainerWithConfig(
 							"new",
 							"/watchtower",
@@ -377,7 +435,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 							time.Now(),
 							&dockerContainer.Config{
 								Labels: map[string]string{"com.centurylinklabs.watchtower": "true"},
-							}),
+							},
+						),
 					},
 				},
 				false,
@@ -386,7 +445,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 
 			var cleanupImageInfos []types.RemovedImageInfo
 
-			cleanupOccurred, err := actions.RemoveExcessWatchtowerInstances(
+			cleanupOccurred, err := actions.RemoveExcessWatchtowerInstances(testLogger(),
 				context.Background(),
 				client,
 				true,
@@ -417,7 +476,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									"com.centurylinklabs.watchtower":                 "true",
 									"com.centurylinklabs.watchtower.container-chain": "previous-id",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -426,7 +486,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -467,7 +527,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									"com.centurylinklabs.watchtower":       "true",
 									"com.centurylinklabs.watchtower.scope": "prod",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -476,7 +537,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -517,7 +578,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 										"com.centurylinklabs.watchtower":       "true",
 										"com.centurylinklabs.watchtower.scope": "test-scope",
 									},
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -526,7 +588,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 					false,
 					false,
 				)
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -569,7 +631,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 										"com.centurylinklabs.watchtower":       "true",
 										"com.centurylinklabs.watchtower.scope": "container-scope",
 									},
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -579,11 +642,11 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 					false,
 				)
 				// Use a scoped filter that matches the container scope
-				scopedFilter := filters.FilterByScope(
+				scopedFilter := filters.FilterByScope(testLogger(),
 					"container-scope",
 					filters.WatchtowerContainersFilter,
 				)
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -617,7 +680,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 										"com.centurylinklabs.watchtower":       "true",
 										"com.centurylinklabs.watchtower.scope": "container-scope",
 									},
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -627,11 +691,11 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 					false,
 				)
 				// Use a scoped filter that does not match the container scope
-				scopedFilter := filters.FilterByScope(
+				scopedFilter := filters.FilterByScope(testLogger(),
 					"different-scope",
 					filters.WatchtowerContainersFilter,
 				)
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -664,7 +728,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									"com.centurylinklabs.watchtower":       "true",
 									"com.centurylinklabs.watchtower.scope": "label-scope",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -677,8 +742,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 			// and assuming the explicit scope takes precedence in filter building,
 			// but in this test, we're testing the filter directly
 			// Since the container has "label-scope", FilterByScope("label-scope") will match
-			scopedFilter := filters.FilterByScope("label-scope", filters.WatchtowerContainersFilter)
-			report, cleanupImageInfos, err := actions.Update(
+			scopedFilter := filters.FilterByScope(testLogger(), "label-scope", filters.WatchtowerContainersFilter)
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -719,7 +784,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 											"com.centurylinklabs.watchtower.scope":           "scope-a",
 											"com.centurylinklabs.watchtower.container-chain": "previous-id",
 										},
-									}),
+									},
+								),
 							},
 							Staleness: map[string]bool{
 								"watchtower": true,
@@ -729,11 +795,11 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 						false,
 					)
 					// Use scope filter that doesn't match the container's scope
-					scopedFilter := filters.FilterByScope(
+					scopedFilter := filters.FilterByScope(testLogger(),
 						"scope-b",
 						filters.WatchtowerContainersFilter,
 					)
-					report, cleanupImageInfos, err := actions.Update(
+					report, cleanupImageInfos, err := actions.Update(testLogger(),
 						context.Background(),
 						client,
 						types.UpdateParams{
@@ -770,7 +836,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 											"com.centurylinklabs.watchtower.scope":           "scope-a",
 											"com.centurylinklabs.watchtower.container-chain": "previous-id-scope-b",
 										},
-									}),
+									},
+								),
 								// Previous container in scope-b
 								mockActions.CreateMockContainerWithConfig(
 									"previous-id-scope-b",
@@ -784,7 +851,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 											"com.centurylinklabs.watchtower":       "true",
 											"com.centurylinklabs.watchtower.scope": "scope-b",
 										},
-									}),
+									},
+								),
 							},
 							Staleness: map[string]bool{
 								"watchtower-a": true,
@@ -794,11 +862,11 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 						false,
 					)
 					// Filter for scope-a only
-					scopedFilter := filters.FilterByScope(
+					scopedFilter := filters.FilterByScope(testLogger(),
 						"scope-a",
 						filters.WatchtowerContainersFilter,
 					)
-					report, cleanupImageInfos, err := actions.Update(
+					report, cleanupImageInfos, err := actions.Update(testLogger(),
 						context.Background(),
 						client,
 						types.UpdateParams{
@@ -844,7 +912,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 											"com.centurylinklabs.watchtower.scope":           "scope-c",
 											"com.centurylinklabs.watchtower.container-chain": "id-scope-a,id-scope-b",
 										},
-									}),
+									},
+								),
 							},
 							Staleness: map[string]bool{
 								"watchtower-c": true,
@@ -854,11 +923,11 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 						false,
 					)
 					// Filter for scope-c only
-					scopedFilter := filters.FilterByScope(
+					scopedFilter := filters.FilterByScope(testLogger(),
 						"scope-c",
 						filters.WatchtowerContainersFilter,
 					)
-					report, cleanupImageInfos, err := actions.Update(
+					report, cleanupImageInfos, err := actions.Update(testLogger(),
 						context.Background(),
 						client,
 						types.UpdateParams{
@@ -899,7 +968,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 										"com.centurylinklabs.watchtower.scope":           "scope-x",
 										"com.centurylinklabs.watchtower.container-chain": "id-scope-y", // Different scope
 									},
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower-invalid": true,
@@ -909,8 +979,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 					false,
 				)
 				// Filter for scope-x
-				scopedFilter := filters.FilterByScope("scope-x", filters.WatchtowerContainersFilter)
-				report, cleanupImageInfos, err := actions.Update(
+				scopedFilter := filters.FilterByScope(testLogger(), "scope-x", filters.WatchtowerContainersFilter)
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -953,7 +1023,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									Labels: map[string]string{
 										"com.centurylinklabs.watchtower": "true",
 									},
-								}),
+								},
+							),
 							mockActions.CreateMockContainerWithConfig(
 								"regular",
 								"/regular",
@@ -964,7 +1035,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 								&dockerContainer.Config{
 									Image:  "nginx:latest",
 									Labels: make(map[string]string),
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -974,7 +1046,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 					false,
 					false,
 				)
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -1011,7 +1083,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 								Labels: map[string]string{
 									"com.centurylinklabs.watchtower": "true",
 								},
-							}),
+							},
+						),
 					},
 					Staleness: map[string]bool{
 						"watchtower": true,
@@ -1020,7 +1093,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				false,
 				false,
 			)
-			report, cleanupImageInfos, err := actions.Update(
+			report, cleanupImageInfos, err := actions.Update(testLogger(),
 				context.Background(),
 				client,
 				types.UpdateParams{
@@ -1058,7 +1131,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									Labels: map[string]string{
 										"com.centurylinklabs.watchtower": "true",
 									},
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -1070,7 +1144,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 				// Simulate pull failure by setting an error on IsContainerStale
 				client.TestData.IsContainerStaleError = errors.New("failed to pull image")
 
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -1111,7 +1185,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									Labels: map[string]string{
 										"com.centurylinklabs.watchtower": "true",
 									},
-								}),
+								},
+							),
 							mockActions.CreateMockContainerWithConfig(
 								"regular",
 								"/regular",
@@ -1122,7 +1197,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 								&dockerContainer.Config{
 									Image:  "nginx:latest",
 									Labels: make(map[string]string),
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -1132,7 +1208,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 					false,
 					false,
 				)
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -1174,7 +1250,8 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 									Labels: map[string]string{
 										"com.centurylinklabs.watchtower": "true",
 									},
-								}),
+								},
+							),
 						},
 						Staleness: map[string]bool{
 							"watchtower": true,
@@ -1188,7 +1265,7 @@ var _ = ginkgo.Describe("Watchtower container handling", func() {
 
 				// Note: PullFailureDelay is tested via synctest in TestSafeguardDelay
 				// This test verifies that the staleness check is called and fails
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{
@@ -1229,7 +1306,8 @@ func TestSafeguardDelay(t *testing.T) {
 							Labels: map[string]string{
 								"com.centurylinklabs.watchtower": "true",
 							},
-						}),
+						},
+					),
 				},
 				Staleness: map[string]bool{
 					"watchtower": true, // Simulate stale Watchtower
@@ -1242,7 +1320,7 @@ func TestSafeguardDelay(t *testing.T) {
 		// Mock IsContainerStale to return an error (simulating pull failure)
 		client.TestData.IsContainerStaleError = errors.New("failed to pull image")
 
-		report, cleanupImageInfos, err := actions.Update(
+		report, cleanupImageInfos, err := actions.Update(testLogger(),
 			context.Background(),
 			client,
 			types.UpdateParams{
@@ -1290,7 +1368,8 @@ func TestPullFailureDelayContextCancellation(t *testing.T) {
 							Labels: map[string]string{
 								"com.centurylinklabs.watchtower": "true",
 							},
-						}),
+						},
+					),
 				},
 				Staleness: map[string]bool{
 					"watchtower": true, // Simulate stale Watchtower
@@ -1314,7 +1393,7 @@ func TestPullFailureDelayContextCancellation(t *testing.T) {
 		go func() {
 			defer close(done)
 
-			report, cleanupImageInfos, err = actions.Update(
+			report, cleanupImageInfos, err = actions.Update(testLogger(),
 				ctx,
 				client,
 				types.UpdateParams{

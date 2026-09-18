@@ -26,4 +26,7 @@ type UpdateParams struct {
 	SkipSelfUpdate      bool          `json:"skip_self_update"`       // Skip Watchtower self-update if true.
 	EphemeralSelfUpdate bool          `json:"ephemeral_self_update"`  // Use ephemeral container for self-update if true.
 	CooldownDelay       time.Duration `json:"cooldown_delay"`         // Minimum time since image creation before allowing updates.
+	LabelEnable         bool          `json:"label_enable"`           // Require enable label for monitoring.
+	DiskSpaceMax        int64         `json:"disk_space_max"`         // Block session when Docker image usage reaches this many bytes. Zero disables the block gate.
+	DiskSpaceWarn       int64         `json:"disk_space_warn"`        // Warn when Docker image usage reaches this many bytes. Zero disables the warning.
 }

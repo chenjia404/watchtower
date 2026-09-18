@@ -26,7 +26,8 @@ var _ = ginkgo.Describe("the update action", func() {
 								"test-container-01",
 								"test-container-01",
 								"fake-image1:latest",
-								time.Now()),
+								time.Now(),
+							),
 							mockActions.CreateMockContainerWithConfig(
 								"test-container-02",
 								"/test-container-02",
@@ -38,7 +39,8 @@ var _ = ginkgo.Describe("the update action", func() {
 									Labels: map[string]string{
 										"com.centurylinklabs.watchtower.monitor-only": "true",
 									},
-								}),
+								},
+							),
 						},
 					},
 					false,
@@ -48,7 +50,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					"test-container-01": true,
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{Cleanup: true, CPUCopyMode: "auto"},
@@ -72,12 +74,14 @@ var _ = ginkgo.Describe("the update action", func() {
 								"test-container-01",
 								"test-container-01",
 								"fake-image:latest",
-								time.Now()),
+								time.Now(),
+							),
 							mockActions.CreateMockContainer(
 								"test-container-02",
 								"test-container-02",
 								"fake-image:latest",
-								time.Now()),
+								time.Now(),
+							),
 						},
 					},
 					false,
@@ -87,7 +91,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					"test-container-01": true,
 					"test-container-02": true,
 				}
-				report, cleanupImageInfos, err := actions.Update(
+				report, cleanupImageInfos, err := actions.Update(testLogger(),
 					context.Background(),
 					client,
 					types.UpdateParams{Cleanup: true, MonitorOnly: true, CPUCopyMode: "auto"},
@@ -115,7 +119,8 @@ var _ = ginkgo.Describe("the update action", func() {
 										Labels: map[string]string{
 											"com.centurylinklabs.watchtower.monitor-only": "false",
 										},
-									}),
+									},
+								),
 							},
 						},
 						false,
@@ -124,7 +129,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					client.TestData.Staleness = map[string]bool{
 						"test-container-02": true,
 					}
-					report, cleanupImageInfos, err := actions.Update(
+					report, cleanupImageInfos, err := actions.Update(testLogger(),
 						context.Background(),
 						client,
 						types.UpdateParams{
@@ -160,7 +165,8 @@ var _ = ginkgo.Describe("the update action", func() {
 											Labels: map[string]string{
 												"com.centurylinklabs.watchtower.monitor-only": "true",
 											},
-										}),
+										},
+									),
 								},
 							},
 							false,
@@ -169,7 +175,7 @@ var _ = ginkgo.Describe("the update action", func() {
 						client.TestData.Staleness = map[string]bool{
 							"test-container-02": true,
 						}
-						report, cleanupImageInfos, err := actions.Update(
+						report, cleanupImageInfos, err := actions.Update(testLogger(),
 							context.Background(),
 							client,
 							types.UpdateParams{
@@ -195,7 +201,8 @@ var _ = ginkgo.Describe("the update action", func() {
 									"test-container-01",
 									"test-container-01",
 									"fake-image:latest",
-									time.Now()),
+									time.Now(),
+								),
 							},
 						},
 						false,
@@ -204,7 +211,7 @@ var _ = ginkgo.Describe("the update action", func() {
 					client.TestData.Staleness = map[string]bool{
 						"test-container-01": true,
 					}
-					report, cleanupImageInfos, err := actions.Update(
+					report, cleanupImageInfos, err := actions.Update(testLogger(),
 						context.Background(),
 						client,
 						types.UpdateParams{

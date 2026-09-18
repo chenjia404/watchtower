@@ -6,11 +6,12 @@ import (
 	"fmt"
 
 	"github.com/distribution/reference"
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
 
 	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/pkg/registry/auth"
+	"github.com/nicholas-fedor/watchtower/pkg/registry/hosts"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
@@ -30,43 +31,41 @@ var (
 // Returns:
 //   - image.PullOptions: Configured pull options if successful.
 //   - error: Non-nil if auth retrieval fails, nil on success.
-func GetPullOptions(imageName string) (dockerClient.ImagePullOptions, error) {
-	// Set up logging fields for consistent tracking.
-	fields := logrus.Fields{
-		"image": imageName,
-	}
+func GetPullOptions(log *zerolog.Logger, imageName string) (dockerClient.ImagePullOptions, error) {
+	clogVal := log.With().Str("image", imageName).Logger()
+	clog := &clogVal
 
-	logrus.WithFields(fields).Debug("Retrieving pull options")
+	clog.Debug().Msg("Retrieving pull options")
 
-	// Fetch encoded registry credentials for the image.
-	registryCredentials, err := EncodedAuth(imageName)
+	registryCredentials, err := EncodedAuth(log, imageName)
 	if err != nil {
-		logrus.WithError(err).WithFields(fields).Debug("Failed to get authentication credentials")
+		clog.Debug().
+			Err(err).
+			Msg("Failed to get authentication credentials")
 
 		return dockerClient.ImagePullOptions{}, fmt.Errorf("%w: %w", errFailedGetAuth, err)
 	}
 
-	// Return empty options if no auth is available.
 	if registryCredentials == "" {
-		logrus.WithFields(fields).Debug("No authentication credentials retrieved")
+		clog.Debug().Msg("No authentication credentials retrieved")
 
 		return dockerClient.ImagePullOptions{}, nil
 	}
 
-	// Log auth details only in trace mode to protect sensitive data.
-	if logrus.GetLevel() == logrus.TraceLevel {
-		logrus.WithFields(fields).WithFields(logrus.Fields{
-			"auth": registryCredentials,
-		}).Trace("Retrieved authentication credentials")
+	if clog.GetLevel() == zerolog.TraceLevel {
+		clog.Trace().
+			Bool("has_credentials", true).
+			Msg("Retrieved authentication credentials")
 	}
 
-	// Configure pull options with auth and a default privilege handler.
 	pullOptions := dockerClient.ImagePullOptions{
-		RegistryAuth:  registryCredentials,
-		PrivilegeFunc: DefaultAuthHandler,
+		RegistryAuth: registryCredentials,
+		PrivilegeFunc: func(ctx context.Context) (string, error) {
+			return DefaultAuthHandler(log, ctx)
+		},
 	}
 
-	logrus.WithFields(fields).Debug("Configured pull options")
+	clog.Debug().Msg("Configured pull options")
 
 	return pullOptions, nil
 }
@@ -81,9 +80,9 @@ func GetPullOptions(imageName string) (dockerClient.ImagePullOptions, error) {
 // Returns:
 //   - string: Empty string to indicate no new credentials.
 //   - error: Always nil, as no further action is taken.
-func DefaultAuthHandler(_ context.Context) (string, error) {
+func DefaultAuthHandler(log *zerolog.Logger, _ context.Context) (string, error) {
 	// Log the auth rejection and proceed without credentials.
-	logrus.Debug("Authentication rejected, retrying without credentials")
+	log.Debug().Msg("Authentication rejected, retrying without credentials")
 
 	return "", nil
 }
@@ -97,46 +96,42 @@ func DefaultAuthHandler(_ context.Context) (string, error) {
 //
 // Returns:
 //   - bool: True if a warning is warranted, false otherwise.
-func WarnOnAPIConsumption(container types.Container) bool {
-	// Set up logging fields for tracking.
-	fields := logrus.Fields{
-		"container": container.Name(),
-		"image":     container.ImageName(),
-	}
+func WarnOnAPIConsumption(log *zerolog.Logger, container types.Container) bool {
+	clogVal := log.With().
+		Str("container", container.Name()).
+		Str("image", container.ImageName()).
+		Logger()
+	clog := &clogVal
 
-	// Parse the image name into a normalized reference.
 	normalizedRef, err := reference.ParseNormalizedNamed(container.ImageName())
 	if err != nil {
-		logrus.WithError(err).
-			WithFields(fields).
-			Debug("Failed to parse image reference, assuming API consumption")
+		clog.Debug().
+			Err(err).
+			Msg("Failed to parse image reference, assuming API consumption")
 
 		return true
 	}
 
-	// Extract the registry host from the reference.
-	containerHost, err := auth.GetRegistryAddress(normalizedRef.Name())
+	containerHost, err := auth.GetRegistryAddress(log, normalizedRef.Name())
 	if err != nil {
-		logrus.WithError(err).
-			WithFields(fields).
-			Debug("Failed to get registry address, assuming API consumption")
+		clog.Debug().
+			Err(err).
+			Msg("Failed to get registry address, assuming API consumption")
 
 		return true
 	}
 
-	// Check if the registry is known to support HEAD requests.
-	if containerHost == auth.DockerRegistryHost || containerHost == auth.GitHubRegistryDomain {
-		logrus.WithFields(fields).WithFields(logrus.Fields{
-			"host": containerHost,
-		}).Debug("Registry supports HEAD requests, warning on API consumption")
+	if containerHost == hosts.DockerRegistryHost || containerHost == hosts.GitHubRegistryDomain {
+		clog.Debug().
+			Str("host", containerHost).
+			Msg("Registry supports HEAD requests, warning on API consumption")
 
 		return true
 	}
 
-	// No warning if registry behavior is unknown.
-	logrus.WithFields(fields).WithFields(logrus.Fields{
-		"host": containerHost,
-	}).Debug("Registry behavior unknown, no API consumption warning")
+	clog.Debug().
+		Str("host", containerHost).
+		Msg("Registry behavior unknown, no API consumption warning")
 
 	return false
 }

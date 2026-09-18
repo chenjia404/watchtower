@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"github.com/rs/zerolog"
 
 	dockerContainer "github.com/moby/moby/api/types/container"
 	dockerNetwork "github.com/moby/moby/api/types/network"
@@ -29,6 +29,8 @@ const (
 	orchestratorOriginalNameEnv = "WT_ORCHESTRATOR_ORIGINAL_NAME"
 	// orchestratorContainerChainEnv is the environment variable key for the container chain label.
 	orchestratorContainerChainEnv = "WT_ORCHESTRATOR_CONTAINER_CHAIN"
+	// orchestratorCleanupEnv is the environment variable key for old-image cleanup.
+	orchestratorCleanupEnv = "WT_ORCHESTRATOR_CLEANUP"
 	// orchestratorCleanupTimeout is the timeout for cleanup operations on failed orchestrator creation.
 	orchestratorCleanupTimeout = 5 * time.Second
 )
@@ -105,6 +107,7 @@ type DockerConnectionConfig struct {
 //   - sourceContainer: Current Watchtower container being replaced.
 //   - newImage: Image reference for the new Watchtower container.
 //   - containerChain: Container chain label for lineage tracking.
+//   - cleanup: When true, the orchestrator removes the old image after handoff.
 //
 // Returns:
 //   - types.ContainerID: ID of the ephemeral orchestrator container.
@@ -114,29 +117,31 @@ func (c *client) CreateEphemeralOrchestrator(
 	sourceContainer types.Container,
 	newImage string,
 	containerChain string,
+	cleanup bool,
 ) (types.ContainerID, error) {
-	clog := logrus.WithFields(logrus.Fields{
-		"source_container": sourceContainer.Name(),
-		"source_id":        sourceContainer.ID().ShortID(),
-		"new_image":        newImage,
-	})
+	clogVal := c.log.With().
+		Str("source_container", sourceContainer.Name()).
+		Str("source_id", sourceContainer.ID().ShortID()).
+		Str("new_image", newImage).
+		Logger()
+	clog := &clogVal
 
-	clog.Debug("Creating ephemeral orchestrator for self-update")
+	clog.Debug().Msg("Creating ephemeral orchestrator for self-update")
 
 	// Extract the Docker connection configuration from the source container.
 	// This ensures the orchestrator uses the same connection method as the source,
 	// supporting local sockets, named pipes, remote TCP/TLS, and socket proxies.
-	connConfig := extractDockerConnectionConfig(sourceContainer)
+	connConfig := extractDockerConnectionConfig(sourceContainer, clog)
 
-	clog.WithFields(logrus.Fields{
-		"docker_host": connConfig.Host,
-		"is_local":    connConfig.IsLocal,
-		"tls_verify":  connConfig.TLSVerify != "",
-		"api_version": connConfig.APIVersion,
-	}).Debug("Extracted Docker connection configuration")
+	clog.Debug().
+		Str("docker_host", connConfig.Host).
+		Bool("is_local", connConfig.IsLocal).
+		Bool("tls_verify", connConfig.TLSVerify != "").
+		Str("api_version", connConfig.APIVersion).
+		Msg("Extracted Docker connection configuration")
 
 	// Build the orchestrator container configuration with Docker env vars.
-	config := buildOrchestratorConfig(sourceContainer, newImage, containerChain, connConfig)
+	config := buildOrchestratorConfig(sourceContainer, newImage, containerChain, connConfig, cleanup)
 
 	// Build the host configuration with appropriate socket/TLS mounts.
 	// The orchestrator inherits the source container's NetworkMode to ensure
@@ -148,8 +153,9 @@ func (c *client) CreateEphemeralOrchestrator(
 	// potential collisions from the 12-character truncation.
 	orchestratorName := "watchtower-orchestrator-" + string(sourceContainer.ID())
 
-	clog.WithField("orchestrator_name", orchestratorName).
-		Debug("Creating ephemeral orchestrator container")
+	clog.Debug().
+		Str("orchestrator_name", orchestratorName).
+		Msg("Creating ephemeral orchestrator container")
 
 	// Create the container without specifying a platform.
 	resp, err := c.api.ContainerCreate(
@@ -162,15 +168,18 @@ func (c *client) CreateEphemeralOrchestrator(
 		},
 	)
 	if err != nil {
-		clog.WithError(err).Error("Failed to create ephemeral orchestrator container")
+		clog.Error().
+			Err(err).
+			Msg("Failed to create ephemeral orchestrator container")
 
 		return "", fmt.Errorf("%w: %w", ErrEphemeralCreateFailed, err)
 	}
 
 	orchestratorID := types.ContainerID(resp.ID)
 
-	clog.WithField("orchestrator_id", orchestratorID.ShortID()).
-		Debug("Created ephemeral orchestrator container")
+	clog.Debug().
+		Str("orchestrator_id", orchestratorID.ShortID()).
+		Msg("Created ephemeral orchestrator container")
 
 	// Start the orchestrator container.
 	_, err = c.api.ContainerStart(
@@ -179,7 +188,9 @@ func (c *client) CreateEphemeralOrchestrator(
 		dockerClient.ContainerStartOptions{},
 	)
 	if err != nil {
-		clog.WithError(err).Error("Failed to start ephemeral orchestrator container")
+		clog.Error().
+			Err(err).
+			Msg("Failed to start ephemeral orchestrator container")
 
 		// Attempt cleanup of the created but not-started container.
 		// Use a fresh context so cleanup can proceed even if the original ctx is cancelled.
@@ -196,15 +207,17 @@ func (c *client) CreateEphemeralOrchestrator(
 			dockerClient.ContainerRemoveOptions{Force: true},
 		)
 		if cleanupErr != nil {
-			clog.WithError(cleanupErr).
-				Warn("Failed to clean up ephemeral orchestrator after start failure")
+			clog.Warn().
+				Err(cleanupErr).
+				Msg("Failed to clean up ephemeral orchestrator after start failure")
 		}
 
 		return "", fmt.Errorf("%w: %w", ErrEphemeralStartFailed, err)
 	}
 
-	clog.WithField("orchestrator_id", orchestratorID.ShortID()).
-		Debug("Started ephemeral orchestrator for self-update")
+	clog.Debug().
+		Str("orchestrator_id", orchestratorID.ShortID()).
+		Msg("Started ephemeral orchestrator for self-update")
 
 	return orchestratorID, nil
 }
@@ -226,6 +239,7 @@ func (c *client) CreateEphemeralOrchestrator(
 //   - newImage: Image reference for the new container.
 //   - containerChain: Container chain label for lineage tracking.
 //   - connConfig: Docker connection configuration extracted from the source container.
+//   - cleanup: When true, the orchestrator removes the old image after handoff.
 //
 // Returns:
 //   - *dockerContainer.Config: The container configuration.
@@ -234,6 +248,7 @@ func buildOrchestratorConfig(
 	newImage string,
 	containerChain string,
 	connConfig *DockerConnectionConfig,
+	cleanup bool,
 ) *dockerContainer.Config {
 	// Build the environment variables with orchestrator-specific values.
 	env := []string{
@@ -241,6 +256,7 @@ func buildOrchestratorConfig(
 		fmt.Sprintf("%s=%s", orchestratorNewImageEnv, newImage),
 		fmt.Sprintf("%s=%s", orchestratorOriginalNameEnv, sourceContainer.Name()),
 		fmt.Sprintf("%s=%s", orchestratorContainerChainEnv, containerChain),
+		fmt.Sprintf("%s=%t", orchestratorCleanupEnv, cleanup),
 	}
 
 	// Forward Docker connection environment variables to maintain parity with the source.
@@ -268,7 +284,7 @@ func buildOrchestratorConfig(
 //   - AutoRemove for automatic cleanup on exit
 //   - NetworkMode inherited from the source container for network parity
 //   - For local connections: Docker socket mount for container management
-//   - For remote connections: No socket mount; relies on environment variables
+//   - For remote connections: No socket mount. Relies on environment variables
 //   - For TLS connections: Certificate directory mounts when certificates are on the host
 //   - No port bindings to avoid conflicts
 //   - No restart policy (one-shot container)
@@ -302,7 +318,9 @@ func buildOrchestratorHostConfig(
 	// has the same network access as the source (e.g., host network for
 	// local Docker daemon communication, custom networks for proxy access).
 	var networkMode dockerContainer.NetworkMode
-	if containerInfo := sourceContainer.ContainerInfo(); containerInfo != nil &&
+
+	containerInfo := sourceContainer.ContainerInfo()
+	if containerInfo != nil &&
 		containerInfo.HostConfig != nil {
 		networkMode = containerInfo.HostConfig.NetworkMode
 	}
@@ -409,10 +427,11 @@ func isWindows() bool {
 //
 // Parameters:
 //   - sourceContainer: The source Watchtower container to extract configuration from.
+//   - log: Logger for isLocalDockerHost diagnostics.
 //
 // Returns:
 //   - *DockerConnectionConfig: The extracted connection configuration.
-func extractDockerConnectionConfig(sourceContainer types.Container) *DockerConnectionConfig {
+func extractDockerConnectionConfig(sourceContainer types.Container, log *zerolog.Logger) *DockerConnectionConfig {
 	config := &DockerConnectionConfig{
 		// Default to local connection with platform-appropriate socket.
 		IsLocal:    true,
@@ -421,7 +440,9 @@ func extractDockerConnectionConfig(sourceContainer types.Container) *DockerConne
 
 	// Extract environment variables from the source container.
 	var containerEnv []string
-	if containerInfo := sourceContainer.ContainerInfo(); containerInfo != nil && containerInfo.Config != nil {
+
+	containerInfo := sourceContainer.ContainerInfo()
+	if containerInfo != nil && containerInfo.Config != nil {
 		containerEnv = containerInfo.Config.Env
 	}
 
@@ -446,7 +467,7 @@ func extractDockerConnectionConfig(sourceContainer types.Container) *DockerConne
 
 	// Determine connection type based on DOCKER_HOST.
 	if config.Host != "" {
-		config.IsLocal = isLocalDockerHost(config.Host)
+		config.IsLocal = isLocalDockerHost(log, config.Host)
 
 		if config.IsLocal {
 			// Local connection: extract socket path from DOCKER_HOST.
@@ -464,7 +485,9 @@ func extractDockerConnectionConfig(sourceContainer types.Container) *DockerConne
 	// This handles cases where the socket is mounted at a different path inside the container.
 	if config.IsLocal {
 		var sourceHostConfig *dockerContainer.HostConfig
-		if containerInfo := sourceContainer.ContainerInfo(); containerInfo != nil {
+
+		containerInfo := sourceContainer.ContainerInfo()
+		if containerInfo != nil {
 			sourceHostConfig = containerInfo.HostConfig
 		}
 
@@ -549,7 +572,7 @@ func defaultSocketBind() string {
 //
 // Returns:
 //   - bool: True if the connection is local, false if remote.
-func isLocalDockerHost(host string) bool {
+func isLocalDockerHost(log *zerolog.Logger, host string) bool {
 	// Check for remote connection schemes.
 	for _, scheme := range remoteDockerSchemes {
 		if strings.HasPrefix(host, scheme) {
@@ -567,7 +590,7 @@ func isLocalDockerHost(host string) bool {
 	}
 
 	// Default to local for unrecognized schemes (conservative approach).
-	logrus.Warnf("unrecognized host scheme for %q, treating as local", host)
+	log.Warn().Msgf("unrecognized host scheme for %q, treating as local", host)
 
 	return true
 }
@@ -640,7 +663,9 @@ func prepareTLSCertBinds(
 
 	// Get the source container's host config for bind mounts.
 	var sourceHostConfig *dockerContainer.HostConfig
-	if containerInfo := sourceContainer.ContainerInfo(); containerInfo != nil {
+
+	containerInfo := sourceContainer.ContainerInfo()
+	if containerInfo != nil {
 		sourceHostConfig = containerInfo.HostConfig
 	}
 
@@ -700,7 +725,8 @@ func parseBindMount(bind string) (string, string, string, bool) {
 	var sepIdx int
 
 	if len(bind) >= 2 && bind[1] == ':' {
-		// Windows drive-letter detected; find separator after drive letter.
+		// Windows drive-letter detected.
+		// Find separator after drive letter.
 		sepIdx = strings.Index(bind[2:], ":")
 		if sepIdx != -1 {
 			sepIdx += 2 // adjust for offset into bind[2:]
@@ -765,18 +791,23 @@ func containsBind(binds []string, bind string) bool {
 // Returns:
 //   - int: Number of orphaned orchestrators removed.
 //   - error: Non-nil if listing or removal fails, nil on success.
-func RemoveOrphanedOrchestrators(
+func RemoveOrphanedOrchestrators(log *zerolog.Logger,
 	ctx context.Context,
 	client Client,
 ) (int, error) {
-	clog := logrus.WithField("function", "RemoveOrphanedOrchestrators")
+	clogVal := log.With().
+		Str("function", "RemoveOrphanedOrchestrators").
+		Logger()
+	clog := &clogVal
 
-	clog.Debug("Checking for orphaned ephemeral orchestrator containers")
+	clog.Debug().Msg("Checking for orphaned ephemeral orchestrator containers")
 
 	// List all containers to find orphaned orchestrators.
 	allContainers, err := client.ListContainers(ctx)
 	if err != nil {
-		clog.WithError(err).Error("Failed to list containers for orchestrator cleanup")
+		clog.Error().
+			Err(err).
+			Msg("Failed to list containers for orchestrator cleanup")
 
 		return 0, fmt.Errorf("failed to list containers: %w", err)
 	}
@@ -794,17 +825,18 @@ func RemoveOrphanedOrchestrators(
 			continue
 		}
 
-		clog.WithFields(logrus.Fields{
-			"container": c.Name(),
-			"id":        c.ID().ShortID(),
-		}).Info("Removing orphaned ephemeral orchestrator container")
+		clog.Info().
+			Str("container", c.Name()).
+			Str("id", c.ID().ShortID()).
+			Msg("Removing orphaned ephemeral orchestrator container")
 
 		err := client.StopAndRemoveContainer(ctx, c, 0)
 		if err != nil {
-			clog.WithError(err).WithFields(logrus.Fields{
-				"container": c.Name(),
-				"id":        c.ID().ShortID(),
-			}).Warn("Failed to remove orphaned orchestrator container")
+			clog.Warn().
+				Err(err).
+				Str("container", c.Name()).
+				Str("id", c.ID().ShortID()).
+				Msg("Failed to remove orphaned orchestrator container")
 
 			continue
 		}
@@ -813,10 +845,11 @@ func RemoveOrphanedOrchestrators(
 	}
 
 	if removed > 0 {
-		clog.WithField("count", removed).
-			Info("Removed orphaned ephemeral orchestrator containers")
+		clog.Info().
+			Int("count", removed).
+			Msg("Removed orphaned ephemeral orchestrator containers")
 	} else {
-		clog.Debug("No orphaned ephemeral orchestrator containers found")
+		clog.Debug().Msg("No orphaned ephemeral orchestrator containers found")
 	}
 
 	return removed, nil

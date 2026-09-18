@@ -9,6 +9,7 @@ on:
       - cmd/**
       - internal/**
       - pkg/**
+      - tools/tplprev/**
       - go.mod
       - go.sum
       - main.go
@@ -29,7 +30,7 @@ jobs:
           - ubuntu-latest
     steps:
       - name: Harden the Runner (Step Security)
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
@@ -53,7 +54,10 @@ jobs:
         run: |
           go test -timeout 60s -v -coverprofile="coverage.out" -covermode atomic ./...
 
+      - name: Run tplprev Tests
+        run: go -C tools/tplprev test -timeout 60s -v ./...
+
       - name: Upload Coverage Report to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

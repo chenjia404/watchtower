@@ -5,18 +5,20 @@
 //   - age: Fetches image creation time from registry config blobs for cooldown support.
 //   - auth: Manages registry authentication (token fetching, challenge handling).
 //   - digest: Retrieves and compares image digests via HTTP requests.
+//   - ratelimit: Parses registry 429 responses and retries them with backoff.
+//   - hosts: Canonical registry domain names (GHCR, LSCR, Docker Hub).
 //   - helpers: Utilities for registry address parsing and digest normalization.
 //   - manifest: Constructs manifest URLs for digest fetching.
 //   - registry: Configures pull options, API consumption checks, and image age fetching.
 //
 // Usage example:
 //
-//	opts, err := registry.GetPullOptions("docker.io/library/alpine")
+//	opts, err := registry.GetPullOptions(log, "docker.io/library/alpine")
 //	if err != nil {
-//	    logrus.WithError(err).Error("Failed to get pull options")
+//	    log.Error().Err(err).Msg("Failed to get pull options")
 //	}
-//	digest, err := digest.FetchDigest(ctx, container, opts.RegistryAuth)
+//	digest, err := digest.FetchDigest(log, ctx, container, opts.RegistryAuth)
 //
 // The package integrates with Docker's registry API, supports credential fetching from config files
-// or environment variables, and uses logrus for logging operations.
+// or environment variables, and uses zerolog for logging operations.
 package registry

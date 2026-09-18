@@ -11,12 +11,12 @@ import (
 	"testing"
 
 	"github.com/distribution/reference"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	mockAuth "github.com/nicholas-fedor/watchtower/pkg/registry/auth/mocks"
+	"github.com/nicholas-fedor/watchtower/pkg/registry/ratelimit"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
 )
@@ -46,7 +46,7 @@ func Test_resolveChallengeScheme(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveChallengeScheme(tt.host)
+			got := resolveChallengeScheme(testLog(), tt.host)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -180,7 +180,7 @@ func TestGetChallengeURL(t *testing.T) {
 				return
 			}
 
-			got := GetChallengeURL(ref, tt.endpoint)
+			got := GetChallengeURL(testLog(), ref, tt.endpoint)
 			if tt.wantErr {
 				assert.Empty(t, got.Host)
 
@@ -219,7 +219,7 @@ func TestGetChallengeRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GetChallengeRequest(context.Background(), tt.url)
+			got, err := GetChallengeRequest(testLog(), context.Background(), tt.url)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -308,8 +308,7 @@ func Test_handleEmptyAuthHeader(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := processChallengeResponse(
-				ctx,
+			_, err := processChallengeResponse(testLog(), ctx,
 				mockContainer,
 				tt.registryAuth,
 				mockClient,
@@ -318,7 +317,6 @@ func Test_handleEmptyAuthHeader(t *testing.T) {
 				"",
 				"",
 				"",
-				logrus.Fields{},
 				tt.response,
 			)
 			if tt.wantErr != nil {
@@ -337,7 +335,6 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 	tests := []struct {
 		name           string
 		registryAuth   string
-		fields         logrus.Fields
 		redirected     bool
 		redirectHost   string
 		originalHost   string
@@ -350,7 +347,6 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 		{
 			name:         "valid registry auth returns token result",
 			registryAuth: "dGVzdA==",
-			fields:       logrus.Fields{},
 			redirected:   false,
 			redirectHost: "",
 			originalHost: "registry.example.com",
@@ -365,7 +361,6 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 		{
 			name:         "empty registry auth returns error",
 			registryAuth: "",
-			fields:       logrus.Fields{},
 			redirected:   false,
 			redirectHost: "",
 			originalHost: "registry.example.com",
@@ -375,7 +370,6 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 		{
 			name:         "cross-origin redirect returns error",
 			registryAuth: "dGVzdA==",
-			fields:       logrus.Fields{},
 			redirected:   true,
 			redirectHost: "evil.example.com",
 			originalHost: "registry.example.com",
@@ -385,7 +379,6 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 		{
 			name:           "same-host https redirect returns token result",
 			registryAuth:   "dGVzdA==",
-			fields:         logrus.Fields{},
 			redirected:     true,
 			redirectHost:   "registry.example.com",
 			originalHost:   "registry.example.com",
@@ -402,7 +395,6 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 		{
 			name:           "same-host https to http downgrade returns error",
 			registryAuth:   "dGVzdA==",
-			fields:         logrus.Fields{},
 			redirected:     true,
 			redirectHost:   "registry.example.com",
 			originalHost:   "registry.example.com",
@@ -416,7 +408,7 @@ func Test_handleBasicAuthChallenge(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := handleBasicAuthChallenge(tt.registryAuth, tt.fields, tt.redirected, tt.redirectHost, tt.originalHost, tt.originalScheme, tt.redirectScheme)
+			got, err := handleBasicAuthChallenge(testLog(), tt.registryAuth, tt.redirected, tt.redirectHost, tt.originalHost, tt.originalScheme, tt.redirectScheme)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -437,26 +429,23 @@ func Test_handleUnsupportedChallenge(t *testing.T) {
 	tests := []struct {
 		name      string
 		challenge string
-		fields    logrus.Fields
 		wantErr   bool
 	}{
 		{
 			name:      "basic challenge returns error",
 			challenge: "basic realm=\"test\"",
-			fields:    logrus.Fields{},
 			wantErr:   true,
 		},
 		{
 			name:      "empty challenge returns error",
 			challenge: "",
-			fields:    logrus.Fields{},
 			wantErr:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := handleUnsupportedChallenge(tt.challenge, tt.fields)
+			_, err := handleUnsupportedChallenge(testLog(), tt.challenge)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errUnsupportedChallenge)
 		})
@@ -578,11 +567,9 @@ func Test_processChallengeResponse(t *testing.T) {
 			mockContainer.On("IsNoPull", mock.Anything).Return(false).Maybe()
 			mockContainer.On("IsStale").Return(false).Maybe()
 
-			fields := logrus.Fields{"image": "test/image"}
 			ctx := context.Background()
 
-			got, err := processChallengeResponse(
-				ctx,
+			got, err := processChallengeResponse(testLog(), ctx,
 				mockContainer,
 				tt.registryAuth,
 				mockClient,
@@ -591,7 +578,6 @@ func Test_processChallengeResponse(t *testing.T) {
 				tt.originalHost,
 				tt.originalScheme,
 				tt.redirectScheme,
-				fields,
 				tt.response,
 			)
 			if tt.wantErr {
@@ -677,10 +663,9 @@ func Test_handleBearerAuth(t *testing.T) {
 			mockContainer.On("IsNoPull", mock.Anything).Return(false).Maybe()
 			mockContainer.On("IsStale").Return(false).Maybe()
 
-			fields := logrus.Fields{"image": "test/image"}
 			ctx := context.Background()
 
-			got, err := handleBearerAuth(ctx, tt.wwwAuthHeader, mockContainer, tt.registryAuth, mockClient, false, "", fields)
+			got, err := handleBearerAuth(testLog(), ctx, tt.wwwAuthHeader, mockContainer, tt.registryAuth, mockClient, false, "")
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -789,6 +774,26 @@ func TestGetToken(t *testing.T) {
 			wantErr:     true,
 			errContains: "failed to execute challenge request",
 		},
+		{
+			name:         "challenge 429 returns rate-limit error",
+			container:    newRemoteContainer(t),
+			registryAuth: "",
+			endpoint:     "",
+			setupMock: func(mockClient *mockAuth.MockClient) {
+				challengeURL, _ := url.Parse("https://index.docker.io/v2/")
+				mockClient.On("Do", mock.Anything).Return(&http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body: io.NopCloser(strings.NewReader(
+						"toomanyrequests: retry-after: 331.163µs, allowed: 44000/minute",
+					)),
+					Header:  http.Header{"Retry-After": []string{"7200"}},
+					Request: &http.Request{URL: challengeURL},
+				}, nil).Once()
+			},
+			want:        TokenResult{},
+			wantErr:     true,
+			errContains: "registry rate limited",
+		},
 	}
 
 	for _, tt := range tests {
@@ -800,7 +805,7 @@ func TestGetToken(t *testing.T) {
 
 			ctx := context.Background()
 
-			got, err := GetToken(ctx, tt.container, tt.registryAuth, mockClient, tt.endpoint)
+			got, err := GetToken(testLog(), ctx, tt.container, tt.registryAuth, mockClient, tt.endpoint)
 			if tt.wantErr {
 				assert.Error(t, err)
 
@@ -808,11 +813,111 @@ func TestGetToken(t *testing.T) {
 					assert.Contains(t, err.Error(), tt.errContains)
 				}
 
+				if tt.errContains == "registry rate limited" {
+					require.ErrorIs(t, err, ratelimit.ErrRateLimited)
+				}
+
 				return
 			}
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestGetToken_anonymousGHCRSkipsChallengeOnCachedToken(t *testing.T) {
+	seedAnonymousGHCRToken(t)
+
+	mockClient := mockAuth.NewMockClient(t)
+	got, err := GetToken(testLog(), context.Background(), newGHCRContainer(t), "", mockClient, "")
+	require.NoError(t, err)
+	assert.Equal(t, TokenResult{
+		Token:         testAnonymousGHCRToken,
+		ChallengeHost: "ghcr.io",
+	}, got)
+}
+
+func TestGetToken_anonymousLSCRSkipsChallengeOnCachedToken(t *testing.T) {
+	seedAnonymousGHCRToken(t)
+
+	mockClient := mockAuth.NewMockClient(t)
+	got, err := GetToken(testLog(), context.Background(), newLSCRContainer(t), "", mockClient, "")
+	require.NoError(t, err)
+	assert.Equal(t, TokenResult{
+		Token:         testAnonymousGHCRToken,
+		ChallengeHost: "ghcr.io",
+	}, got)
+}
+
+func TestGetToken_anonymousGHCRChallengesWhenCacheEmpty(t *testing.T) {
+	resetTokenCache(t)
+
+	mockClient := mockAuth.NewMockClient(t)
+	challengeURL, err := url.Parse("https://ghcr.io/v2/")
+	require.NoError(t, err)
+
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Body:       http.NoBody,
+		Header:     http.Header{"Www-Authenticate": []string{`Bearer realm="https://ghcr.io/token",service="ghcr.io"`}},
+		Request:    &http.Request{URL: challengeURL},
+	}, nil).Once()
+	mockClient.On("Do", mock.Anything).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"token":"fresh-ghcr-token","expires_in":3600}`)),
+		Header:     make(http.Header),
+		Request:    &http.Request{URL: mustParseURL("https://ghcr.io/token")},
+	}, nil).Once()
+
+	got, err := GetToken(testLog(), context.Background(), newGHCRContainer(t), "", mockClient, "")
+	require.NoError(t, err)
+	assert.Equal(t, TokenResult{
+		Token:         "Bearer fresh-ghcr-token",
+		ChallengeHost: "ghcr.io",
+	}, got)
+}
+
+func TestGetToken_anonymousGHCRDoesNotSkipMirrorOrCredentials(t *testing.T) {
+	seedAnonymousGHCRToken(t)
+
+	tests := []struct {
+		name         string
+		registryAuth string
+		endpoint     string
+		challengeURL string
+	}{
+		{
+			name:         "credentials still challenge",
+			registryAuth: "dXNlcjpwYXNz",
+			challengeURL: "https://ghcr.io/v2/",
+		},
+		{
+			name:         "mirror endpoint still challenge",
+			endpoint:     "https://mirror.example.com",
+			challengeURL: "https://mirror.example.com/v2/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := mockAuth.NewMockClient(t)
+			challengeURL, err := url.Parse(tt.challengeURL)
+			require.NoError(t, err)
+
+			mockClient.On("Do", mock.Anything).Return(&http.Response{
+				StatusCode: http.StatusOK,
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+				Request:    &http.Request{URL: challengeURL},
+			}, nil).Once()
+
+			got, err := GetToken(testLog(), context.Background(), newGHCRContainer(t), tt.registryAuth, mockClient, tt.endpoint)
+			require.NoError(t, err)
+			assert.Equal(t, TokenResult{
+				Redirected:   false,
+				RedirectHost: "",
+			}, got)
 		})
 	}
 }
@@ -846,6 +951,30 @@ func newRemoteContainer(t *testing.T) types.Container {
 
 	container := mockTypes.NewMockContainer(t)
 	container.On("ImageName").Return("test/image:latest").Maybe()
+	container.On("IsNoPull", mock.Anything).Return(false).Maybe()
+	container.On("IsStale").Return(false).Maybe()
+	container.On("IsRunning").Return(true).Maybe()
+
+	return container
+}
+
+func newGHCRContainer(t *testing.T) types.Container {
+	t.Helper()
+
+	container := mockTypes.NewMockContainer(t)
+	container.On("ImageName").Return("ghcr.io/linuxserver/sonarr:latest").Maybe()
+	container.On("IsNoPull", mock.Anything).Return(false).Maybe()
+	container.On("IsStale").Return(false).Maybe()
+	container.On("IsRunning").Return(true).Maybe()
+
+	return container
+}
+
+func newLSCRContainer(t *testing.T) types.Container {
+	t.Helper()
+
+	container := mockTypes.NewMockContainer(t)
+	container.On("ImageName").Return("lscr.io/linuxserver/sonarr:latest").Maybe()
 	container.On("IsNoPull", mock.Anything).Return(false).Maybe()
 	container.On("IsStale").Return(false).Maybe()
 	container.On("IsRunning").Return(true).Maybe()
