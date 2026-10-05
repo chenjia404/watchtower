@@ -21,6 +21,7 @@ import (
 	dockerClient "github.com/moby/moby/client"
 
 	"github.com/nicholas-fedor/watchtower/internal/flags"
+	"github.com/nicholas-fedor/watchtower/pkg/container/oci"
 	"github.com/nicholas-fedor/watchtower/pkg/registry"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
@@ -194,7 +195,7 @@ type Client interface {
 
 	// CheckContainerUpdate reports whether a newer image is available without
 	// pulling image layers. When NoPull is active it inspects the local cache
-	// only; otherwise, it compares registry digests. Cooldown is not applied.
+	// only. Otherwise, it compares registry digests. Cooldown is not applied.
 	//
 	// Parameters:
 	//   - ctx: Context for cancellation and timeout control.
@@ -211,6 +212,22 @@ type Client interface {
 		container types.Container,
 		params types.UpdateParams,
 	) (bool, types.ImageID, string, error)
+
+	// GetImageAnnotations reads the OCI annotations of an image by reference.
+	//
+	// The read is a local Docker daemon inspect, so it never counts against a
+	// registry rate limit. It resolves the new image's annotations after a pull,
+	// which the running container's inspect cannot provide. An unreadable image
+	// yields empty annotations rather than an error, because metadata must never
+	// fail a session.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control.
+	//   - imageRef: Image reference, tag or digest, to inspect.
+	//
+	// Returns:
+	//   - oci.Annotations: Annotations from the image config labels, or empty.
+	GetImageAnnotations(ctx context.Context, imageRef string) oci.Annotations
 
 	// ExecuteCommand runs a command inside a container and returns whether
 	// to skip updates based on the result.
@@ -387,6 +404,21 @@ type Client interface {
 	// Returns:
 	//   - error: Non-nil if starting fails, nil on success.
 	StartContainerByID(ctx context.Context, containerID types.ContainerID) error
+
+	// BuildRemoteImage builds an image from a Git URL context.
+	//
+	// The daemon clones the repository. Watchtower does not.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control.
+	//   - remote: Docker Git context URL (https://host/repo.git#commit[:subdir]).
+	//   - dockerfile: Dockerfile path relative to that context. Empty means Dockerfile.
+	//   - tags: Image tags to apply to the built image.
+	//
+	// Returns:
+	//   - types.ImageID: ID of the built image.
+	//   - error: Non-nil if the build fails, nil on success.
+	BuildRemoteImage(ctx context.Context, remote, dockerfile string, tags []string) (types.ImageID, error)
 }
 
 // client is the concrete implementation of the Client interface.
@@ -1215,6 +1247,20 @@ func (c *client) CheckContainerUpdate(
 	}
 
 	return available, newestImage, latestDigest, err
+}
+
+// GetImageAnnotations reads the OCI annotations of an image by reference.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeout control.
+//   - imageRef: Image reference, tag or digest, to inspect.
+//
+// Returns:
+//   - oci.Annotations: Annotations from the image config labels, or empty.
+func (c *client) GetImageAnnotations(ctx context.Context, imageRef string) oci.Annotations {
+	imgClient := newImageClient(c.api, c.logger())
+
+	return imgClient.GetImageAnnotations(ctx, imageRef)
 }
 
 // ExecuteCommand runs a command inside a container and evaluates its result.

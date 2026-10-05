@@ -12,6 +12,7 @@ import (
 	"github.com/nicholas-fedor/watchtower/internal/config/client"
 	"github.com/nicholas-fedor/watchtower/internal/config/compatibility"
 	"github.com/nicholas-fedor/watchtower/internal/config/filter"
+	"github.com/nicholas-fedor/watchtower/internal/config/git"
 	"github.com/nicholas-fedor/watchtower/internal/config/lifecycle"
 	"github.com/nicholas-fedor/watchtower/internal/config/mode"
 	"github.com/nicholas-fedor/watchtower/internal/config/update"
@@ -45,6 +46,7 @@ func TestUpdateParamsAssignsEveryField(t *testing.T) {
 			CooldownDelay:       24 * time.Hour,
 			UseComposeDependsOn: true,
 			LabelPrecedence:     true,
+			EnableChangelog:     true,
 			EphemeralSelfUpdate: true,
 			PullFailureDelay:    5 * time.Second,
 			DiskSpaceMaxBytes:   40_000_000_000,
@@ -59,6 +61,23 @@ func TestUpdateParamsAssignsEveryField(t *testing.T) {
 			Predicate:   filters.NoFilter,
 			Desc:        "all",
 			LabelEnable: true,
+		},
+		Git: git.Git{
+			Enable:          true,
+			DefaultRef:      git.DefaultRef,
+			SemverPolicy:    git.DefaultPolicy,
+			Timeout:         30 * time.Second,
+			Dockerfile:      "build/docker/Dockerfile",
+			Context:         ".",
+			ComposeStash:    true,
+			ComposeProjects: map[string]string{"demo": "/compose/demo"},
+			Images: map[string]types.GitImage{
+				"myapp:latest": {
+					Repo:   "https://github.com/org/app.git",
+					Ref:    "main",
+					Policy: types.GitPolicyMinor,
+				},
+			},
 		},
 	}
 
@@ -80,6 +99,7 @@ func TestUpdateParamsAssignsEveryField(t *testing.T) {
 	assert.True(t, params.LifecycleHooks)
 	assert.False(t, params.RollingRestart)
 	assert.True(t, params.LabelPrecedence)
+	assert.True(t, params.EnableChangelog)
 	assert.Equal(t, 5*time.Second, params.PullFailureDelay)
 	assert.Equal(t, 1000, params.LifecycleUID)
 	assert.Equal(t, 1000, params.LifecycleGID)
@@ -92,6 +112,19 @@ func TestUpdateParamsAssignsEveryField(t *testing.T) {
 	assert.Equal(t, 24*time.Hour, params.CooldownDelay)
 	assert.Equal(t, int64(40_000_000_000), params.DiskSpaceMax)
 	assert.Equal(t, int64(32_000_000_000), params.DiskSpaceWarn)
+	assert.True(t, params.EnableGitMonitoring)
+	assert.Equal(t, git.DefaultRef, params.GitDefaultRef)
+	assert.Equal(t, git.DefaultPolicy, params.GitSemverPolicy)
+	assert.Equal(t, 30*time.Second, params.GitTimeout)
+	assert.Equal(t, types.GitImage{
+		Repo:   "https://github.com/org/app.git",
+		Ref:    "main",
+		Policy: types.GitPolicyMinor,
+	}, params.GitImages["myapp:latest"])
+	assert.Equal(t, "build/docker/Dockerfile", params.GitDockerfile)
+	assert.Equal(t, ".", params.GitContext)
+	assert.True(t, params.GitComposeStash)
+	assert.Equal(t, "/compose/demo", params.ComposeProjects["demo"])
 
 	// Exhaustiveness: every exported field must be non-zero in this fixture
 	// (Filter is a func; RunOnce and SkipSelfUpdate come from overrides).

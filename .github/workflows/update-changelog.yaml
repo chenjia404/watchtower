@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
 
       - name: Generate Changelog
-        uses: orhun/git-cliff-action@3d96a18cc4ec17e9dc69ddcc424ccafaf1f78ce2 # v4.9.0
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         env:
           OUTPUT: CHANGELOG.md
           GITHUB_REPO: ${{ github.repository }}
@@ -56,7 +56,11 @@ jobs:
 
       - name: Enable auto-merge
         if: "${{ steps.create_pr.outputs.pull-request-number }}"
+        run: |
+          pr_number="${{ steps.create_pr.outputs.pull-request-number }}"
+          if ! gh pr merge --auto --squash "$pr_number"; then
+            echo "Auto-merge is unavailable; merging the clean pull request directly"
+            gh pr merge --squash "$pr_number"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PULL_REQUEST_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
-        run: gh pr merge --auto --squash "${PULL_REQUEST_NUMBER}"

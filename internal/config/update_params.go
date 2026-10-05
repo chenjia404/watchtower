@@ -33,6 +33,7 @@ func (c Config) UpdateParams(overrides RunOverrides) types.UpdateParams {
 		Timeout:             c.Update.StopTimeout,
 		MonitorOnly:         c.Update.MonitorOnly,
 		NoPull:              c.Update.NoPull,
+		EnableChangelog:     c.Update.EnableChangelog,
 		LifecycleHooks:      c.Lifecycle.Enabled,
 		RollingRestart:      c.Update.RollingRestart,
 		LabelPrecedence:     c.Update.LabelPrecedence,
@@ -49,5 +50,14 @@ func (c Config) UpdateParams(overrides RunOverrides) types.UpdateParams {
 		LabelEnable:         c.Filter.LabelEnable,
 		DiskSpaceMax:        c.Update.DiskSpaceMaxBytes,
 		DiskSpaceWarn:       c.Update.DiskSpaceWarnBytes,
+		EnableGitMonitoring: c.Git.Enable,
+		GitDefaultRef:       c.Git.DefaultRef,
+		GitSemverPolicy:     c.Git.SemverPolicy,
+		GitTimeout:          c.Git.Timeout,
+		GitImages:           c.Git.Images,
+		GitDockerfile:       c.Git.Dockerfile,
+		GitContext:          c.Git.Context,
+		GitComposeStash:     c.Git.ComposeStash,
+		ComposeProjects:     c.Git.ComposeProjects,
 	}
 }

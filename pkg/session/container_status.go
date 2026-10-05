@@ -3,10 +3,10 @@ package session
 import (
 	"time"
 
+	"github.com/nicholas-fedor/watchtower/pkg/container"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
-// State enum values.
 const (
 	UnknownState   State = iota // Uninitialized state.
 	SkippedState                // Container skipped.
@@ -17,9 +17,6 @@ const (
 	StaleState                  // Container is stale.
 	RestartedState              // Container restarted (linked dependency).
 )
-
-// State indicates what the current state is of the container.
-type State int
 
 // State string constants.
 const (
@@ -33,24 +30,53 @@ const (
 	RestartedStateString = "Restarted"
 )
 
+// State indicates what the current state is of the container.
+type State int
+
 // ContainerStatus holds a container's state during a session.
 //
 //nolint:errname // ContainerStatus is not an error type, it contains an error field.
 type ContainerStatus struct {
-	containerID        types.ContainerID // Container ID.
-	oldImage           types.ImageID     // Original image ID.
-	newImage           types.ImageID     // Latest image ID.
-	containerName      string            // Container name.
-	imageName          string            // Image name with tag.
-	containerError     error             // Error encountered, if any.
-	state              State             // Current state.
-	monitorOnly        bool              // Monitor-only flag.
-	newContainerID     types.ContainerID // New container ID after update.
-	cooldownPassed     bool              // True if image passed cooldown check.
-	cooldownAge        string            // Human-readable image age (e.g., "47 days, 11 hours").
-	cooldownDelay      string            // Human-readable cooldown duration (e.g., "24 hours").
-	cooldownRemaining  string            // Human-readable remaining time (empty if passed).
-	cooldownEligibleAt time.Time         // Time when the container becomes eligible for update.
+	containerID          types.ContainerID // Container ID.
+	oldImage             types.ImageID     // Original image ID.
+	newImage             types.ImageID     // Latest image ID.
+	containerName        string            // Container name.
+	imageName            string            // Image name with tag.
+	containerError       error             // Error encountered, if any.
+	state                State             // Current state.
+	monitorOnly          bool              // Monitor-only flag.
+	newContainerID       types.ContainerID // New container ID after update.
+	cooldownPassed       bool              // True if image passed cooldown check.
+	cooldownAge          string            // Human-readable image age (e.g., "47 days, 11 hours").
+	cooldownDelay        string            // Human-readable cooldown duration (e.g., "24 hours").
+	cooldownRemaining    string            // Human-readable remaining time (empty if passed).
+	cooldownEligibleAt   time.Time         // Time when the container becomes eligible for update.
+	gitRepo              string            // Resolved Git repository URL.
+	gitRef               string            // Resolved Git ref.
+	changelog            string            // Changelog or releases URL.
+	source               string            // OCI image source annotation.
+	imageURL             string            // OCI image URL annotation.
+	documentation        string            // OCI image documentation annotation.
+	currentImageVersion  string            // OCI version annotation of the running image.
+	latestImageVersion   string            // OCI version annotation of the new image.
+	currentImageRevision string            // OCI revision annotation of the running image.
+	latestImageRevision  string            // OCI revision annotation of the new image.
+}
+
+// NewContainerStatus builds a report status with identity fields populated.
+//
+// Parameters:
+//   - name: Container name.
+//   - image: Image name with tag.
+//
+// Returns:
+//   - *ContainerStatus: Status in the updated state for template tests and previews.
+func NewContainerStatus(name, image string) *ContainerStatus {
+	return &ContainerStatus{
+		containerName: name,
+		imageName:     image,
+		state:         UpdatedState,
+	}
 }
 
 // ID returns the container ID.
@@ -204,4 +230,84 @@ func (u *ContainerStatus) CooldownDelay() string {
 // CooldownRemaining returns the human-readable remaining cooldown time.
 func (u *ContainerStatus) CooldownRemaining() string {
 	return u.cooldownRemaining
+}
+
+// GitRepo returns the resolved Git repository URL.
+//
+// Returns:
+//   - string: Clone URL, or empty.
+func (u *ContainerStatus) GitRepo() string { return u.gitRepo }
+
+// GitRef returns the resolved Git ref.
+//
+// Returns:
+//   - string: Branch or tag, or empty.
+func (u *ContainerStatus) GitRef() string { return u.gitRef }
+
+// Changelog returns the changelog or releases URL.
+//
+// Returns:
+//   - string: Changelog URL, or empty.
+func (u *ContainerStatus) Changelog() string { return u.changelog }
+
+// Source returns the OCI image source annotation.
+//
+// Returns:
+//   - string: OCI source URL, or empty.
+func (u *ContainerStatus) Source() string { return u.source }
+
+// ImageURL returns the OCI image URL annotation.
+//
+// Returns:
+//   - string: OCI image URL, or empty.
+func (u *ContainerStatus) ImageURL() string { return u.imageURL }
+
+// Documentation returns the OCI image documentation annotation.
+//
+// Returns:
+//   - string: OCI documentation URL, or empty.
+func (u *ContainerStatus) Documentation() string { return u.documentation }
+
+// CurrentImageRevision returns the OCI image revision annotation of the running image.
+//
+// Returns:
+//   - string: OCI revision, or empty.
+func (u *ContainerStatus) CurrentImageRevision() string { return u.currentImageRevision }
+
+// LatestImageRevision returns the OCI image revision annotation of a newer image.
+//
+// Returns:
+//   - string: OCI revision, or empty.
+func (u *ContainerStatus) LatestImageRevision() string { return u.latestImageRevision }
+
+// CurrentImageVersion returns the OCI image version annotation of the running image.
+//
+// Returns:
+//   - string: OCI version, or empty.
+func (u *ContainerStatus) CurrentImageVersion() string { return u.currentImageVersion }
+
+// LatestImageVersion returns the OCI image version annotation of a newer image.
+//
+// Returns:
+//   - string: OCI version, or empty.
+func (u *ContainerStatus) LatestImageVersion() string { return u.latestImageVersion }
+
+// SetGitMetadata sets Git and OCI report fields for this container.
+//
+// Parameters:
+//   - meta: Resolved report metadata.
+//
+// Returns:
+//   - none.
+func (u *ContainerStatus) SetGitMetadata(meta container.ReportMeta) {
+	u.gitRepo = meta.GitRepo
+	u.gitRef = meta.GitRef
+	u.changelog = meta.Changelog
+	u.source = meta.Source
+	u.imageURL = meta.ImageURL
+	u.documentation = meta.Documentation
+	u.currentImageVersion = meta.CurrentVersion
+	u.latestImageVersion = meta.LatestVersion
+	u.currentImageRevision = meta.CurrentRevision
+	u.latestImageRevision = meta.LatestRevision
 }

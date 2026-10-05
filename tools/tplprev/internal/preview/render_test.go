@@ -6,11 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"github.com/nicholas-fedor/tplprev/internal/notify"
 	"github.com/nicholas-fedor/tplprev/internal/templates"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRenderDefaultReport(t *testing.T) {
@@ -26,6 +25,8 @@ func TestRenderDefaultReport(t *testing.T) {
 	assert.Contains(t, result, "1 Failed")
 	assert.Contains(t, result, "datamatrix")
 	assert.Contains(t, result, "updated to")
+	assert.Contains(t, result, "ref v1.2.4")
+	assert.Contains(t, result, "https://github.com/org/app/releases")
 }
 
 func TestRenderDefaultLegacyEntriesRoot(t *testing.T) {

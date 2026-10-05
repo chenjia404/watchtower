@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nicholas-fedor/watchtower/internal/util"
+	"github.com/nicholas-fedor/watchtower/pkg/container/git"
 	"github.com/nicholas-fedor/watchtower/pkg/types"
 )
 
@@ -346,6 +347,42 @@ func (c *Container) IsMonitorOnly(params types.UpdateParams) bool {
 //   - bool: True if no-pull, false otherwise.
 func (c *Container) IsNoPull(params types.UpdateParams) bool {
 	return c.getContainerOrGlobalBool(params.NoPull, noPullLabel, params.LabelPrecedence)
+}
+
+// IsChangelogEnabled reports whether the changelog notification line and the
+// versioned release link are enabled for this container.
+//
+// It uses UpdateParams.EnableChangelog and label precedence, with the same two
+// sources no-pull uses. A changelog-url label is a value, not a switch, so it
+// never enables the feature on its own.
+// A user who authorizes the extra
+// registry request must say so explicitly.
+//
+// Parameters:
+//   - params: Update parameters from types.UpdateParams.
+//
+// Returns:
+//   - bool: True when the changelog feature is enabled.
+func (c *Container) IsChangelogEnabled(params types.UpdateParams) bool {
+	return c.getContainerOrGlobalBool(
+		params.EnableChangelog,
+		git.EnableChangelogLabel,
+		params.LabelPrecedence,
+	)
+}
+
+// IsGitWatch reports whether the Git watcher is on for this container.
+//
+// A present git-watch label overrides --git-enable. When the label is absent
+// the process-wide --git-enable default is used.
+//
+// Parameters:
+//   - params: Update parameters from types.UpdateParams.
+//
+// Returns:
+//   - bool: True when the watcher should run for an associated container.
+func (c *Container) IsGitWatch(params types.UpdateParams) bool {
+	return git.WatchEnabled(c, params)
 }
 
 // CooldownDelay returns the effective cooldown delay for this container.
