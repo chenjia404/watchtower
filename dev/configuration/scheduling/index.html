@@ -24,7 +24,7 @@
       
       
       <link rel="icon" href="../../assets/media/favicon.ico">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
     
     
       
@@ -32,10 +32,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -1014,6 +1014,34 @@
     
   
     Registry and Authentication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
   
 
     
@@ -2417,6 +2445,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../advanced-features/git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../advanced-features/image-cooldown/" class="md-nav__link">
         
   
@@ -2839,8 +2895,14 @@
 
 <h1 id="scheduling">Scheduling<a class="headerlink" href="#scheduling" title="Permanent link">&para;</a></h1>
 <h2 id="schedule">Schedule<a class="headerlink" href="#schedule" title="Permanent link">&para;</a></h2>
-<p>Defines when and how often Watchtower checks for new images using a 6-field <a href="https://pkg.go.dev/github.com/robfig/cron@v1.2.0?tab=doc#hdr-CRON_Expression_Format" rel="noopener noreferrer" target="_blank">Cron expression</a>.</p>
-<p>Example: <code>--schedule "0 0 4 * * *"</code> runs daily at 4 AM.</p>
+<p>Defines when and how often Watchtower checks for new images using a <a href="https://pkg.go.dev/github.com/robfig/cron/v3#hdr-CRON_Expression_Format" rel="noopener noreferrer" target="_blank">cron expression</a>. The schedule takes one of these forms:</p>
+<ul>
+<li>5 fields: minute, hour, day of month, month and day of week.</li>
+<li>6 fields, with a seconds field before the minute.</li>
+<li>A <a href="https://pkg.go.dev/github.com/robfig/cron/v3#hdr-Predefined_schedules" rel="noopener noreferrer" target="_blank">predefined schedule</a>, such as <code>@daily</code>.</li>
+<li>An <a href="https://pkg.go.dev/github.com/robfig/cron/v3#hdr-Intervals" rel="noopener noreferrer" target="_blank">interval</a>, such as <code>@every 6h</code>, counted from when Watchtower starts.</li>
+</ul>
+<p>Example: <code>--schedule "0 4 * * *"</code> and <code>--schedule "0 0 4 * * *"</code> both run daily at 4 AM.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>            Argument: --schedule, -s
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>Environment Variable: WATCHTOWER_SCHEDULE
 <a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>                Type: String
@@ -2851,10 +2913,11 @@
 <ul>
 <li>Cannot be used with the <a href="#interval"><code>interval</code></a> configuration option.</li>
 <li>Requires a time zone set via <code>TZ</code> or a mounted <code>/etc/localtime</code> file. See <a href="#time_zone">Time Zone</a>.</li>
+<li>Shared registry buckets, such as GHCR's for <code>lscr.io/linuxserver/*</code> images, are empty for the first minute or two of every hour. Pick a minute away from <code>:00</code>, for example <code>0 17 3 * * *</code>. See <a href="../../advanced-features/image-cooldown/#github_container_registry_ghcrio">GitHub Container Registry</a>.</li>
 </ul>
 </div>
 <h2 id="interval">Interval<a class="headerlink" href="#interval" title="Permanent link">&para;</a></h2>
-<p>Sets the interval (in seconds) for polling new images.</p>
+<p>Sets the interval (in seconds) for polling new images. Watchtower exits at startup if the value is zero or negative.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>            Argument: --interval, -i
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>Environment Variable: WATCHTOWER_POLL_INTERVAL
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>                Type: Integer
@@ -2934,7 +2997,7 @@ If a schedule is configured (via --schedule or --interval), then Watchtower cont
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="July 14, 2026 14:36:11 UTC"><span class="timeago" datetime="2026-07-14T14:36:11+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="July 14, 2026 14:36:11 UTC">2026-07-14</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="November 1, 2026 09:11:09 UTC"><span class="timeago" datetime="2026-11-01T09:11:09+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="November 1, 2026 09:11:09 UTC">2026-11-01</span>
   </span>
 
     
@@ -3016,10 +3079,10 @@ If a schedule is configured (via --schedule or --interval), then Watchtower cont
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
         <script src="../../js/timeago.min.js"></script>
       

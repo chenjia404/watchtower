@@ -24,7 +24,7 @@
       
       
       <link rel="icon" href="../../assets/media/favicon.ico">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
     
     
       
@@ -32,10 +32,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -894,6 +894,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Health Check">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#health_check_with_podman" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health Check with Podman
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
       </ul>
@@ -1009,6 +1026,34 @@
     
   
     Registry and Authentication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
   
 
     
@@ -2412,6 +2457,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../advanced-features/git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../advanced-features/image-cooldown/" class="md-nav__link">
         
   
@@ -2800,6 +2873,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Health Check">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#health_check_with_podman" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health Check with Podman
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
         
       </ul>
@@ -2896,9 +2986,22 @@
 <ul>
 <li>This command triggers an update attempt for "nginx" and "redis" containers, displays debug output, and removes the Watchtower container upon completion.</li>
 </ul>
+<p>By default, Watchtower decides that an image is stale by comparing registry digests.
+<a href="../git-monitoring/">Git monitoring</a> is an optional alternate staleness signal: associate a container with a hosted repository, and Watchtower rebuilds from a Git URL context or a local Compose project directory when that ref changes.
+See <a href="../../advanced-features/git-monitoring/">Advanced Features → Git Monitoring</a>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>Regex patterns are supported. See <a href="../../getting-started/container-selection/#regex_pattern_matching">Regex Pattern Matching</a> for details.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Startup errors</p>
+<p>When a configuration option or flag is invalid, Watchtower exits at startup.</p>
+<ul>
+<li>In a container, Watchtower first sets its restart policy to <code>no</code>, so the container does not restart in a loop.</li>
+<li>Start the container again once the configuration is fixed.</li>
+<li>A <code>--host</code> flag after an invalid flag is not read. Watchtower then connects through <code>DOCKER_HOST</code> or the default socket.</li>
+<li>If Watchtower cannot change its restart policy, it logs an error.</li>
+</ul>
 </div>
 <h2 id="general_options">General Options<a class="headerlink" href="#general_options" title="Permanent link">&para;</a></h2>
 <h3 id="help">Help<a class="headerlink" href="#help" title="Permanent link">&para;</a></h3>
@@ -2919,6 +3022,45 @@
 <p class="admonition-title">Note</p>
 <p>Intended solely for Docker <code>HEALTHCHECK</code>.
 Do not use on the main command line.</p>
+</div>
+<h4 id="health_check_with_podman">Health Check with Podman<a class="headerlink" href="#health_check_with_podman" title="Permanent link">&para;</a></h4>
+<p>Podman ignores the <code>HEALTHCHECK</code> instruction in the Watchtower image. The image is published in the OCI format, and Podman only reads health checks from images in the Docker format (<a href="https://github.com/containers/podman/issues/18904" rel="noopener noreferrer" target="_blank">containers/podman#18904</a>). To enable the health check under Podman, define it in your container configuration, as shown below.</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="3:3"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><input id="__tabbed_3_3" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">Docker Compose</label><label for="__tabbed_3_2">Podman CLI</label><label for="__tabbed_3_3">Quadlet</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">services</span><span class="p">:</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">    </span><span class="nt">watchtower</span><span class="p">:</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">        </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nickfedor/watchtower:latest</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">        </span><span class="nt">healthcheck</span><span class="p">:</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">            </span><span class="nt">test</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">"CMD"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"/watchtower"</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">"--health-check"</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">        </span><span class="nt">volumes</span><span class="p">:</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/run/podman/podman.sock:/var/run/docker.sock</span>
+</code></pre></div>
+</div>
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>podman<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">    </span>--name<span class="w"> </span>watchtower<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">    </span>--health-cmd<span class="w"> </span><span class="s1">'["/watchtower", "--health-check"]'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span>-v<span class="w"> </span>/run/podman/podman.sock:/var/run/docker.sock<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span>nickfedor/watchtower
+</code></pre></div>
+</div>
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">[Container]</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="na">Image</span><span class="o">=</span><span class="s">docker.io/nickfedor/watchtower:latest</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="na">HealthCmd</span><span class="o">=</span><span class="s">["/watchtower", "--health-check"]</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="na">Volume</span><span class="o">=</span><span class="s">/run/podman/podman.sock:/var/run/docker.sock</span>
+</code></pre></div>
+</div>
+</div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ul>
+<li>Use the exec form shown above. Because the image does not include a shell, a shell-form health check, such as <code>--health-cmd "/watchtower --health-check"</code> or a <code>CMD-SHELL</code> test, always reports the container as unhealthy.</li>
+<li>Docker Compose requires <code>CMD</code> as the first entry of the <code>test</code> list. Without it, Compose fails with the error <code>healthcheck.test must start either by "CMD", "CMD-SHELL" or "NONE"</code>.</li>
+<li>For rootless Podman, mount the socket from <code>$XDG_RUNTIME_DIR/podman/podman.sock</code> instead of <code>/run/podman/podman.sock</code>.</li>
+</ul>
 </div>
 
 
@@ -2942,7 +3084,7 @@ Do not use on the main command line.</p>
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="July 14, 2026 14:36:11 UTC"><span class="timeago" datetime="2026-07-14T14:36:11+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="July 14, 2026 14:36:11 UTC">2026-07-14</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="November 1, 2026 07:07:03 UTC"><span class="timeago" datetime="2026-11-01T07:07:03+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="November 1, 2026 07:07:03 UTC">2026-11-01</span>
   </span>
 
     
@@ -3024,10 +3166,10 @@ Do not use on the main command line.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
         <script src="../../js/timeago.min.js"></script>
       

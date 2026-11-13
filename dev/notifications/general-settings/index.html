@@ -24,7 +24,7 @@
       
       
       <link rel="icon" href="../../assets/media/favicon.ico">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
     
     
       
@@ -32,10 +32,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -898,6 +898,34 @@
     
   
     Registry and Authentication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
   
 
     
@@ -2434,6 +2462,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../advanced-features/git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../advanced-features/image-cooldown/" class="md-nav__link">
         
   
@@ -2885,7 +2941,7 @@
 <p class="admonition-title">This is useful for overriding the operating system hostname.</p>
 </div>
 <h2 id="delay">Delay<a class="headerlink" href="#delay" title="Permanent link">&para;</a></h2>
-<p>Delay before sending notifications expressed in seconds.</p>
+<p>Delay before sending notifications expressed in seconds. Watchtower exits at startup if the value is negative.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>            Argument: --notifications-delay
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>Environment Variable: WATCHTOWER_NOTIFICATIONS_DELAY
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>                Type: Integer
@@ -2922,8 +2978,13 @@
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>                Type: Boolean
 <a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>             Default: false
 </code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Only the <code>logger://</code> output goes to stdout.
+Shoutrrr's own messages, such as a warning that a service sends without TLS, go to Watchtower's log at their level.</p>
+</div>
 <h2 id="split_by_container">Split by Container<a class="headerlink" href="#split_by_container" title="Permanent link">&para;</a></h2>
-<p>Send separate notifications for each updated container instead of grouping them.</p>
+<p>Send a separate notification for each container instead of grouping them.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>            Argument: --notification-split-by-container
 <a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>Environment Variable: WATCHTOWER_NOTIFICATION_SPLIT_BY_CONTAINER
 <a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>                Type: Boolean
@@ -2933,7 +2994,14 @@
 <p class="admonition-title">Note</p>
 <ul>
 <li>By default, notifications are grouped for all updated containers in a single session.</li>
-<li>When split notifications is enabled, a separate notification is sent for each container update event.</li>
+<li>When split notifications is enabled, a separate notification is sent for each of these containers:<ul>
+<li>a container that was updated or restarted</li>
+<li>a container whose update failed</li>
+<li>a monitor-only container with a newer image</li>
+<li>a container skipped during its update cooldown</li>
+</ul>
+</li>
+<li>Messages that none of these notifications carries are sent after them, one notification per container. A failed update check and a disk-space warning are examples. Messages that name no container are sent together. These notifications carry no report. A <a href="../templates/#report_templates">report template</a> shows them only if it lists <code>.Entries</code>.</li>
 </ul>
 </div>
 
@@ -2958,7 +3026,7 @@
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="July 14, 2026 14:36:11 UTC"><span class="timeago" datetime="2026-07-14T14:36:11+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="July 14, 2026 14:36:11 UTC">2026-07-14</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="November 7, 2026 07:49:36 UTC"><span class="timeago" datetime="2026-11-07T07:49:36+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="November 7, 2026 07:49:36 UTC">2026-11-07</span>
   </span>
 
     
@@ -3040,10 +3108,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
         <script src="../../js/timeago.min.js"></script>
       

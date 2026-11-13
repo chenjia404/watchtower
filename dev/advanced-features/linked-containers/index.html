@@ -24,7 +24,7 @@
       
       
       <link rel="icon" href="../../assets/media/favicon.ico">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
     
     
       
@@ -32,10 +32,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -898,6 +898,34 @@
     
   
     Registry and Authentication
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
   
 
     
@@ -2304,6 +2332,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../git-monitoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Git Monitoring
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../image-cooldown/" class="md-nav__link">
         
   
@@ -2570,6 +2626,28 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#restarting_dependent_containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restarting Dependent Containers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dependencies_on_unmonitored_containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dependencies on Unmonitored Containers
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -2750,10 +2828,21 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#updates_failing_due_to_circular_dependencies" class="md-nav__link">
+  <a href="#containers_skipped_due_to_circular_dependencies" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Updates Failing Due to Circular Dependencies
+        Containers Skipped Due to Circular Dependencies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ignored_depends-on_entries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ignored Depends-On Entries
       
     </span>
   </a>
@@ -3108,6 +3197,28 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#restarting_dependent_containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restarting Dependent Containers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dependencies_on_unmonitored_containers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dependencies on Unmonitored Containers
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3288,10 +3399,21 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#updates_failing_due_to_circular_dependencies" class="md-nav__link">
+  <a href="#containers_skipped_due_to_circular_dependencies" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Updates Failing Due to Circular Dependencies
+        Containers Skipped Due to Circular Dependencies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ignored_depends-on_entries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ignored Depends-On Entries
       
     </span>
   </a>
@@ -3376,22 +3498,34 @@ It automatically detects container dependencies through various mechanisms and u
 <p>This ensures that dependent services are stopped before their dependencies are updated, and dependencies are available when dependents restart.</p>
 <h2 id="how_it_works">How It Works<a class="headerlink" href="#how_it_works" title="Permanent link">&para;</a></h2>
 <h3 id="dependency_detection">Dependency Detection<a class="headerlink" href="#dependency_detection" title="Permanent link">&para;</a></h3>
-<p>Watchtower detects container dependencies through multiple mechanisms, checked in the following priority order:</p>
+<p>Watchtower detects container dependencies from labels and from each container's Docker configuration.</p>
+<p>Labels are checked in the following priority order, and only the first one present is used:</p>
 <ol>
 <li><strong>Watchtower depends-on label</strong> (<code>com.centurylinklabs.watchtower.depends-on</code>)</li>
 <li><strong>Docker Compose depends_on label</strong> (<code>com.docker.compose.depends_on</code>)</li>
-<li><strong>Docker links and network mode</strong> (legacy Docker linking and <code>network_mode: service:container</code>)</li>
 </ol>
+<p>An empty Watchtower depends-on label counts as absent, so the Docker Compose depends_on label is used instead when Compose detection is enabled.</p>
+<p>The Docker configuration always counts as well, whichever label is present:</p>
+<ul>
+<li><strong>Docker links and network mode</strong> (legacy Docker linking, <code>network_mode: service:SERVICE</code> for a Compose service, and <code>network_mode: container:CONTAINER</code> for a container name or ID)</li>
+<li><strong>Volumes from another container</strong> (<code>volumes_from</code> in Compose, <code>--volumes-from</code> in the Docker CLI)</li>
+</ul>
+<p>A container named by both a label and the Docker configuration is a single dependency.</p>
 <h4 id="watchtower_depends-on_label">Watchtower Depends-On Label<a class="headerlink" href="#watchtower_depends-on_label" title="Permanent link">&para;</a></h4>
 <p>The <code>com.centurylinklabs.watchtower.depends-on</code> label allows explicit declaration of dependencies:</p>
 <div class="highlight"><span class="filename">Explicit dependency declaration</span><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">LABEL</span><span class="w"> </span>com.centurylinklabs.watchtower.depends-on<span class="o">=</span><span class="s2">"database,redis"</span>
 </code></pre></div>
 <p>This label accepts a comma-separated list of container names that must be available before this container starts.
 This supports referencing containers from other Docker Compose projects or stacks, enabling cross-project dependency management.</p>
+<p>An entry may also name a Docker Compose service, such as <code>db</code> or <code>my-database</code>, or a project-qualified service, such as <code>myproject-db</code>.
+A service name resolves to every replica of that service.</p>
+<p>A service name used in more than one Compose project, such as <code>db</code>, resolves to the service in the labeled container's own project when that project has one.
+Otherwise it resolves to the service in every project that has it, so the container restarts when any of them is updated.
+When the service in its own project is unmonitored, the entry is left alone instead (see <a href="#dependencies_on_unmonitored_containers">Dependencies on Unmonitored Containers</a>).
+Use the container name or a project-qualified service name, such as <code>myproject-db</code>, to depend on only one of them.</p>
 <div class="admonition warning">
 <p class="admonition-title">Warning</p>
-<p>Use unique, non-ambiguous source container names both in the Docker Compose configuration and when specifying dependencies in the <code>com.centurylinklabs.watchtower.depends-on</code> label to ensure correct dependency resolution and behavior across Docker Compose projects/stacks.
-Ambiguous names can lead to warnings and skipped updates to prevent non-deterministic behavior.</p>
+<p>An entry that names no container is ignored and logged as a warning.</p>
 </div>
 <h4 id="docker_compose_depends-on_label">Docker Compose Depends-On Label<a class="headerlink" href="#docker_compose_depends-on_label" title="Permanent link">&para;</a></h4>
 <p>Watchtower automatically recognizes Docker Compose's <code>depends_on</code> relationships:</p>
@@ -3417,24 +3551,27 @@ Ambiguous names can lead to warnings and skipped updates to prevent non-determin
 <p>Watchtower does not support using this to control implicit restarts, because this is an explicit, opt-in feature that defaults to <code>false</code> when omitted, such as when using the short-form syntax.</p>
 </div>
 <h4 id="docker_links_and_network_mode">Docker Links and Network Mode<a class="headerlink" href="#docker_links_and_network_mode" title="Permanent link">&para;</a></h4>
-<p>For legacy Docker setups using links or <code>network_mode: service:container</code>, Watchtower treats these as implicit dependencies:</p>
+<p>For legacy Docker links, and for containers that use another container's network (<code>network_mode: service:SERVICE</code> or <code>network_mode: container:CONTAINER</code> in Compose, <code>--network container:CONTAINER</code> in the Docker CLI), Watchtower treats these as implicit dependencies:</p>
 <div class="highlight"><span class="filename">Legacy Docker linking</span><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c"># Container with explicit link</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>docker<span class="w"> </span>run<span class="w"> </span>--link<span class="w"> </span>database:db<span class="w"> </span>nginx
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="c"># Container using service network mode</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>docker<span class="w"> </span>run<span class="w"> </span>--network<span class="w"> </span>container:database<span class="w"> </span>nginx
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="c"># Container using another container's network</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>docker<span class="w"> </span>run<span class="w"> </span>--network<span class="w"> </span>container:CONTAINER<span class="w"> </span>nginx
 </code></pre></div>
+<p>Replace <em><code>CONTAINER</code></em> with the name or ID of the container whose network to use.</p>
+<p>These count as dependencies even when a depends-on or Compose <code>depends_on</code> label names other containers, because the container cannot run without the container whose network it uses.
+The same applies to <code>volumes_from</code> (<code>--volumes-from</code>): the container is always ordered after the container whose volumes it uses.</p>
 <h3 id="topological_sorting">Topological Sorting<a class="headerlink" href="#topological_sorting" title="Permanent link">&para;</a></h3>
 <p>Watchtower uses topological sorting to determine the correct update order. This algorithm:</p>
 <ul>
 <li>Builds a dependency graph from all detected relationships</li>
-<li>Detects cycles (failing with a circular dependency error)</li>
+<li>Detects cycles and sets aside every container in one</li>
 <li>Produces a linear ordering where dependencies precede dependents</li>
 </ul>
 <div class="admonition warning">
 <p class="admonition-title">Warning</p>
-<p>Circular dependencies between containers will cause the update process to fail with an error.
-Ensure your dependency graph is acyclic.</p>
+<p>Containers in a circular dependency are skipped and reported as skipped, while the rest of the update continues.
+Ensure your dependency graph is acyclic so those containers are updated.</p>
 </div>
 <h3 id="update_order">Update Order<a class="headerlink" href="#update_order" title="Permanent link">&para;</a></h3>
 <p>When updates are needed, Watchtower follows this sequence:</p>
@@ -3450,13 +3587,30 @@ Ensure your dependency graph is acyclic.</p>
 <li>Dependent services are stopped before their dependencies change</li>
 <li>Dependencies are fully restarted before dependents attempt to connect</li>
 </ul>
+<h3 id="restarting_dependent_containers">Restarting Dependent Containers<a class="headerlink" href="#restarting_dependent_containers" title="Permanent link">&para;</a></h3>
+<p>When a container is updated, Watchtower also restarts the containers that depend on it, directly or through other restarted containers, without updating their images.
+Dependents are found with the same dependency graph that orders the update, so the containers restarted and the update order always agree.</p>
+<ul>
+<li>A Watchtower container restarts when a container it depends on restarts, such as a VPN container it shares a network with.</li>
+<li>A container that names a Watchtower container exactly, by container name or ID, restarts when that Watchtower container is updated. The name without its replica number (such as <code>infra-watchtower</code> for <code>infra-watchtower-1</code>) also works when exactly one Watchtower container has it, so it names nothing when the service runs several replicas.</li>
+<li>Containers in a circular dependency are neither updated nor restarted.</li>
+</ul>
+<h3 id="dependencies_on_unmonitored_containers">Dependencies on Unmonitored Containers<a class="headerlink" href="#dependencies_on_unmonitored_containers" title="Permanent link">&para;</a></h3>
+<p>A container that Watchtower does not monitor is left alone, including when a monitored container depends on it.
+Containers are excluded from monitoring by the <a href="../../configuration/container-selection/">container selection</a> options, such as the enable label, the disable lists, image filters, and scopes.</p>
+<ul>
+<li>A dependency on an unmonitored container is ignored when ordering updates and restarting dependents.</li>
+<li>A dependency that names an unmonitored container exactly never resolves to a different, monitored container with a similar name.</li>
+<li>A service name whose service in the container's own Compose project is unmonitored never resolves to the same service in another project.</li>
+</ul>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
 <h3 id="automatic_detection">Automatic Detection<a class="headerlink" href="#automatic_detection" title="Permanent link">&para;</a></h3>
 <p>In most cases, no additional configuration is required. Watchtower automatically detects dependencies from:</p>
 <ul>
 <li>Docker Compose <code>depends_on</code> declarations</li>
 <li>Existing Docker links</li>
-<li><code>network_mode: service:container</code> configurations</li>
+<li><code>network_mode: service:SERVICE</code> and <code>network_mode: container:CONTAINER</code> configurations</li>
+<li><code>volumes_from</code> configurations</li>
 </ul>
 <div class="admonition note">
 <p class="admonition-title">Docker Compose Considerations</p>
@@ -3492,7 +3646,8 @@ Ensure your dependency graph is acyclic.</p>
 <ul>
 <li>Watchtower's explicit <code>com.centurylinklabs.watchtower.depends-on</code> label</li>
 <li>Legacy Docker links</li>
-<li>Network mode dependencies (<code>network_mode: service:container</code>)</li>
+<li>Network mode dependencies (<code>network_mode: service:SERVICE</code> and <code>network_mode: container:CONTAINER</code>)</li>
+<li>Volumes from another container (<code>volumes_from</code>)</li>
 </ul>
 <h3 id="explicit_dependencies">Explicit Dependencies<a class="headerlink" href="#explicit_dependencies" title="Permanent link">&para;</a></h3>
 <p>For cases where automatic detection is insufficient, use the Watchtower depends-on label:</p>
@@ -3556,8 +3711,9 @@ Ensure your dependency graph is acyclic.</p>
 <a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">  </span><span class="nt">mysql</span><span class="p">:</span>
 <a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mysql:8.0</span>
 <a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
-<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">      </span><span class="nt">MYSQL_ROOT_PASSWORD</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">example</span>
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">      </span><span class="nt">MYSQL_ROOT_PASSWORD</span><span class="p">:</span><span class="w"> </span><span class="s">'DB_ROOT_PASSWORD'</span>
 </code></pre></div>
+<p>Replace <em><code>DB_ROOT_PASSWORD</code></em> with a root password for the database, inside the single quotes so that YAML reads every character as part of it. Inside the quotes, write each <code>'</code> as <code>''</code>. Write each <code>$</code> as <code>$$</code>, because Compose reads a <code>$</code> as the start of a variable even inside quotes.</p>
 </div>
 <div class="tabbed-block">
 <p>When Watchtower detects a MySQL update:</p>
@@ -3623,7 +3779,7 @@ Ensure your dependency graph is acyclic.</p>
 </div>
 </div>
 <h3 id="network_mode_dependencies">Network Mode Dependencies<a class="headerlink" href="#network_mode_dependencies" title="Permanent link">&para;</a></h3>
-<p>Containers using <code>network_mode: service:container</code>:</p>
+<p>Containers using <code>network_mode: service:SERVICE</code>:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="6:2"><input checked="checked" id="__tabbed_6_1" name="__tabbed_6" type="radio" /><input id="__tabbed_6_2" name="__tabbed_6" type="radio" /><div class="tabbed-labels"><label for="__tabbed_6_1">Docker Compose</label><label for="__tabbed_6_2">Watchtower Behavior</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
@@ -3642,12 +3798,26 @@ Ensure your dependency graph is acyclic.</p>
 </div>
 <h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
 <h3 id="common_issues">Common Issues<a class="headerlink" href="#common_issues" title="Permanent link">&para;</a></h3>
-<h4 id="updates_failing_due_to_circular_dependencies">Updates Failing Due to Circular Dependencies<a class="headerlink" href="#updates_failing_due_to_circular_dependencies" title="Permanent link">&para;</a></h4>
-<div class="admonition error">
-<p class="admonition-title">Error</p>
-<p>If you see "circular reference detected" errors, check your dependency declarations for cycles.</p>
+<p>Watchtower reports each of the following dependency problems once per container.
+The first scan that finds a problem logs and notifies it as a warning.
+Later scans log it at debug level.
+Every scan still skips a container that depends on itself or sits in a circular dependency, and lists it as skipped in the session report.
+A container depends on itself when one of its dependencies names it by its container name or by its own Compose service.
+A skipped container is not restarted when another of its dependencies is updated.
+A depends-on entry that names no container is only ignored, and its container is still checked and updated.
+A recreated container or a restart of Watchtower reports the problem again.</p>
+<h4 id="containers_skipped_due_to_circular_dependencies">Containers Skipped Due to Circular Dependencies<a class="headerlink" href="#containers_skipped_due_to_circular_dependencies" title="Permanent link">&para;</a></h4>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>If you see "Skipping container update (circular dependency)" warnings, check your dependency declarations for cycles.</p>
 </div>
 <p><strong>Solution</strong>: Review and remove circular dependencies. For example, if A depends on B and B depends on A, remove one of the dependencies or restructure your services.</p>
+<h4 id="ignored_depends-on_entries">Ignored Depends-On Entries<a class="headerlink" href="#ignored_depends-on_entries" title="Permanent link">&para;</a></h4>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>If you see "Ignoring depends-on entry that names no container" warnings, the named <code>com.centurylinklabs.watchtower.depends-on</code> entry matched no container.</p>
+</div>
+<p><strong>Solution</strong>: Use the exact container name, a Compose service name, or a project-qualified service name such as <code>myproject-db</code>.</p>
 <h4 id="containers_not_updating_in_expected_order">Containers Not Updating in Expected Order<a class="headerlink" href="#containers_not_updating_in_expected_order" title="Permanent link">&para;</a></h4>
 <p><strong>Check</strong>:</p>
 <ul>
@@ -3662,9 +3832,7 @@ Ensure your dependency graph is acyclic.</p>
 </code></pre></div>
 <p>Look for log messages like:</p>
 <ul>
-<li>"Retrieved links from watchtower depends-on label"</li>
-<li>"Retrieved links from compose depends-on label"</li>
-<li>"Completed dependency sort"</li>
+<li>"Found container dependencies", which lists each container's dependencies once per scan</li>
 </ul>
 <h3 id="debugging_commands">Debugging Commands<a class="headerlink" href="#debugging_commands" title="Permanent link">&para;</a></h3>
 <p>Enable verbose logging to inspect dependency detection:</p>
@@ -3699,7 +3867,7 @@ Ensure your dependency graph is acyclic.</p>
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="July 14, 2026 14:36:11 UTC"><span class="timeago" datetime="2026-07-14T14:36:11+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="July 14, 2026 14:36:11 UTC">2026-07-14</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="November 12, 2026 13:17:10 UTC"><span class="timeago" datetime="2026-11-12T13:17:10+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="November 12, 2026 13:17:10 UTC">2026-11-12</span>
   </span>
 
     
@@ -3781,10 +3949,10 @@ Ensure your dependency graph is acyclic.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "toc.follow", "navigation.top", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tooltips", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": ["latest", "dev"], "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
         <script src="../../js/timeago.min.js"></script>
       
