@@ -28,10 +28,14 @@ To use this feature, set an [API token](../../../configuration/http-api/index.md
 | `watchtower_containers_skipped`              | Gauge   | Number of containers skipped during the last scan                                  |
 | `watchtower_scans_total`                     | Counter | Number of scans since watchtower started                                           |
 | `watchtower_scans_skipped_total`             | Counter | Number of skipped scans since watchtower started                                   |
+| `watchtower_scans_failed_total`              | Counter | Number of scans that ended in an error since watchtower started                    |
 | `watchtower_docker_images_bytes`             | Gauge   | Docker image storage usage in bytes from the last disk-space check                 |
 | `watchtower_docker_images_reclaimable_bytes` | Gauge   | Reclaimable Docker image storage in bytes from the last disk-space check           |
 | `watchtower_disk_space_max_bytes`            | Gauge   | Configured Docker image-usage maximum in bytes (0 if unset)                        |
 | `watchtower_disk_space_warn_bytes`           | Gauge   | Configured Docker image-usage warning threshold in bytes (0 if unset)              |
+
+A scan is skipped when a scheduled run starts while the previous one is still running, or when the update at startup finds another update already running.
+A skipped scan does not change the scan total or the last-scan gauges.
 
 The four image-usage gauges are updated when [`disk-space-max`](../../../configuration/update-behavior/index.md#disk_space_max) or [`disk-space-warn`](../../../configuration/update-behavior/index.md#disk_space_warn) are set.
 See [Disk Usage Monitor](../../../advanced-features/disk-usage-monitor/index.md#metrics).
@@ -43,13 +47,13 @@ scrape_configs:
   - job_name: watchtower
     scrape_interval: 15s
     metrics_path: /v1/metrics
-    bearer_token: demotoken
+    bearer_token: API_TOKEN
     static_configs:
       - targets:
         - 'watchtower:8080'
 ```
 
-Replace `demotoken` with the Bearer token you have set accordingly.
+Replace *`API_TOKEN`* with your HTTP API token.
 
 ## Demo
 

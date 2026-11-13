@@ -6,31 +6,28 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/timeout"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
 	"github.com/nicholas-fedor/watchtower/internal/api/handlers/check"
-	"github.com/nicholas-fedor/watchtower/internal/api/handlers/events"
 	"github.com/nicholas-fedor/watchtower/internal/api/handlers/update"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
 )
 
-func registerCheckRoute(app *fiber.App, auth fiber.Handler, opts config.Options) {
+func registerCheckRoute(app *fiber.App, auth fiber.Handler, opts Options) {
 	if opts.Client == nil {
 		return
 	}
 
 	checkTimeout := opts.CheckTimeout
 	if checkTimeout <= 0 {
-		checkTimeout = config.DefaultCheckTimeout
+		checkTimeout = DefaultCheckTimeout
 	}
 
-	params := config.BuildUpdateParams(opts)
-	scanStartedData := events.NewScanStartedData(params)
+	params := BuildUpdateParams(opts)
 
 	handler := check.New(opts.Logger,
 		func(ctx context.Context, images, names []string) ([]check.ContainerCheck, error) {
 			imageFilter := opts.FilterByImage(images, opts.Filter)
 			containerFilter := update.ContainerFilter(names)
-			combinedFilter := func(c types.FilterableContainer) bool {
+			combinedFilter := func(c filters.FilterableContainer) bool {
 				return imageFilter(c) && containerFilter(c.Name(), true)
 			}
 
@@ -45,9 +42,8 @@ func registerCheckRoute(app *fiber.App, auth fiber.Handler, opts config.Options)
 		},
 		checkTimeout,
 		opts.Notifier,
-		opts.NotificationSplitByContainer,
 		opts.EventBroadcaster,
-		scanStartedData,
+		params.ScanStartedData(),
 	)
 
 	app.Post(

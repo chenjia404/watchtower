@@ -76,6 +76,7 @@ When [label enable](../../configuration/container-selection/index.md#enable_labe
     ```yaml
     services:
         someimage:
+            image: someimage
             labels:
                 - "com.centurylinklabs.watchtower.enable=true"
     ```
@@ -97,6 +98,7 @@ To exclude a container, set the label to `false`:
     ```yaml
     services:
         someimage:
+            image: someimage
             labels:
                 - "com.centurylinklabs.watchtower.enable=false"
     ```
@@ -122,6 +124,7 @@ Set the `com.centurylinklabs.watchtower.monitor-only` label to `true` on the con
     ```yaml
     services:
         someimage:
+            image: someimage
             labels:
                 - "com.centurylinklabs.watchtower.monitor-only=true"
     ```
@@ -149,6 +152,9 @@ Watchtower can filter containers based on their container name using [Go regex p
 
 Pass container names as positional arguments to Watchtower.
 When provided, only containers matching at least one name are monitored.
+
+!!! Warning
+    - Dependencies on containers that are not named are ignored. See [Dependencies on Unmonitored Containers](../../advanced-features/linked-containers/index.md#dependencies_on_unmonitored_containers).
 
 <!-- markdownlint-disable -->
 === "Docker Compose"

@@ -8,27 +8,32 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/handlers/events"
-	"github.com/nicholas-fedor/watchtower/pkg/notifications"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/observability/events"
 )
+
+// Notifier holds back notifications while a check runs and sends them after it.
+type Notifier interface {
+	// HoldNotifications holds back the check's log entries. The returned
+	// release ends the hold and sends the entries queued so far, including
+	// those of overlapping checks. During an update session the entries go
+	// out with the session's notifications instead.
+	HoldNotifications() func()
+}
 
 // Handler serves the /v1/check endpoint.
 type Handler struct {
-	log *zerolog.Logger
+	// notifier batches log entries during the check to suppress immediate notifications.
+	notifier Notifier
+	log      *zerolog.Logger
 
 	// check is the function that checks container update availability.
 	check CheckFunc
+	// eventBroadcaster publishes SSE events for check runs.
+	eventBroadcaster *events.Broadcaster
 	// Path is the HTTP route path for the check endpoint.
 	Path string
 	// maxTimeout bounds the optional per-request ?timeout= query parameter.
 	maxTimeout time.Duration
-	// notifier batches log entries during the check to suppress immediate notifications.
-	notifier types.Notifier
-	// splitByContainer sends per-container notifications when true.
-	splitByContainer bool
-	// eventBroadcaster publishes SSE events for check runs.
-	eventBroadcaster *events.Broadcaster
 	// scanStartedData carries redacted policy flags reused for every scan_started event.
 	scanStartedData events.ScanStartedData
 }
@@ -40,7 +45,6 @@ type Handler struct {
 //   - maxTimeout: Maximum allowed per-request timeout, used to bound the ?timeout= query parameter.
 //   - notifier: Optional notification system instance. When provided, notification batching is enabled
 //     during the check to prevent log entries from triggering immediate notifications.
-//   - splitByContainer: When true, notifications are split by container instead of being grouped.
 //   - eventBroadcaster: Optional SSE broadcaster. When provided, scan_started, scan_completed,
 //     and scan_failed events are emitted during check runs.
 //   - scanStartedData: Pre-built redacted policy flags for the scan_started event.
@@ -48,8 +52,7 @@ func New(
 	log *zerolog.Logger,
 	check CheckFunc,
 	maxTimeout time.Duration,
-	notifier types.Notifier,
-	splitByContainer bool,
+	notifier Notifier,
 	eventBroadcaster *events.Broadcaster,
 	scanStartedData events.ScanStartedData,
 ) *Handler {
@@ -64,7 +67,6 @@ func New(
 		Path:             "/v1/check",
 		maxTimeout:       maxTimeout,
 		notifier:         notifier,
-		splitByContainer: splitByContainer,
 		eventBroadcaster: eventBroadcaster,
 		scanStartedData:  scanStartedData,
 	}
@@ -129,21 +131,9 @@ func (h *Handler) Handle(c fiber.Ctx) error {
 		}
 	}
 
-	// Suppress notifications during the check to prevent log entries from
-	// triggering immediate notifications. The notifier is reset after the check.
+	// Hold back the check's log entries and send them when it ends.
 	if h.notifier != nil {
-		h.notifier.StartNotification(true)
-
-		defer func() {
-			if h.splitByContainer {
-				notifications.FlushSplitByContainer(h.notifier)
-				h.notifier.StartNotification(true)
-			} else {
-				h.notifier.SendNotification(nil)
-			}
-
-			h.notifier.StartNotification(false)
-		}()
+		defer h.notifier.HoldNotifications()()
 	}
 
 	// Notify SSE subscribers that the check scan is starting.

@@ -2,29 +2,21 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
+	"github.com/nicholas-fedor/watchtower/internal/api/auth"
 	"github.com/nicholas-fedor/watchtower/internal/api/routes"
 )
-
-// Server defines the interface for Watchtower's HTTP API server.
-type Server interface {
-	Listen(addr string, config ...fiber.ListenConfig) error
-	ShutdownWithTimeout(timeout time.Duration) error
-}
-
-// Compile-time check that *fiber.App implements Server.
-var _ Server = (*fiber.App)(nil)
 
 // GetAPIAddr formats the API address string from host and port, bracketing
 // IPv6 addresses as needed.
@@ -59,14 +51,23 @@ func GetAPIAddr(host, port string) string {
 // returns after the listen socket is bound so scheduled updates can run
 // concurrently.
 //
+// The server shuts down gracefully when ctx is canceled, waiting up to five
+// seconds for the requests it is serving. The returned channel closes once that
+// shutdown attempt has finished, so a caller can wait for it before the process
+// exits. Requests still running when the five seconds expire may remain active
+// after the channel closes.
+//
 // Parameters:
 //   - ctx: Context for server lifecycle management.
 //   - opts: API configuration options. opts.Logger is required when any endpoint
-//     is enabled. Nil yields config.ErrMissingLogger.
+//     is enabled. Nil yields routes.ErrMissingLogger.
 //
 // Returns:
+//   - <-chan struct{}: Closed once the server has stopped and its shutdown
+//     attempt has finished. It is already closed when no endpoint is enabled,
+//     and nil when err is non-nil.
 //   - error: Non-nil if route registration or server startup fails.
-func SetupAndStartAPI(ctx context.Context, opts config.Options) error {
+func SetupAndStartAPI(ctx context.Context, opts routes.Options) (<-chan struct{}, error) {
 	if !opts.EnableUpdateAPI &&
 		!opts.EnableMetricsAPI &&
 		!opts.EnableContainersAPI &&
@@ -77,7 +78,7 @@ func SetupAndStartAPI(ctx context.Context, opts config.Options) error {
 		!opts.EnableImagesAPI &&
 		!opts.EnableConfigAPI &&
 		!opts.EnableEventsAPI {
-		return nil
+		return stoppedNow(), nil
 	}
 
 	address := GetAPIAddr(opts.Host, opts.Port)
@@ -93,41 +94,41 @@ func SetupAndStartAPI(ctx context.Context, opts config.Options) error {
 	shouldRequireEventsToken := opts.EnableEventsAPI
 
 	if shouldRequireToken && opts.Token == "" {
-		return config.ErrMissingAPIToken
+		return nil, routes.ErrMissingAPIToken
 	}
 
 	if shouldRequireEventsToken && opts.EventsToken == "" {
-		return config.ErrMissingEventsAPIToken
+		return nil, routes.ErrMissingEventsAPIToken
 	}
 
 	if opts.Logger == nil {
-		return config.ErrMissingLogger
+		return nil, routes.ErrMissingLogger
 	}
 
 	log := opts.Logger
 
-	app := New(
+	app := newApp(
 		log,
 		opts.RateLimit,
-		ProxyConfig{
+		proxyConfig{
 			TrustedProxies: opts.TrustedProxies,
 			ProxyHeader:    opts.ProxyHeader,
-		}, CORSConfig{
+		}, corsConfig{
 			AllowedOrigins: opts.CORSAllowedOrigins,
 		}, opts.NoStartupMessage,
 	)
 
-	authMiddleware := NewAPIAuthMiddleware(log, opts.Token)
+	authMiddleware := auth.NewAPIMiddleware(log, opts.Token)
 
 	err := routes.ValidateAndRegister(ctx, app, authMiddleware, opts)
 	if err != nil {
-		return fmt.Errorf("route registration failed: %w", err)
+		return nil, fmt.Errorf("route registration failed: %w", err)
 	}
 
 	tlsCertPath, tlsKeyPath := opts.TLSCertPath, opts.TLSKeyPath
 
 	if (tlsCertPath == "") != (tlsKeyPath == "") {
-		return config.ErrMissingTLSConfig
+		return nil, routes.ErrMissingTLSConfig
 	}
 
 	// Block only in API-only update mode.
@@ -141,8 +142,45 @@ func SetupAndStartAPI(ctx context.Context, opts config.Options) error {
 		tlsCertPath,
 		tlsKeyPath,
 		block,
+		startupMessageWriter(ctx, opts, block),
 		opts.OnUnexpectedServerStop,
 	)
+}
+
+// startupMessageWriter returns the callback that writes the startup message
+// once the API socket is bound.
+//
+// Only the blocking HTTP API mode writes it here, because the API then runs
+// instead of the scheduler, which otherwise announces startup.
+//
+// Parameters:
+//   - ctx: Context for server lifecycle management, passed to the writer.
+//   - opts: API configuration options.
+//   - block: Whether the API runs in blocking mode.
+//
+// Returns:
+//   - func(): The callback, or nil when no startup message is written here.
+func startupMessageWriter(ctx context.Context, opts routes.Options, block bool) func() {
+	if !block || opts.WriteStartupMessage == nil {
+		return nil
+	}
+
+	return func() { writeStartupMessage(ctx, opts) }
+}
+
+// writeStartupMessage writes the startup message for the blocking HTTP API mode.
+//
+// Parameters:
+//   - ctx: Context for server lifecycle management, passed to the writer.
+//   - opts: API configuration options with a non-nil WriteStartupMessage.
+func writeStartupMessage(ctx context.Context, opts routes.Options) {
+	startup := opts.Startup
+	startup.Sched = time.Time{}
+	startup.Filtering = opts.FilterDesc
+	startup.Scope = opts.Scope
+	startup.Client = opts.Client
+	startup.Version = opts.Version
+	opts.WriteStartupMessage(ctx, startup)
 }
 
 // isCleanServerStop reports whether err is an expected result of a graceful
@@ -153,6 +191,7 @@ func isCleanServerStop(err error) bool {
 	}
 
 	return errors.Is(err, http.ErrServerClosed) ||
+		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
 }
@@ -175,12 +214,12 @@ func handleUnexpectedServerStop(log *zerolog.Logger, err error, addr string, onU
 	}
 }
 
-// runServer starts the Fiber app and either blocks until shutdown or returns
-// after a successful bind.
+// runServer binds the listen socket, serves the Fiber app on it, and either
+// blocks until shutdown or returns once the socket is bound.
 //
-// Fiber's GracefulContext shuts the server down when ctx is canceled.
-// ListenerAddrFunc signals that the listen socket is bound so callers can
-// distinguish bind success from hang/failure.
+// The server shuts down gracefully when ctx is canceled, waiting up to five
+// seconds for the requests it is serving. A cancellation before the server
+// starts serving stops it too.
 //
 // Parameters:
 //   - ctx: Context for server lifecycle management.
@@ -190,9 +229,13 @@ func handleUnexpectedServerStop(log *zerolog.Logger, err error, addr string, onU
 //   - tlsCertPath: Path to TLS certificate file, or empty for HTTP.
 //   - tlsKeyPath: Path to TLS key file, or empty for HTTP.
 //   - block: When true, wait until the server stops. When false, return after bind.
-//   - onUnexpectedStop: Optional callback when Listen exits unexpectedly in non-blocking mode.
+//   - onBound: Optional callback run once the socket is bound, before serving.
+//   - onUnexpectedStop: Optional callback when the server exits unexpectedly in non-blocking mode.
 //
 // Returns:
+//   - <-chan struct{}: Closed once the server has stopped, its shutdown attempt
+//     has finished, and any unexpected stop has been handled. Nil when err is
+//     non-nil.
 //   - error: Non-nil if the server fails to start or exits with an unexpected error while blocking.
 func runServer(
 	ctx context.Context,
@@ -201,81 +244,140 @@ func runServer(
 	address string,
 	tlsCertPath, tlsKeyPath string,
 	block bool,
+	onBound func(),
 	onUnexpectedStop func(error),
-) error {
+) (<-chan struct{}, error) {
 	//nolint:nilerr // Intentionally return nil: skip socket binding when context is already canceled.
 	if ctx.Err() != nil {
-		return nil
+		return stoppedNow(), nil
 	}
 
-	readyCh := make(chan struct{})
+	listener, err := listen(ctx, address, tlsCertPath, tlsKeyPath)
+	if err != nil {
+		// A cancellation during the bind is a shutdown, not a failure.
+		if ctx.Err() != nil {
+			return stoppedNow(), nil //nolint:nilerr // The bind failed because the server is shutting down.
+		}
 
-	var readyOnce sync.Once
+		log.Error().Err(err).Str("addr", address).
+			Msg("HTTP server failed to start")
 
-	listenDone := make(chan error, 1)
+		return nil, fmt.Errorf("failed to start HTTP server: %w", err)
+	}
 
-	listenCfg := fiber.ListenConfig{
+	if onBound != nil {
+		onBound()
+	}
+
+	// Fiber shuts the app down once ctx is done, also when that happens before
+	// it starts serving. Listener returns only after that shutdown has finished.
+	cfg := fiber.ListenConfig{
 		DisableStartupMessage: true,
 		GracefulContext:       ctx,
-		ShutdownTimeout:       ShutdownGracePeriod,
-		ListenerAddrFunc: func(_ net.Addr) {
-			readyOnce.Do(func() {
-				close(readyCh)
-			})
-		},
-	}
-
-	if tlsCertPath != "" && tlsKeyPath != "" {
-		listenCfg.CertFile = tlsCertPath
-		listenCfg.CertKeyFile = tlsKeyPath
-	}
-
-	go func() {
-		listenDone <- app.Listen(address, listenCfg)
-	}()
-
-	select {
-	case <-readyCh:
-		// Socket bound successfully.
-	case err := <-listenDone:
-		if !isCleanServerStop(err) {
-			log.Error().Err(err).Str("addr", address).
-				Msg("HTTP server failed to start")
-
-			return fmt.Errorf("failed to start HTTP server: %w", err)
-		}
-
-		return nil
-	case <-ctx.Done():
-		// Canceled before bind completed. Wait briefly for Listen to exit.
-		select {
-		case err := <-listenDone:
-			if !isCleanServerStop(err) {
-				return fmt.Errorf("failed to start HTTP server: %w", err)
-			}
-
-			return nil
-		case <-time.After(ShutdownGracePeriod + time.Second):
-			return nil
-		}
+		ShutdownTimeout:       shutdownGracePeriod,
 	}
 
 	if !block {
+		done := make(chan struct{})
+
 		go func() {
-			handleUnexpectedServerStop(log, <-listenDone, address, onUnexpectedStop)
+			defer close(done)
+
+			handleUnexpectedServerStop(log, app.Listener(listener, cfg), address, onUnexpectedStop)
 		}()
 
-		return nil
+		return done, nil
 	}
 
-	// Blocking mode: wait until GracefulContext cancels and Listen returns.
-	err := <-listenDone
-	if !isCleanServerStop(err) {
-		log.Error().Err(err).Str("addr", address).
+	serveErr := app.Listener(listener, cfg)
+	if !isCleanServerStop(serveErr) {
+		log.Error().Err(serveErr).Str("addr", address).
 			Msg("HTTP server failed")
 
-		return fmt.Errorf("HTTP server failed: %w", err)
+		return nil, fmt.Errorf("HTTP server failed: %w", serveErr)
 	}
 
-	return nil
+	return stoppedNow(), nil
+}
+
+// stoppedNow returns a closed channel, for a server that has already stopped
+// or never started.
+//
+// Returns:
+//   - <-chan struct{}: A closed channel.
+func stoppedNow() <-chan struct{} {
+	stopped := make(chan struct{})
+	close(stopped)
+
+	return stopped
+}
+
+// listen binds the API socket, wrapping it in TLS when a certificate is set.
+//
+// It binds the network that listenNetwork chooses for the address and
+// requires TLS 1.2 or later, as Fiber's Listen does by default.
+//
+// Parameters:
+//   - ctx: Context for the bind.
+//   - address: Address to listen on.
+//   - tlsCertPath: Path to TLS certificate file, or empty for HTTP.
+//   - tlsKeyPath: Path to TLS key file, or empty for HTTP.
+//
+// Returns:
+//   - net.Listener: The bound listener.
+//   - error: Non-nil if the certificate cannot be loaded or the socket cannot be bound.
+func listen(ctx context.Context, address, tlsCertPath, tlsKeyPath string) (net.Listener, error) {
+	var tlsConfig *tls.Config
+
+	if tlsCertPath != "" {
+		cert, err := tls.LoadX509KeyPair(tlsCertPath, tlsKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS key pair: %w", err)
+		}
+
+		tlsConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+		}
+	}
+
+	listenConfig := net.ListenConfig{}
+
+	listener, err := listenConfig.Listen(ctx, listenNetwork(address), address)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", address, err)
+	}
+
+	if tlsConfig != nil {
+		return tls.NewListener(listener, tlsConfig), nil
+	}
+
+	return listener, nil
+}
+
+// listenNetwork returns the network to bind address on.
+//
+// An IPv6 host binds on "tcp", so the unspecified address "::" accepts IPv6
+// clients, and also IPv4 clients on systems that support IPv4-mapped IPv6
+// addresses, such as Linux, macOS and Windows. Any other host, including an
+// unset one or an IPv4-mapped address, binds on "tcp4" and accepts IPv4
+// clients only, as Fiber does by default.
+//
+// Parameters:
+//   - address: Address to listen on.
+//
+// Returns:
+//   - string: The Fiber network name.
+func listenNetwork(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fiber.NetworkTCP4
+	}
+
+	ip, err := netip.ParseAddr(host)
+	if err != nil || !ip.Is6() || ip.Is4In6() {
+		return fiber.NetworkTCP4
+	}
+
+	return fiber.NetworkTCP
 }

@@ -13,15 +13,17 @@ Include `containers` in [`http-api-endpoints`](../../../configuration/http-api/i
 The `name` parameter filters results to a specific container by exact name.
 
 ```bash
-curl -H "Authorization: Bearer mytoken" "localhost:8080/v1/containers/details?name=nginx"
+curl -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/containers/details?name=nginx"
 ```
+
+Replace *`API_TOKEN`* with your HTTP API token.
 
 ### Image Name
 
 The `image` parameter filters results to containers running a specific image.
 
 ```bash
-curl -H "Authorization: Bearer mytoken" "localhost:8080/v1/containers/details?image=nginx:latest"
+curl -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/containers/details?image=nginx:latest"
 ```
 
 ## Response Format
@@ -54,7 +56,7 @@ The `/v1/containers/details` endpoint returns a JSON array of container details:
 - `name`: Container name
 - `image`: Image reference with tag
 - `image_id`: Local image config ID (sha256:...)
-- `digest`: Registry manifest digest (sha256:...). Empty for locally-built images.
+- `digest`: Registry manifest digest (sha256:...) for the repository in `image`, or the first digest when none matches it. Empty for locally-built images.
 - `running`: Whether the container is currently running
 - `watchtower`: Whether this is the Watchtower container itself
 - `monitor_only`: Whether the container is in monitor-only mode

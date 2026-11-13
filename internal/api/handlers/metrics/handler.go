@@ -10,7 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
 )
 
 // Handler serves the /v1/metrics endpoint.
@@ -56,17 +56,18 @@ func (h *Handler) Handle(c fiber.Ctx) error {
 type StatusHandler struct {
 	log *zerolog.Logger
 
-	Path    string
-	getLast func() *metrics.Metric
+	getLast func() *metrics.HistoryEntry
+
+	Path string
 }
 
 // NewStatusHandler creates a new status handler that returns the last scan
 // results as JSON.
 //
 // Parameters:
-//   - getLast: Function that returns the last scan metric, or nil if no scan
-//     has completed.
-func NewStatusHandler(log *zerolog.Logger, getLast func() *metrics.Metric) *StatusHandler {
+//   - getLast: Function that returns the last scan's history entry, or nil if
+//     no scan has completed.
+func NewStatusHandler(log *zerolog.Logger, getLast func() *metrics.HistoryEntry) *StatusHandler {
 	if log == nil {
 		nop := zerolog.Nop()
 		log = &nop
@@ -108,15 +109,22 @@ func (h *StatusHandler) Handle(c fiber.Ctx) error {
 		return nil
 	}
 
+	summary := fiber.Map{
+		"scanned":   last.Scanned,
+		"updated":   last.Updated,
+		"failed":    last.Failed,
+		"restarted": last.Restarted,
+		"skipped":   last.Skipped,
+	}
+
+	// Report a failed scan, and leave the field out otherwise.
+	if last.ScanFailed {
+		summary["scan_failed"] = true
+	}
+
 	err := c.Status(http.StatusOK).JSON(fiber.Map{
-		"summary": fiber.Map{
-			"scanned":   last.Scanned,
-			"updated":   last.Updated,
-			"failed":    last.Failed,
-			"restarted": last.Restarted,
-			"skipped":   last.Skipped,
-		},
-		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"summary":     summary,
+		"timestamp":   last.Timestamp.UTC().Format(time.RFC3339),
 		"api_version": "v1",
 	})
 	if err != nil {

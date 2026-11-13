@@ -1,0 +1,113 @@
+package update
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
+	dockerContainer "github.com/moby/moby/api/types/container"
+
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
+	"github.com/nicholas-fedor/watchtower/internal/observability/events"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	mockUpdate "github.com/nicholas-fedor/watchtower/internal/update/mocks"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+)
+
+// TestRunUpdatesWithNotifications_UpdateErrorKeepsPartialResults verifies
+// that work finished before an update error is still reported and cleaned up.
+// A rolling restart is canceled after the first of two containers has been
+// replaced: the notification and the metric carry the partial report, the
+// replaced container's old image is removed, and the scan still ends with
+// scan_failed.
+func TestRunUpdatesWithNotifications_UpdateErrorKeepsPartialResults(t *testing.T) {
+	t.Parallel()
+
+	const newID = container.ContainerID("e000000000000000000000000000000000000000000000000000000000000000")
+
+	// appContainer returns a running container that uses the given image.
+	appContainer := func(id, name, image string) *container.Container {
+		return mockUpdate.CreateMockContainerWithConfig(
+			id,
+			name,
+			image,
+			true,
+			false,
+			time.Now(),
+			&dockerContainer.Config{Image: image},
+		)
+	}
+
+	first := appContainer("a000000000000000000000000000000000000000000000000000000000000000", "/app-a", "org/app-a:1")
+	second := appContainer("b000000000000000000000000000000000000000000000000000000000000000", "/app-b", "org/app-b:1")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	client := newMockClient(t)
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).
+		Return([]*container.Container{first, second}, nil).Once()
+	client.EXPECT().IsContainerStale(mock.Anything, mock.Anything, mock.Anything).
+		Return(true, container.ImageID("sha256:new"), "", nil).Times(2)
+	client.EXPECT().GetImageAnnotations(mock.Anything, mock.Anything).Return(oci.Annotations{})
+
+	// Only one container is replaced. The session is canceled while waiting
+	// for the replacement to become healthy, so the rolling restart stops
+	// before the other container.
+	client.EXPECT().StopAndRemoveContainer(mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+	client.EXPECT().CreateContainer(mock.Anything, mock.Anything).Return(newID, nil).Once()
+	client.EXPECT().StartContainerByID(mock.Anything, newID).Return(nil).Once()
+	client.EXPECT().WaitForContainerHealthy(mock.Anything, newID, mock.Anything).
+		RunAndReturn(func(context.Context, container.ContainerID, time.Duration) error {
+			cancel()
+
+			return nil
+		}).Once()
+
+	var removed []container.ImageID
+
+	client.EXPECT().RemoveImageByID(mock.Anything, mock.Anything, mock.Anything).
+		Run(func(_ context.Context, id container.ImageID, _ string) {
+			removed = append(removed, id)
+		}).
+		Return(nil)
+
+	notifier := mockUpdate.NewMockNotifier(t)
+	batch := expectSessionBatch(t, notifier)
+
+	broadcaster := events.NewBroadcaster()
+	published, _ := broadcaster.SubscribeWithDone()
+
+	metric := RunUpdatesWithNotifications(ctx, RunUpdatesWithNotificationsParams{
+		Logger:           newTestLogger(t),
+		Client:           client,
+		Notifier:         notifier,
+		EventBroadcaster: broadcaster,
+		Update:           updateParams.Params{RollingRestart: true, Cleanup: true},
+	})
+
+	assert.Equal(t, &metrics.Metric{Scanned: 1, Updated: 1, Skipped: 1, ScanFailed: true}, metric)
+
+	require.Len(t, batch.sent, 1, "one notification is sent")
+	require.Len(t, batch.sent[0].Updated(), 1, "the notification reports the replaced container")
+	assert.Len(t, batch.sent[0].Skipped(), 1, "the notification reports the container left unprocessed as skipped")
+	assert.Empty(t, batch.sent[0].Failed())
+
+	updated := batch.sent[0].Updated()[0]
+	assert.Equal(t, []container.ImageID{updated.CurrentImageID()}, removed,
+		"the replaced container's old image is removed")
+
+	// Events are published synchronously into the subscriber's buffer.
+	var eventTypes []string
+
+	for len(published) > 0 {
+		eventTypes = append(eventTypes, (<-published).Type)
+	}
+
+	assert.Equal(t, []string{"scan_started", "image_cleanup", "scan_failed"}, eventTypes)
+}

@@ -9,27 +9,42 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	containerImage "github.com/nicholas-fedor/watchtower/internal/container/image"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
+	"github.com/nicholas-fedor/watchtower/internal/container/provenance"
 	"github.com/nicholas-fedor/watchtower/internal/git"
-	"github.com/nicholas-fedor/watchtower/pkg/container"
-	gitPkg "github.com/nicholas-fedor/watchtower/pkg/container/git"
-	"github.com/nicholas-fedor/watchtower/pkg/container/oci"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
 )
+
+// UpdateChecker lists containers and checks each one for a newer image.
+type UpdateChecker interface {
+	// ListContainers returns the containers that pass every filter.
+	ListContainers(ctx context.Context, filter ...filters.Filter) ([]*container.Container, error)
+	// CheckContainerUpdate reports whether a newer image is available for the
+	// container, with the latest image ID and digest.
+	CheckContainerUpdate(
+		ctx context.Context,
+		target *container.Container,
+		policy updateConfig.Policy,
+	) (bool, container.ImageID, string, error)
+}
 
 // ContainerCheck holds the update availability result for a single container.
 //
 // This endpoint never pulls an image, so the latest* fields are always empty.
 type ContainerCheck struct {
+	Timestamp            time.Time `json:"timestamp"`
 	Name                 string    `json:"name"`
 	Image                string    `json:"image"`
 	ImageID              string    `json:"image_id"`
 	Digest               string    `json:"digest"`
-	UpdateAvailable      bool      `json:"update_available"`
 	LatestImageID        string    `json:"latest_image_id"`
 	GitCommit            string    `json:"git_commit,omitempty"`
 	LatestDigest         string    `json:"latest_digest"`
 	Error                string    `json:"error,omitempty"`
-	Timestamp            time.Time `json:"timestamp"`
 	UpdateSource         string    `json:"update_source,omitempty"`
 	GitRepo              string    `json:"git_repo,omitempty"`
 	GitRef               string    `json:"git_ref,omitempty"`
@@ -41,16 +56,17 @@ type ContainerCheck struct {
 	CurrentImageRevision string    `json:"current_revision,omitempty"`
 	LatestImageVersion   string    `json:"latest_image_version,omitempty"`
 	LatestImageRevision  string    `json:"latest_revision,omitempty"`
+	UpdateAvailable      bool      `json:"update_available"`
 }
 
 // CheckResponse is the response returned by POST /v1/check.
 //
 // Parameters/returns are documented by the handler's Swagger annotations.
 type CheckResponse struct {
-	Containers []ContainerCheck `json:"containers"`
-	Count      int              `json:"count"`
 	Timestamp  string           `json:"timestamp"`
 	APIVersion string           `json:"api_version"`
+	Containers []ContainerCheck `json:"containers"`
+	Count      int              `json:"count"`
 }
 
 // CheckFunc performs the update availability check for all watched containers.
@@ -99,9 +115,9 @@ func extractFilterParams(c fiber.Ctx, key string) []string {
 //   - error: Non-nil if listing containers fails.
 func CheckForUpdates(log *zerolog.Logger,
 	ctx context.Context,
-	client container.Client,
-	filter types.Filter,
-	params types.UpdateParams,
+	client UpdateChecker,
+	filter filters.Filter,
+	params updateParams.Params,
 	gitClient *git.Client,
 ) ([]ContainerCheck, error) {
 	containers, err := client.ListContainers(ctx, filter)
@@ -120,7 +136,6 @@ func CheckForUpdates(log *zerolog.Logger,
 		result := newContainerCheck(c, now)
 
 		applyReportMetadata(c, params, &result)
-		applyLocalDigest(c, &result)
 
 		if isGitWatched(log, c, params, gitClient) {
 			checkGitSource(ctx, log, c, params, gitClient, &result)
@@ -134,7 +149,8 @@ func CheckForUpdates(log *zerolog.Logger,
 	return results, nil
 }
 
-// newContainerCheck builds the identity fields every result carries.
+// newContainerCheck builds the identity fields every result carries,
+// including the digest of the image the container runs.
 //
 // Parameters:
 //   - c: Container being checked.
@@ -142,19 +158,17 @@ func CheckForUpdates(log *zerolog.Logger,
 //
 // Returns:
 //   - ContainerCheck: Populated identity fields, source and availability left unset.
-func newContainerCheck(c types.Container, now time.Time) ContainerCheck {
+func newContainerCheck(c *container.Container, now time.Time) ContainerCheck {
 	return ContainerCheck{
 		Name:      c.Name(),
 		Image:     c.ImageName(),
 		ImageID:   string(c.ImageID()),
+		Digest:    containerImage.LocalDigest(c),
 		Timestamp: now,
 	}
 }
 
 // applyReportMetadata copies resolved Git and OCI metadata onto a result.
-//
-// Only a concrete container exposes its labels, so a stubbed container keeps
-// the empty metadata the response would otherwise report.
 //
 // Parameters:
 //   - c: Container being checked.
@@ -163,12 +177,8 @@ func newContainerCheck(c types.Container, now time.Time) ContainerCheck {
 //
 // Returns:
 //   - none.
-func applyReportMetadata(c types.Container, params types.UpdateParams, result *ContainerCheck) {
-	if _, concrete := c.(*container.Container); !concrete {
-		return
-	}
-
-	meta := container.ResolveReportMeta(c, params, container.ChangelogVars{}, oci.Annotations{})
+func applyReportMetadata(c *container.Container, params updateParams.Params, result *ContainerCheck) {
+	meta := provenance.ResolveReportMeta(c, params.Git, provenance.ChangelogVars{}, oci.Annotations{})
 	result.GitRepo = meta.GitRepo
 	result.GitRef = meta.GitRef
 	result.Changelog = meta.Changelog
@@ -179,28 +189,10 @@ func applyReportMetadata(c types.Container, params types.UpdateParams, result *C
 	result.CurrentImageRevision = meta.CurrentRevision
 }
 
-// applyLocalDigest records the local image digest when one can be resolved.
-//
-// Parameters:
-//   - c: Container being checked.
-//   - result: Result to populate in place.
-//
-// Returns:
-//   - none.
-func applyLocalDigest(c types.Container, result *ContainerCheck) {
-	info := c.ImageInfo()
-	if info == nil {
-		return
-	}
-
-	result.Digest = container.ExtractImageDigest(info.RepoDigests, c.ImageName())
-}
-
 // isGitWatched reports whether a container is checked against its hosted Git
 // source rather than its registry image.
 //
-// A nil Git client or a container without readable labels cannot take the Git
-// path, so both fall back to the registry check.
+// Without a Git client the container falls back to the registry check.
 //
 // Parameters:
 //   - log: Process logger.
@@ -212,25 +204,23 @@ func applyLocalDigest(c types.Container, result *ContainerCheck) {
 //   - bool: True when the Git source check applies.
 func isGitWatched(
 	log *zerolog.Logger,
-	c types.Container,
-	params types.UpdateParams,
+	c *container.Container,
+	params updateParams.Params,
 	gitClient *git.Client,
 ) bool {
 	if gitClient == nil {
 		return false
 	}
 
-	if _, concrete := c.(*container.Container); !concrete {
-		return false
-	}
-
-	return gitPkg.ShouldMonitor(log, c, params)
+	return provenance.ShouldMonitor(log, c, params.Git)
 }
 
 // checkGitSource compares the hosted Git ref for a container.
 //
-// It mirrors the scheduled update path: no-pull reports the same skip, and a
-// resolved tag refines the changelog link to that release.
+// With no-pull, it reports no update without contacting the Git remote. A
+// scheduled session still checks the remote and reports the container stale.
+// It never rebuilds the container. A resolved tag refines the changelog link
+// to that release.
 //
 // Parameters:
 //   - ctx: Context for the Git request.
@@ -245,19 +235,19 @@ func isGitWatched(
 func checkGitSource(
 	ctx context.Context,
 	log *zerolog.Logger,
-	c types.Container,
-	params types.UpdateParams,
+	c *container.Container,
+	params updateParams.Params,
 	gitClient *git.Client,
 	result *ContainerCheck,
 ) {
 	result.UpdateSource = "git"
 
-	// no-pull skips the Git rebuild. Report the same skip here.
-	if c.IsNoPull(params) {
+	// No-pull never rebuilds. The endpoint does not contact the Git remote.
+	if c.IsNoPull(params.Policy) {
 		return
 	}
 
-	checkResult, err := git.CheckContainer(ctx, gitClient, c, params)
+	checkResult, err := git.CheckContainer(ctx, gitClient, c, params.Git)
 	if err != nil {
 		result.Error = err.Error()
 		logCheckFailure(log, c, err, "Failed to check container Git source")
@@ -269,10 +259,10 @@ func checkGitSource(
 	result.GitCommit = checkResult.Commit
 
 	if checkResult.Tag != "" {
-		result.Changelog = container.ResolveReportMeta(
+		result.Changelog = provenance.ResolveReportMeta(
 			c,
-			params,
-			container.ChangelogVars{
+			params.Git,
+			provenance.ChangelogVars{
 				Tag:    checkResult.Tag,
 				Commit: checkResult.Commit,
 			},
@@ -299,14 +289,14 @@ func checkGitSource(
 func checkRegistrySource(
 	ctx context.Context,
 	log *zerolog.Logger,
-	client container.Client,
-	c types.Container,
-	params types.UpdateParams,
+	client UpdateChecker,
+	c *container.Container,
+	params updateParams.Params,
 	result *ContainerCheck,
 ) {
 	result.UpdateSource = "registry"
 
-	available, latestID, latestDigest, err := client.CheckContainerUpdate(ctx, c, params)
+	available, latestID, latestDigest, err := client.CheckContainerUpdate(ctx, c, params.Policy)
 	if err != nil {
 		result.Error = err.Error()
 		logCheckFailure(log, c, err, "Failed to check container for updates")
@@ -338,7 +328,7 @@ func checkRegistrySource(
 //
 // Returns:
 //   - none.
-func logCheckFailure(log *zerolog.Logger, c types.Container, err error, message string) {
+func logCheckFailure(log *zerolog.Logger, c *container.Container, err error, message string) {
 	log.Debug().
 		Err(err).
 		Str("container", c.Name()).

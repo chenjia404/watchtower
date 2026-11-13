@@ -1,0 +1,866 @@
+package update
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
+	dockerContainer "github.com/moby/moby/api/types/container"
+
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/registry/ratelimit"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	"github.com/nicholas-fedor/watchtower/internal/update/cleanup"
+	mockUpdate "github.com/nicholas-fedor/watchtower/internal/update/mocks"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+	"github.com/nicholas-fedor/watchtower/internal/update/state"
+)
+
+// TestUpdateAction_Context verifies that an update reports context
+// cancellation during listing and staleness checks, and how it handles a
+// current container that is an old Watchtower instance.
+func TestUpdateAction_Context(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handling context cancellation and timeout scenarios", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should handle context cancellation during container listing", func(t *testing.T) {
+			t.Parallel()
+
+			client := mockUpdate.CreateFakeClient(getCommonTestData(), false, false)
+			canceledCtx, cancel := context.WithCancel(t.Context())
+			cancel() // Cancel the context immediately
+
+			report, cleanupImageInfos, err := update(newTestLogger(t), canceledCtx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Nil(t, report)
+			assert.Empty(t, cleanupImageInfos)
+		})
+
+		t.Run("should keep scanning when checks fail with a cancellation of their own", func(t *testing.T) {
+			t.Parallel()
+
+			client := mockUpdate.CreateFakeClient(getCommonTestData(), false, false)
+			// Every check fails with a cancellation error while the session's
+			// context stays live.
+			client.TestData.IsContainerStaleError = context.Canceled
+
+			report, cleanupImageInfos, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+			// Only the session's own cancellation ends the scan, so each
+			// container is skipped with its check error instead.
+			require.NoError(t, err)
+			require.Len(t, report.Skipped(), 3)
+
+			for _, skipped := range report.Skipped() {
+				assert.Equal(t, "context canceled", skipped.Error())
+			}
+
+			assert.Empty(t, report.Scanned())
+			assert.Empty(t, cleanupImageInfos)
+		})
+
+		t.Run("should ensure cleanup operations are attempted even with partial failures", func(t *testing.T) {
+			t.Parallel()
+
+			// Create test data with multiple stale containers
+			testData := getCommonTestData()
+			testData.Staleness = map[string]bool{
+				"test-container-01": true,
+				"test-container-02": true,
+				"test-container-03": true,
+			}
+
+			client := mockUpdate.CreateFakeClient(testData, false, false)
+			// Simulate StopContainer failure for some containers
+			client.TestData.StopContainerError = context.Canceled
+			client.TestData.StopContainerFailCount = 1 // Fail the first stop attempt
+
+			report, cleanupImageInfos, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+			// Should still attempt to process and return a report
+			require.NoError(t, err)
+			// Update completes despite some failures
+			require.NotNil(t, report)
+			require.Len(t, report.Failed(), 1) // One container failed to stop
+			// Cleanup should still be attempted for successful operations.
+			// 2 of 3 containers succeeded and each gets its own entry for split notifications.
+			require.Len(t, cleanupImageInfos, 2)
+		})
+	})
+
+	t.Run("the current container is an old Watchtower container", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should detect self as old and return error without updating", func(t *testing.T) {
+			t.Parallel()
+
+			config := &dockerContainer.Config{
+				Image:  "watchtower:latest",
+				Labels: map[string]string{"com.centurylinklabs.watchtower": "true"},
+			}
+			oldContainer := mockUpdate.CreateMockContainerWithConfig(
+				"old-container-id",
+				"watchtower-old-abc123",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				config,
+			)
+			testData := &mockUpdate.TestData{
+				Containers: []*container.Container{oldContainer},
+			}
+			client := mockUpdate.CreateFakeClient(testData, false, false)
+
+			report, cleanupImageInfos, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{
+				Cleanup:            true,
+				CurrentContainerID: "old-container-id",
+			}, ratelimit.New())
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "old Watchtower container")
+			assert.Nil(t, report)
+			assert.Empty(t, cleanupImageInfos)
+		})
+
+		t.Run("should update restart policy to no when detecting self as old", func(t *testing.T) {
+			t.Parallel()
+
+			config := &dockerContainer.Config{
+				Image:  "watchtower:latest",
+				Labels: map[string]string{"com.centurylinklabs.watchtower": "true"},
+			}
+			oldContainer := mockUpdate.CreateMockContainerWithConfig(
+				"old-container-id",
+				"watchtower-old-abc123",
+				"watchtower:latest",
+				true,
+				false,
+				time.Now(),
+				config,
+			)
+			testData := &mockUpdate.TestData{
+				Containers: []*container.Container{oldContainer},
+			}
+			client := mockUpdate.CreateFakeClient(testData, false, false)
+
+			_, _, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{
+				Cleanup:            true,
+				CurrentContainerID: "old-container-id",
+			}, ratelimit.New())
+
+			require.Error(t, err)
+			assert.Equal(t, int32(1), client.TestData.SetRestartPolicyCount.Load())
+			assert.Equal(t, container.ContainerID("old-container-id"), client.TestData.SetRestartPolicyID)
+		})
+
+		t.Run("should proceed normally when current container is not old", func(t *testing.T) {
+			t.Parallel()
+
+			normalContainer := mockUpdate.CreateMockContainer(
+				"current-id",
+				"watchtower",
+				"watchtower:latest",
+				time.Now(),
+			)
+			testData := &mockUpdate.TestData{
+				Containers: []*container.Container{normalContainer},
+			}
+			client := mockUpdate.CreateFakeClient(testData, false, false)
+
+			report, _, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{
+				Cleanup:            true,
+				CurrentContainerID: "current-id",
+			}, ratelimit.New())
+
+			require.NoError(t, err)
+			require.NotNil(t, report)
+		})
+
+		t.Run("should proceed normally when current container ID is empty", func(t *testing.T) {
+			t.Parallel()
+
+			testData := &mockUpdate.TestData{
+				Containers: []*container.Container{},
+			}
+			client := mockUpdate.CreateFakeClient(testData, false, false)
+
+			report, _, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{
+				Cleanup: true,
+			}, ratelimit.New())
+
+			require.NoError(t, err)
+			require.NotNil(t, report)
+		})
+	})
+}
+
+// TestUpdateAction_HandleTimeout verifies that an update with an expired
+// deadline returns a deadline error.
+func TestUpdateAction_HandleTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := mockUpdate.CreateFakeClient(getCommonTestData(), false, false)
+		pastDeadline := time.Now().Add(-time.Second)
+
+		ctx, cancel := context.WithDeadline(t.Context(), pastDeadline)
+		defer cancel()
+
+		report, cleanupImageInfos, err := update(newTestLogger(t), ctx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+		synctest.Wait()
+
+		if err == nil {
+			t.Fatal("expected error")
+		}
+
+		if !strings.Contains(err.Error(), "update canceled") {
+			t.Fatalf("expected 'update canceled', got %s", err.Error())
+		}
+
+		if report != nil {
+			t.Fatal("expected nil report")
+		}
+
+		if len(cleanupImageInfos) != 0 {
+			t.Fatal("expected empty cleanupImageInfos")
+		}
+	})
+}
+
+// TestUpdateAction_EarlyCancellationCheck verifies that an update with an
+// already canceled context returns a cancellation error.
+func TestUpdateAction_EarlyCancellationCheck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := mockUpdate.CreateFakeClient(getCommonTestData(), false, false)
+		canceledCtx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel the context immediately
+
+		report, cleanupImageInfos, err := update(newTestLogger(t), canceledCtx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+		synctest.Wait()
+
+		if err == nil {
+			t.Fatal("expected error")
+		}
+
+		if !strings.Contains(err.Error(), "update canceled") {
+			t.Fatalf("expected 'update canceled', got %s", err.Error())
+		}
+
+		if report != nil {
+			t.Fatal("expected nil report")
+		}
+
+		if len(cleanupImageInfos) != 0 {
+			t.Fatal("expected empty cleanupImageInfos")
+		}
+	})
+}
+
+// TestUpdateAction_MidOperationCancellationCheck verifies that canceling the
+// context while an update runs ends it with a cancellation error.
+func TestUpdateAction_MidOperationCancellationCheck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		testData := getCommonTestData()
+		// Set simulated latency to allow operations to start before cancellation
+		testData.SimulatedLatency = 10 * time.Millisecond
+		client := mockUpdate.CreateFakeClientWithContext(ctx, testData, false, false)
+
+		// Start update in a goroutine
+		done := make(chan struct{})
+
+		var (
+			report *state.Report
+			err    error
+		)
+
+		go func() {
+			defer close(done)
+
+			report, _, err = update(newTestLogger(t), ctx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+		}()
+
+		// Let the goroutine reach its first blocking point (SimulatedLatency timer
+		// in mock's checkContextCancellation) before canceling.
+		synctest.Wait()
+		cancel()
+
+		// Wait for the update to complete
+		<-done
+
+		synctest.Wait()
+
+		// Depending on when cancellation occurred, err might be context canceled or nil with failed operations
+		if err != nil && !strings.Contains(err.Error(), "context canceled") {
+			t.Fatalf("unexpected error: %s", err.Error())
+		}
+
+		// If no early cancellation, check that operations failed due to context
+		if err == nil {
+			if report == nil {
+				t.Fatal("expected report")
+			}
+			// Check that some operations failed
+			if len(report.Failed()) == 0 {
+				t.Fatal("expected some failed operations due to cancellation")
+			}
+		}
+	})
+}
+
+// TestUpdateAction_ContextCancellationStartContainer tests that context cancellation
+// is properly handled when starting containers.
+func TestUpdateAction_ContextCancellationStartContainer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Create test data with stale containers (containers need to be stopped and restarted)
+		testData := getCommonTestData()
+		// Mark containers as stale so they will be stopped and restarted
+		testData.Staleness = map[string]bool{
+			"test-container-01": true,
+			"test-container-02": true,
+			"test-container-03": true,
+		}
+
+		// Create client with pre-canceled context
+		canceledCtx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel immediately
+
+		client := mockUpdate.CreateFakeClientWithContext(canceledCtx, testData, false, false)
+
+		_, _, err := update(newTestLogger(t), canceledCtx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+		synctest.Wait()
+
+		// The update should complete with an error related to context cancellation
+		if err != nil && !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "cancel") {
+			t.Fatalf("expected context-related error, got: %s", err.Error())
+		}
+	})
+}
+
+// TestUpdateAction_ContextTimeoutDuringProcessing tests that operations respect
+// context timeouts during container processing.
+func TestUpdateAction_ContextTimeoutDuringProcessing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Create test data with multiple containers
+		testData := getCommonTestData()
+		testData.Staleness = map[string]bool{
+			"test-container-01": true,
+			"test-container-02": true,
+			"test-container-03": true,
+		}
+
+		// Create client with context that expires immediately
+		shortCtx, cancel := context.WithTimeout(t.Context(), 0)
+		defer cancel()
+
+		client := mockUpdate.CreateFakeClientWithContext(shortCtx, testData, false, false)
+
+		// Capture start time to verify the call completes within a reasonable bound
+		start := time.Now()
+
+		report, _, err := update(newTestLogger(t), shortCtx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+		synctest.Wait()
+
+		elapsed := time.Since(start)
+
+		// Smoke test: ensure no panic occurs when handling zero-timeout context
+		// Verify the call completed within a reasonable time bound (not hanging)
+		if elapsed > 5*time.Second {
+			t.Fatalf("Update call took too long (%v), expected to complete quickly with zero-timeout context", elapsed)
+		}
+
+		// Assert that at least one of the outputs is non-nil
+		if err == nil && report == nil {
+			t.Fatalf("Expected either error or report to be non-nil, got err=%v and report=%v", err, report)
+		}
+	})
+}
+
+// runErrorPropagationTest is a helper function that sets up a fake client with
+// configurable error injection and runs the Update action for testing error propagation.
+func runErrorPropagationTest(
+	t *testing.T,
+	errorToReturn error,
+	containerStaleness map[string]bool,
+	targetOperation string,
+) (*state.Report, []cleanup.RemovedImageInfo, error) {
+	t.Helper()
+
+	testData := getCommonTestData()
+	testData.Staleness = containerStaleness
+
+	client := mockUpdate.CreateFakeClient(testData, false, false)
+
+	// Inject the appropriate error based on targetOperation
+	switch targetOperation {
+	case "ListContainers":
+		client.TestData.ListContainersError = errorToReturn
+	case "StopContainer":
+		client.TestData.StopContainerError = errorToReturn
+	case "StartContainer":
+		client.TestData.StartContainerError = errorToReturn
+	}
+
+	report, cleanupImageInfos, err := update(newTestLogger(t), t.Context(), client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+	return report, cleanupImageInfos, err
+}
+
+// TestUpdateAction_ErrorPropagationContextErrors tests that errors from client operations
+// are properly propagated through the update process.
+func TestUpdateAction_ErrorPropagationContextErrors(t *testing.T) {
+	allStale := map[string]bool{
+		"test-container-01": true,
+		"test-container-02": true,
+		"test-container-03": true,
+	}
+
+	t.Run("ListContainers context error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			expectedErrorPattern := "update canceled"
+
+			report, cleanupImageInfos, err := runErrorPropagationTest(
+				t,
+				context.Canceled,
+				nil,
+				"ListContainers",
+			)
+
+			synctest.Wait()
+
+			if expectedErrorPattern != "" && err != nil {
+				if !strings.Contains(err.Error(), expectedErrorPattern) &&
+					!strings.Contains(err.Error(), "context") {
+					t.Fatalf("expected error containing '%s' or 'context', got: %s",
+						expectedErrorPattern, err.Error())
+				}
+			}
+
+			_ = cleanupImageInfos
+			_ = report
+		})
+	})
+
+	t.Run("StopContainer context error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			report, cleanupImageInfos, err := runErrorPropagationTest(
+				t,
+				context.DeadlineExceeded,
+				allStale,
+				"StopContainer",
+			)
+
+			synctest.Wait()
+
+			// Validate error is context-related or nil
+			if err != nil && !strings.Contains(err.Error(), "context") &&
+				!strings.Contains(err.Error(), "deadline") {
+				t.Fatalf("expected context-related error, got: %s", err.Error())
+			}
+
+			// Validate report processing counts match expected
+			if report != nil && len(allStale) > 0 {
+				totalProcessed := len(report.Updated()) + len(report.Failed()) + len(report.Skipped())
+				if totalProcessed != len(allStale) {
+					t.Fatalf("expected %d processed containers, got %d (updated: %d, failed: %d, skipped: %d)",
+						len(allStale), totalProcessed, len(report.Updated()), len(report.Failed()), len(report.Skipped()))
+				}
+			}
+
+			// Verify cleanupImageInfos is handled
+			if cleanupImageInfos == nil {
+				t.Fatal("expected cleanupImageInfos to be non-nil")
+			}
+		})
+	})
+
+	t.Run("StartContainer context error", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			report, cleanupImageInfos, err := runErrorPropagationTest(
+				t,
+				context.Canceled,
+				allStale,
+				"StartContainer",
+			)
+
+			synctest.Wait()
+
+			// Validate error is context-related or nil
+			if err != nil && !strings.Contains(err.Error(), "context") &&
+				!strings.Contains(err.Error(), "cancel") {
+				t.Fatalf("expected context-related error, got: %s", err.Error())
+			}
+
+			// Validate report processing counts match expected
+			if report != nil && len(allStale) > 0 {
+				totalProcessed := len(report.Updated()) + len(report.Failed()) + len(report.Skipped())
+				if totalProcessed != len(allStale) {
+					t.Fatalf("expected %d processed containers, got %d (updated: %d, failed: %d, skipped: %d)",
+						len(allStale), totalProcessed, len(report.Updated()), len(report.Failed()), len(report.Skipped()))
+				}
+			}
+
+			// Verify cleanupImageInfos is handled
+			if cleanupImageInfos == nil {
+				t.Fatal("expected cleanupImageInfos to be non-nil")
+			}
+		})
+	})
+}
+
+// TestUpdateAction_ContextEdgeCases tests edge cases with context handling.
+func TestUpdateAction_ContextEdgeCases(t *testing.T) {
+	tests := []struct {
+		name             string
+		contextSetup     func(parent context.Context) (context.Context, context.CancelFunc)
+		staleContainers  map[string]bool
+		simulatedLatency time.Duration // Optional latency for context timeout testing
+	}{
+		{
+			name: "Background context should work",
+			contextSetup: func(parent context.Context) (context.Context, context.CancelFunc) {
+				return parent, func() {}
+			},
+			staleContainers: map[string]bool{
+				"test-container-01": true,
+				"test-container-02": true,
+				"test-container-03": true,
+			},
+		},
+		{
+			name: "WithCancel context immediately canceled",
+			contextSetup: func(parent context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(parent)
+				cancel()
+
+				return ctx, func() {}
+			},
+			staleContainers: map[string]bool{
+				"test-container-01": true,
+				"test-container-02": true,
+				"test-container-03": true,
+			},
+		},
+		{
+			name: "WithTimeout already expired",
+			contextSetup: func(parent context.Context) (context.Context, context.CancelFunc) {
+				// Use a past deadline to simulate immediate timeout
+				return context.WithDeadline(parent, time.Now().Add(-time.Hour))
+			},
+			staleContainers: map[string]bool{
+				"test-container-01": true,
+				"test-container-02": true,
+				"test-container-03": true,
+			},
+		},
+		{
+			name: "WithTimeout short timeout",
+			contextSetup: func(parent context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(parent, 1*time.Millisecond)
+			},
+			staleContainers: map[string]bool{
+				"test-container-01": true,
+				"test-container-02": true,
+				"test-container-03": true,
+			},
+			// Set simulated latency to allow timeout to expire during operations
+			simulatedLatency: 5 * time.Millisecond,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				testData := getCommonTestData()
+				testData.Staleness = tc.staleContainers
+				// Apply simulated latency if specified (for context timeout testing)
+				if tc.simulatedLatency > 0 {
+					testData.SimulatedLatency = tc.simulatedLatency
+				}
+
+				ctx, cancel := tc.contextSetup(t.Context())
+				defer cancel()
+
+				client := mockUpdate.CreateFakeClientWithContext(ctx, testData, false, false)
+
+				report, cleanupImageInfos, err := update(newTestLogger(t), ctx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+
+				synctest.Wait()
+
+				// For background context, update should succeed
+				if tc.name == "Background context should work" {
+					if err != nil {
+						t.Fatalf("Background context should not produce error: %s", err.Error())
+					}
+
+					if report == nil {
+						t.Fatal("Expected report for successful update")
+					}
+				}
+
+				// For background context, error is nil (already asserted above)
+				// For canceled/expired contexts, error is expected
+				if tc.name != "Background context should work" {
+					if err == nil {
+						t.Fatalf("Expected error for %s context, but got nil", tc.name)
+					}
+
+					// Verify the error message contains context-related keywords
+					if !strings.Contains(err.Error(), "context") &&
+						!strings.Contains(err.Error(), "cancel") &&
+						!strings.Contains(err.Error(), "deadline") &&
+						!strings.Contains(err.Error(), "timeout") &&
+						!strings.Contains(err.Error(), "update canceled") {
+						t.Fatalf("expected error to contain context-related keyword, got: %s", err)
+					}
+				}
+
+				// Keep cleanupImageInfos for potential cleanup assertions
+				_ = cleanupImageInfos
+			})
+		})
+	}
+}
+
+// TestUpdateAction_ParallelStalenessCheckCancellationPropagation tests that context
+// cancellation during parallel staleness checks is propagated as the final Update
+// error rather than being swallowed by workers.
+func TestUpdateAction_ParallelStalenessCheckCancellationPropagation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		testData := getCommonTestData()
+		testData.Staleness = map[string]bool{
+			"test-container-01": true,
+			"test-container-02": true,
+			"test-container-03": true,
+		}
+		testData.SimulatedLatency = 10 * time.Millisecond
+
+		ctx, cancel := context.WithCancel(t.Context())
+		client := mockUpdate.CreateFakeClientWithContext(ctx, testData, false, false)
+
+		done := make(chan struct{})
+
+		var err error
+
+		go func() {
+			defer close(done)
+
+			_, _, err = update(newTestLogger(t), ctx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+		}()
+
+		synctest.Wait()
+		cancel()
+
+		<-done
+
+		synctest.Wait()
+
+		if err == nil {
+			t.Fatal("expected error when context is canceled during parallel staleness checks")
+		}
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context canceled error, got: %s", err.Error())
+		}
+	})
+}
+
+// TestUpdate_CanceledStalenessPhaseEndsWithOneError verifies that a session
+// canceled during its staleness phase ends with the same error wherever the
+// cancellation lands, and reports its unchecked container as skipped with the
+// context's error.
+func TestUpdate_CanceledStalenessPhaseEndsWithOneError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// expect sets the client calls, given the session's cancel function.
+		expect func(client *mockUpdate.MockClient, app *container.Container, cancel context.CancelFunc)
+	}{
+		{
+			name: "before the checks start",
+			expect: func(client *mockUpdate.MockClient, app *container.Container, cancel context.CancelFunc) {
+				client.EXPECT().ListContainers(mock.Anything, mock.Anything).RunAndReturn(
+					func(context.Context, ...filters.Filter) ([]*container.Container, error) {
+						cancel()
+
+						return []*container.Container{app}, nil
+					},
+				).Once()
+			},
+		},
+		{
+			name: "during a check",
+			expect: func(client *mockUpdate.MockClient, app *container.Container, cancel context.CancelFunc) {
+				client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{app}, nil).Once()
+				client.EXPECT().IsContainerStale(mock.Anything, app, mock.Anything).RunAndReturn(
+					func(ctx context.Context, _ *container.Container, _ updateConfig.Policy) (bool, container.ImageID, string, error) {
+						cancel()
+
+						return false, "", "", ctx.Err()
+					},
+				).Once()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			app := skipTestContainer("app-id", "app", nil)
+			client := newMockClient(t)
+			tt.expect(client, app, cancel)
+
+			report, _, err := update(newTestLogger(t), ctx, client, updateParams.Params{}, ratelimit.New())
+
+			require.ErrorIs(t, err, context.Canceled)
+			require.EqualError(t, err, "update canceled: context canceled")
+			assert.Equal(t, map[string]string{"app": "update skipped: context canceled"}, reportErrors(report.Skipped()))
+		})
+	}
+}
+
+// TestEarlyCancellationStopContainers tests that context cancellation is properly handled
+// while the update session stops containers.
+// This test cancels the context AFTER Update starts but WHILE the stop phase
+// is iterating through containers to stop them.
+func TestEarlyCancellationStopContainers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		testData := getCommonTestData()
+		testData.Staleness = map[string]bool{
+			"test-container-01": true,
+			"test-container-02": true,
+			"test-container-03": true,
+		}
+
+		// Set simulated latency to control timing during stop operations
+		testData.SimulatedLatency = 5 * time.Millisecond
+
+		// Create a context that is NOT canceled immediately
+		ctx, cancel := context.WithCancel(t.Context())
+		client := mockUpdate.CreateFakeClientWithContext(ctx, testData, false, false)
+
+		// Start update in a goroutine
+		done := make(chan struct{})
+
+		var (
+			report            *state.Report
+			cleanupImageInfos []cleanup.RemovedImageInfo
+			err               error
+		)
+
+		go func() {
+			defer close(done)
+
+			report, cleanupImageInfos, err = update(newTestLogger(t), ctx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+		}()
+
+		// Let the goroutine reach its first blocking point (SimulatedLatency timer
+		// in mock's checkContextCancellation) before canceling.
+		// This should interrupt the stop phase while it's iterating.
+		synctest.Wait()
+		cancel()
+
+		// Wait for the update to complete
+		<-done
+
+		synctest.Wait()
+
+		// Expect an error related to context cancellation
+		if err == nil {
+			t.Fatal("expected error when context is cancelled during stop operations")
+		}
+
+		if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "cancel") {
+			t.Fatalf("expected context-related error, got: %s", err.Error())
+		}
+
+		_ = report
+		_ = cleanupImageInfos
+	})
+}
+
+// TestEarlyCancellationRestartContainers tests that context cancellation is properly handled
+// while the update session restarts containers.
+// This test cancels the context AFTER stop completes but WHILE the restart phase
+// is iterating through containers to restart them.
+func TestEarlyCancellationRestartContainers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		testData := getCommonTestData()
+		testData.Staleness = map[string]bool{
+			"test-container-01": true,
+			"test-container-02": true,
+			"test-container-03": true,
+		}
+
+		// Use longer latency to allow stop phase to complete before cancellation
+		// This ensures we reach the restart phase before canceling
+		testData.SimulatedLatency = 3 * time.Millisecond
+
+		// Create a context that is NOT canceled immediately
+		ctx, cancel := context.WithCancel(t.Context())
+		client := mockUpdate.CreateFakeClientWithContext(ctx, testData, false, false)
+
+		// Start update in a goroutine
+		done := make(chan struct{})
+
+		var (
+			report            *state.Report
+			cleanupImageInfos []cleanup.RemovedImageInfo
+			err               error
+		)
+
+		go func() {
+			defer close(done)
+
+			report, cleanupImageInfos, err = update(newTestLogger(t), ctx, client, updateParams.Params{Cleanup: true}, ratelimit.New())
+		}()
+
+		// Let the goroutine reach its first blocking point (SimulatedLatency timer
+		// in mock's checkContextCancellation) before canceling.
+		// This allows some operations to start before cancellation takes effect.
+		synctest.Wait()
+		cancel()
+
+		// Wait for the update to complete
+		<-done
+
+		synctest.Wait()
+
+		// Expect either an error or some failed operations due to context cancellation
+		// (similar to TestUpdateAction_MidOperationCancellationCheck)
+		if err != nil && !strings.Contains(err.Error(), "context canceled") {
+			t.Fatalf("unexpected error: %s", err.Error())
+		}
+
+		// If no error, check that operations were affected by context cancellation
+		if err == nil {
+			if report == nil {
+				t.Fatal("expected report when context is cancelled during restart operations")
+			}
+			// Note: Due to timing variability, we don't strictly require failed operations
+			// The key is that the test now exercises the restart phase cancellation path
+			// rather than the early ctx.Done() path
+		}
+
+		_ = cleanupImageInfos
+	})
+}

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/git/provider"
 )
 
 // applyAuth sets Bearer or basic credentials on req.
@@ -35,12 +35,12 @@ func (c *Client) applyAuth(req *http.Request, cloneHost string) {
 	if c.opts.Token != "" {
 		scheme := "Bearer"
 
-		kind := types.ResolveGitHostKind(cloneHost, c.opts.Hosts)
+		kind := provider.ResolveHostKind(cloneHost, c.opts.Hosts)
 		if kind == "" && isGiteaAPIPath(req.URL.Path) {
-			kind = types.GitHostGitea
+			kind = provider.Gitea
 		}
 
-		if kind == types.GitHostGitea {
+		if kind == provider.Gitea {
 			scheme = "token"
 		}
 
@@ -295,18 +295,6 @@ func httpHost(hostname string) string {
 	return hostname
 }
 
-// githubAPI builds a GitHub REST URL under api.github.com or host/api/v3.
-//
-// Parameters:
-//   - host: github.com or a GitHub Enterprise hostname.
-//   - segments: Path segments after the API root.
-//
-// Returns:
-//   - *url.URL: Absolute API URL.
-func (c *Client) githubAPI(host string, segments ...string) *url.URL {
-	return c.githubAPIAt(c.originOf(host), host, segments...)
-}
-
 // githubAPIAt builds a GitHub REST URL from an explicit API origin.
 //
 // Parameters:
@@ -329,18 +317,6 @@ func (c *Client) githubAPIAt(origin url.URL, host string, segments ...string) *u
 	return origin.JoinPath(append([]string{"api", "v3"}, segments...)...)
 }
 
-// gitlabAPI builds a GitLab REST URL under host/api/v4.
-//
-// Parameters:
-//   - host: GitLab hostname.
-//   - segments: Path segments after the API root.
-//
-// Returns:
-//   - *url.URL: Absolute API URL.
-func (c *Client) gitlabAPI(host string, segments ...string) *url.URL {
-	return c.gitlabAPIAt(c.originOf(host), host, segments...)
-}
-
 // gitlabAPIAt builds a GitLab REST URL from an explicit API origin.
 //
 // Parameters:
@@ -356,18 +332,6 @@ func (c *Client) gitlabAPIAt(origin url.URL, host string, segments ...string) *u
 	}
 
 	return origin.JoinPath(append([]string{"api", "v4"}, segments...)...)
-}
-
-// giteaAPI builds a Gitea or Forgejo REST URL under host/api/v1.
-//
-// Parameters:
-//   - host: Gitea or Forgejo hostname.
-//   - segments: Path segments after the API root.
-//
-// Returns:
-//   - *url.URL: Absolute API URL.
-func (c *Client) giteaAPI(host string, segments ...string) *url.URL {
-	return c.giteaAPIAt(c.originOf(host), host, segments...)
 }
 
 // giteaAPIAt builds a Gitea or Forgejo REST URL from an explicit API origin.

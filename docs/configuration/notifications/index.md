@@ -23,8 +23,10 @@ Configures the notification service URL(s).
 !!! Note "Multiple Notification URLs"
     To send notifications to multiple services simultaneously, you can:
 
-    - Use comma-separated URLs: `--notification-url="discord://xxx,telegram://yyy"`
-    - Specify the flag multiple times: `--notification-url=discord://xxx --notification-url=telegram://yyy`
+    - Use comma-separated URLs: `--notification-url="DISCORD_URL,TELEGRAM_URL"`
+    - Specify the flag multiple times: `--notification-url=DISCORD_URL --notification-url=TELEGRAM_URL`
+
+    Replace *`DISCORD_URL`* and *`TELEGRAM_URL`* with the `discord://` and `telegram://` URLs of your services.
 
     See [Configuring Multiple Notification URLs](../../notifications/introduction/index.md#using_multiple_notification_services) for detailed examples.
 
@@ -36,7 +38,7 @@ Configures the notification service URL(s).
 
 ## Notification Split by Container
 
-Send separate notifications for each updated container instead of grouping them.
+Send a separate notification for each container instead of grouping them.
 
 ```text
             Argument: --notification-split-by-container
@@ -47,7 +49,7 @@ Environment Variable: WATCHTOWER_NOTIFICATION_SPLIT_BY_CONTAINER
 
 !!! Note
     When disabled (default), notifications are grouped for all updated containers in a single session.
-    When enabled, a separate notification is sent for each container update.
+    When enabled, a separate notification is sent for each container that needs one. See [Split by Container](../../notifications/general-settings/index.md#split_by_container) for the containers that get one.
 
 ## Notification Template
 
@@ -112,7 +114,7 @@ Environment Variable: WATCHTOWER_NOTIFICATIONS_HOSTNAME
 
 ## Notifications Delay
 
-Delay before sending notifications, expressed in seconds.
+Delay before sending notifications, expressed in seconds. Watchtower exits at startup if the value is negative.
 
 ```text
             Argument: --notifications-delay
@@ -153,6 +155,10 @@ Environment Variable: WATCHTOWER_NOTIFICATION_LOG_STDOUT
                 Type: Boolean
              Default: false
 ```
+
+!!! Note
+    Only the `logger://` output goes to stdout.
+    Shoutrrr's own messages, such as a warning that a service sends without TLS, go to Watchtower's log at their level.
 
 ## Disable Startup Message
 
@@ -264,9 +270,12 @@ Environment Variable: WATCHTOWER_NOTIFICATION_EMAIL_SUBJECTTAG
              Default: ""
 ```
 
+!!! Deprecated
+    Use the [Notification Title Tag](#notification_title_tag) option instead. The `notify-upgrade` command does not carry this setting into the generated URL.
+
 #### Email Server Port
 
-The port the SMTP server listens on.
+The port the SMTP server listens on. Watchtower exits at startup if the value is outside 0 to 65535.
 
 ```text
             Argument: --notification-email-server-port
@@ -277,7 +286,7 @@ Environment Variable: WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT
 
 #### Email Delay
 
-The delay (in seconds) between sending notifications if multiple containers are updated at once.
+The delay (in seconds) between sending notifications if multiple containers are updated at once. Watchtower exits at startup if the value is negative.
 
 ```text
             Argument: --notification-email-delay
@@ -285,6 +294,9 @@ Environment Variable: WATCHTOWER_NOTIFICATION_EMAIL_DELAY
                 Type: Integer
              Default: None
 ```
+
+!!! Deprecated
+    Use the [Notifications Delay](#notifications_delay) option instead. The `notify-upgrade` command does not carry this setting into the generated URL.
 
 ### Gotify
 
@@ -339,8 +351,8 @@ Environment Variable: WATCHTOWER_NOTIFICATION_MSTEAMS_HOOK_URL
 ```
 
 !!! Warning
-    The value of `--notification-msteams-hook` **must** be an absolute URL using the `https://` scheme (including the host).
-    Relative URLs and non-HTTPS schemes are rejected at runtime.
+    The value of the `notification-msteams-hook` configuration option **must** be a Power Automate or Azure Logic Apps workflow webhook URL. It uses `https://` and carries a `sig` signature parameter.
+    Watchtower refuses to start with any other URL, such as a retired Office 365 connector URL on `webhook.office.com`.
 
 !!! Note "This option can also reference a file, in which case the contents of the file are used."
 
@@ -373,7 +385,9 @@ Environment Variable: WATCHTOWER_NOTIFICATION_SLACK_IDENTIFIER
 
 #### Slack Channel
 
-A string which overrides the webhook's default channel (optional).
+A Slack channel ID, such as `C0123456789`, which overrides the default channel of a legacy custom-integration webhook (optional).
+Slack ignores this override for webhooks created by a Slack app, which always post to the channel chosen when the webhook was created.
+A channel name such as `#ops` or a user such as `@alice` cannot be carried into the Shoutrrr URL, so Watchtower logs a warning and posts to the webhook's own channel.
 
 ```text
             Argument: --notification-slack-channel

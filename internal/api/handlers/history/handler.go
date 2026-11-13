@@ -8,15 +8,16 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
 )
 
 // Handler serves the /v1/history endpoint.
 type Handler struct {
 	log *zerolog.Logger
 
-	Path    string
 	getHist func(*time.Time, *time.Time, int) []metrics.HistoryEntry
+
+	Path string
 }
 
 // New creates a new history handler backed by the given function.

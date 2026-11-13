@@ -7,7 +7,6 @@ on:
     paths:
       - cmd/**
       - internal/**
-      - pkg/**
       - tools/tplprev/**
       - go.mod
       - go.sum
@@ -24,7 +23,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Harden the Runner (Step Security)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
 
@@ -45,7 +44,18 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           args: --timeout=5m --config=build/golangci-lint/golangci-lint.yaml
-          only-new-issues: true
 
       - name: Lint tplprev
-        run: make tplprev-lint
+        working-directory: tools/tplprev
+        run: golangci-lint run --config "${GITHUB_WORKSPACE}/build/golangci-lint/golangci-lint.yaml" ./...
+
+      - name: Check Swagger documents are up to date
+        run: |
+          check_dir="${RUNNER_TEMP}/swagger"
+          go tool swag init --quiet -d ./ -g main.go -o "${check_dir}"
+          for file in docs.go swagger.json swagger.yaml; do
+            if ! diff -u "internal/api/swagger/${file}" "${check_dir}/${file}"; then
+              echo "::error file=internal/api/swagger/${file}::Swagger documents are stale. Run 'task swag:gen' and commit the result."
+              exit 1
+            fi
+          done

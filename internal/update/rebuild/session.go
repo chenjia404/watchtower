@@ -1,0 +1,415 @@
+package rebuild
+
+import (
+	"context"
+	"sync"
+
+	"github.com/rs/zerolog"
+
+	composeApply "github.com/nicholas-fedor/watchtower/internal/compose/apply"
+	composeProject "github.com/nicholas-fedor/watchtower/internal/compose/project"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
+	"github.com/nicholas-fedor/watchtower/internal/container/provenance"
+	"github.com/nicholas-fedor/watchtower/internal/git"
+	"github.com/nicholas-fedor/watchtower/internal/git/project"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+	"github.com/nicholas-fedor/watchtower/internal/update/state"
+)
+
+// Applier loads a Compose project and applies selected services.
+type Applier interface {
+	// Apply loads the project, merges Labels, and runs compose up or build.
+	//
+	// Parameters:
+	//   - ctx: Cancellation and timeout.
+	//   - req: Project, services, labels, and build-only flag.
+	//
+	// Returns:
+	//   - []composeApply.Container: Service instances after apply.
+	//   - error: Non-nil when load or apply fails.
+	Apply(ctx context.Context, req composeApply.Request) ([]composeApply.Container, error)
+}
+
+// The Compose client applies the projects that a session checks out.
+var _ Applier = (*composeApply.Client)(nil)
+
+// Session holds watcher results for one Update() invocation.
+type Session struct {
+	apply    Applier
+	client   *git.Client
+	checkout func(ctx context.Context, dir, commit string, opts project.CheckoutOptions) error
+	results  map[container.ContainerID]git.CheckResult
+	built    map[container.ContainerID]container.ImageID
+	applied  map[container.ContainerID]struct{}
+	mu       sync.Mutex
+}
+
+// NewSession constructs an empty session for one Update() call.
+//
+// Parameters:
+//   - client: Git monitor client. May be unused when no container is monitored.
+//
+// Returns:
+//   - *Session: Session with empty result and built maps.
+func NewSession(client *git.Client) *Session {
+	return &Session{
+		client:   client,
+		apply:    composeApply.NewClient(),
+		checkout: project.Checkout,
+		results:  make(map[container.ContainerID]git.CheckResult),
+		built:    make(map[container.ContainerID]container.ImageID),
+		applied:  make(map[container.ContainerID]struct{}),
+	}
+}
+
+// Watching reports whether Git monitoring applies to a container in this session.
+//
+// Parameters:
+//   - log: Process logger.
+//   - c: Container to inspect.
+//   - params: Update parameters.
+//
+// Returns:
+//   - bool: True when the session should check Git instead of the registry.
+func (s *Session) Watching(log *zerolog.Logger, c *container.Container, params updateParams.Params) bool {
+	if s == nil || s.client == nil {
+		return false
+	}
+
+	return provenance.ShouldMonitor(log, c, params.Git)
+}
+
+// PrepareRebuilds applies stale Git-associated containers.
+//
+// The compose-dir label or the compose-project configuration option selects a
+// local path context. Watchtower checks out the Compose project directory, then
+// runs compose up or compose build.
+// Git labels alone use a Git URL context. The Docker daemon clones that URL.
+//
+// Failures are recorded in failed and those containers are unmarked stale so
+// the current session does not stop them. Checkout and build failures leave the
+// running instance untouched. Compose apply failures report that Docker Compose
+// may have partially recreated the batch. An unreadable compose project
+// directory is not recorded in failed. That container is unmarked stale, marked
+// skipped when progress is set, and is not rebuilt from a Git URL.
+//
+// Parameters:
+//   - log: Process logger.
+//   - ctx: Cancellation and timeout.
+//   - docker: Docker client used for ImageBuild.
+//   - containers: Candidates already marked stale.
+//   - params: Update parameters.
+//   - progress: Session progress, or nil.
+//   - failed: Map to record per-container build errors.
+//
+// Returns:
+//   - none.
+func (s *Session) PrepareRebuilds(
+	log *zerolog.Logger,
+	ctx context.Context,
+	docker ImageBuilder,
+	containers []*container.Container,
+	params updateParams.Params,
+	progress *state.Progress,
+	failed map[container.ContainerID]error,
+) {
+	if s == nil || s.client == nil {
+		return
+	}
+
+	var remote []*container.Container
+
+	var batches composeBatches
+
+	ordered := orderedComposeContainers(log, containers, params.UseComposeDependsOn)
+
+	for _, c := range ordered {
+		if !s.needsApply(c, params) {
+			continue
+		}
+
+		result, _ := s.result(c.ID())
+
+		if s.reuseUnrestartedBuild(log, c, result, params, progress) {
+			continue
+		}
+
+		ref, err := composeProject.ResolveProjectDir(containerLabels(c), params.ComposeProjects)
+		if err != nil {
+			c.SetStale(false)
+
+			if progress != nil {
+				progress.AddSkipped(log, c, err, params)
+			}
+
+			log.Warn().
+				Err(err).
+				Str("container", c.Name()).
+				Str("image", c.ImageName()).
+				Msg(logging.ComposeDirUnreadable)
+
+			continue
+		}
+
+		if ref.Dir == "" {
+			remote = append(remote, c)
+
+			continue
+		}
+
+		batches.add(ref, composeMember{container: c, result: result})
+	}
+
+	for _, batch := range batches.inDependencyOrder(log, containers, params.UseComposeDependsOn) {
+		s.applyCompose(log, ctx, batch, params, progress, failed)
+	}
+
+	for _, c := range remote {
+		result, _ := s.result(c.ID())
+
+		err := s.build(log, ctx, docker, c, result, params, progress)
+		if err != nil {
+			failed[c.ID()] = err
+			c.SetStale(false)
+			withGitMeta(log.Warn().
+				Err(err).
+				Str("container", c.Name()).
+				Str("image", c.ImageName()),
+				c, params, result.Tag, result.Commit).
+				Msg(logging.GitBuildFailed)
+		}
+	}
+
+	// No-restart leaves these containers running with their old stamp. Record
+	// each image with its commit so a later session reuses it.
+	if params.NoRestart {
+		s.mu.Lock()
+		for id, image := range s.built {
+			s.client.RecordUnrestartedBuild(id, s.results[id].Commit, image)
+		}
+		s.mu.Unlock()
+	}
+}
+
+// ExcludeApplied drops containers already recreated by Compose apply.
+//
+// Parameters:
+//   - containers: Full candidate list.
+//
+// Returns:
+//   - []*container.Container: Containers that may still use inspect recreate.
+func (s *Session) ExcludeApplied(containers []*container.Container) []*container.Container {
+	if s == nil {
+		return containers
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.applied) == 0 {
+		return containers
+	}
+
+	kept := make([]*container.Container, 0, len(containers))
+
+	for _, c := range containers {
+		if _, ok := s.applied[c.ID()]; ok {
+			continue
+		}
+
+		kept = append(kept, c)
+	}
+
+	return kept
+}
+
+// NoRestartBuiltIDs returns a snapshot of container IDs built during a no-restart update.
+//
+// Parameters:
+//   - params: Update parameters.
+//
+// Returns:
+//   - map[container.ContainerID]struct{}: Built container IDs, or nil when restart is enabled.
+func (s *Session) NoRestartBuiltIDs(params updateParams.Params) map[container.ContainerID]struct{} {
+	if s == nil || !params.NoRestart {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := make(map[container.ContainerID]struct{}, len(s.built))
+	for id := range s.built {
+		ids[id] = struct{}{}
+	}
+
+	return ids
+}
+
+// store records the Git check result of a container.
+//
+// Parameters:
+//   - containerID: Container identity.
+//   - result: Check outcome from the Git client.
+//
+// Returns:
+//   - none.
+func (s *Session) store(containerID container.ContainerID, result git.CheckResult) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.results[containerID] = result
+}
+
+// result returns the stored Git check result of a container.
+//
+// Parameters:
+//   - containerID: Container identity.
+//
+// Returns:
+//   - git.CheckResult: Stored result.
+//   - bool: True when a result was stored.
+func (s *Session) result(containerID container.ContainerID) (git.CheckResult, bool) {
+	if s == nil {
+		return git.CheckResult{}, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, ok := s.results[containerID]
+
+	return result, ok
+}
+
+// needsApply reports whether a container is a stale Git-associated container that may be rebuilt.
+//
+// Parameters:
+//   - c: Candidate container.
+//   - params: Update parameters.
+//
+// Returns:
+//   - bool: True when a Git apply backend should run.
+func (s *Session) needsApply(c *container.Container, params updateParams.Params) bool {
+	if c == nil || !c.IsStale() {
+		return false
+	}
+
+	result, ok := s.result(c.ID())
+	if !ok || !result.Stale {
+		return false
+	}
+
+	return Allowed(c, params.Policy)
+}
+
+// reuseUnrestartedBuild records an image an earlier session built from the
+// same commit, when the no-restart configuration option left the container
+// running.
+//
+// The running container keeps its old stamp. Every check finds it stale for
+// that commit until it is recreated. Reusing the image keeps it stale in the
+// report and out of the restart phase without building the commit again.
+//
+// Parameters:
+//   - log: Process logger.
+//   - c: Stale associated container.
+//   - result: The container's Git check result.
+//   - params: Update parameters.
+//   - progress: Session progress, or nil.
+//
+// Returns:
+//   - bool: True when an earlier image was reused and no build is needed.
+func (s *Session) reuseUnrestartedBuild(
+	log *zerolog.Logger,
+	c *container.Container,
+	result git.CheckResult,
+	params updateParams.Params,
+	progress *state.Progress,
+) bool {
+	if !params.NoRestart {
+		return false
+	}
+
+	image := s.client.UnrestartedBuild(c.ID(), result.Commit)
+	if image == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	s.built[c.ID()] = image
+	s.mu.Unlock()
+
+	log.Debug().
+		Str("container", c.Name()).
+		Str("commit", shortGitSHA(result.Commit)).
+		Str("image_id", image.ShortID()).
+		Msg("Image for this commit was already built. Recreate the container to use it")
+
+	// The changelog line was logged when the image was built. Logging it again
+	// would repeat the notification every session.
+	reportGitImage(log, progress, c, image, result, params)
+
+	return true
+}
+
+// Allowed reports whether a Git-watched container may be rebuilt.
+//
+// The no-pull and monitor-only configuration options and labels check Git
+// without building. A newer ref then leaves the container in place.
+//
+// Parameters:
+//   - c: Git-watched container.
+//   - policy: Update policy for the no-pull and monitor-only checks.
+//
+// Returns:
+//   - bool: True when neither no-pull nor monitor-only applies.
+func Allowed(c *container.Container, policy updateConfig.Policy) bool {
+	return !c.IsNoPull(policy) && !c.IsMonitorOnly(policy)
+}
+
+// reportGitImage records an image built from Git as the container's latest
+// image in the session report, with its repository, ref, and changelog.
+//
+// A Git build has no pulled image, so no image annotations are passed and the
+// latest image version stays empty. The Git tag is the only new version.
+//
+// Parameters:
+//   - log: Process logger.
+//   - progress: Session progress, or nil.
+//   - c: Container the image was built for.
+//   - image: Image the build produced, or empty when it is unknown.
+//   - result: The container's Git check result.
+//   - params: Update parameters.
+//
+// Returns:
+//   - provenance.ReportMeta: The report details, or the zero value when
+//     progress is nil.
+func reportGitImage(
+	log *zerolog.Logger,
+	progress *state.Progress,
+	c *container.Container,
+	image container.ImageID,
+	result git.CheckResult,
+	params updateParams.Params,
+) provenance.ReportMeta {
+	if progress == nil {
+		return provenance.ReportMeta{}
+	}
+
+	if image != "" {
+		progress.SetLatestImage(log, c.ID(), image)
+	}
+
+	return progress.SetLatestImageMeta(log, c, params, provenance.ChangelogVars{
+		Tag:    result.Tag,
+		Commit: result.Commit,
+	}, oci.Annotations{})
+}

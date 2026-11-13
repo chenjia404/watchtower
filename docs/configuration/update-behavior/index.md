@@ -59,6 +59,7 @@ Environment Variable: WATCHTOWER_DISK_SPACE_MAX
 
 !!! Note
     - Accepted sizes: bare bytes, decimal `B`/`KB`/`MB`/`GB`/`TB`/`PB`, or binary `KiB`/`MiB`/`GiB`/`TiB`/`PiB`.
+    - A size is a whole or decimal number, such as `40GB` or `1.5TB`.
     - This option cannot be a percentage.
     - Either this option or [`disk-space-warn`](#disk_space_warn) enables the check and updates the Prometheus image-usage gauges.
 
@@ -78,7 +79,9 @@ Environment Variable: WATCHTOWER_DISK_SPACE_WARN
 !!! Note
     - Accepted sizes: bare bytes, decimal `B`/`KB`/`MB`/`GB`/`TB`/`PB`, or binary `KiB`/`MiB`/`GiB`/`TiB`/`PiB`.
     - This option may also be a percent of [`disk-space-max`](#disk_space_max) (for example `80%`).
+    - A size or percentage is a whole or decimal number, such as `1.5TB` or `62.5%`.
     - A percent value requires [`disk-space-max`](#disk_space_max).
+    - A percent value must be greater than 0 and less than 100.
     - When both are set, the warn amount must be less than the max.
     - Configuring a warning threshold without a maximum is valid and supported.
 
@@ -119,7 +122,7 @@ Environment Variable: WATCHTOWER_REMOVE_VOLUMES
 
 ## Container Stop Timeout
 
-Sets the timeout (e.g., `30s`) before forcibly stopping a container during updates.
+Sets the timeout (e.g., `30s`) before forcibly stopping a container during updates. Watchtower exits at startup if the value is negative.
 
 ```text
             Argument: --stop-timeout
@@ -131,6 +134,10 @@ Environment Variable: WATCHTOWER_TIMEOUT
 !!! Note
     Bare numeric values (e.g., `60` or `1.5`) without a time unit are interpreted as seconds.
     Using a unit suffix (`s`, `m`, etc.) is recommended and required for other time units.
+
+!!! Note
+    A stop timeout set on the container itself takes precedence, such as one set with [`docker run --stop-timeout`](https://docs.docker.com/reference/cli/docker/container/run/#stop-timeout) or the Compose [`stop_grace_period`](https://docs.docker.com/reference/compose-file/services/#stop_grace_period) option.
+    A container stop timeout of `-1`, which tells Docker to wait indefinitely, is ignored in favor of this option.
 
 ## Monitor Only
 

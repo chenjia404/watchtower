@@ -198,7 +198,7 @@ The Docker daemon clones the repository when `main` moves, builds the image, and
     ```
 
 6. Push a commit to `main`.
-    On the next session the daemon builds `https://github.com/org/app.git#<commit>`, Watchtower recreates `app`, and the replacement receives the stamp.
+    On the next session the daemon builds `https://github.com/org/app.git#COMMIT`, for the commit you pushed, shown here as *`COMMIT`*. Watchtower then recreates `app` and stamps the replacement.
 
     ```bash title="After the rebuild the stamp is that commit"
     docker inspect -f '{{index .Config.Labels "com.centurylinklabs.watchtower.git-last-commit"}}' app
@@ -386,14 +386,19 @@ Watchtower stays on the registry path and logs at debug.
 
 Enabling values are `true`, `yes`, `1`, and `t`.
 Disabling values are `false`, `no`, `0`, and `f`.
-Those are the same loose booleans as other Watchtower labels.
+Case and surrounding spaces are ignored.
+An empty or unrecognized value counts as absent.
+The [Git Enable](../../configuration/git-monitoring/index.md#git_enable) configuration option then decides.
+Watchtower does not warn about an unrecognized value.
+Watchtower's other boolean labels do not accept `yes` or `no`.
+They warn about a value they cannot read.
 
 ### How Watchtower Chooses a Running Revision
 
 Watchtower compares the hosted tip to the first known running revision it can find, in this order:
 
 1. Stamp labels on the container (`com.centurylinklabs.watchtower.git-last-commit`, `com.centurylinklabs.watchtower.git-last-tag`)
-2. Image identity (`org.opencontainers.image.revision`, a semver `org.opencontainers.image.version`, or a `name:git-<shortsha>` tag)
+2. Image identity (`org.opencontainers.image.revision`, a semver `org.opencontainers.image.version`, or a Git build tag such as `app:git-0123456789ab`)
 3. The remote tip remembered earlier in this Watchtower process
 
 ```mermaid
@@ -530,11 +535,11 @@ Use a [local path context](#local_path_context) when the compose file is the sou
 
 On a stale session:
 
-1. Watchtower builds a Docker Git URL context: `https://git.example.com/org/app.git#<commit>`, or `#<commit>:<subdir>` when `com.centurylinklabs.watchtower.git-context` or the [Git Context](../../configuration/git-monitoring/index.md#git_context) configuration option is set.
+1. Watchtower builds a Docker Git URL context: `https://git.example.com/org/app.git#COMMIT`, or `#COMMIT:SUBDIRECTORY` when `com.centurylinklabs.watchtower.git-context` or the [Git Context](../../configuration/git-monitoring/index.md#git_context) configuration option is set. Here *`COMMIT`* is the commit to build and *`SUBDIRECTORY`* is the build context directory.
 2. The Docker daemon (BuildKit) performs a shallow clone of that commit.
     Watchtower does not clone the tree first.
 3. The Dockerfile is `com.centurylinklabs.watchtower.git-dockerfile`, or the [Git Dockerfile](../../configuration/git-monitoring/index.md#git_dockerfile) configuration option, defaulting to `Dockerfile`.
-4. The image is tagged `name:git-<shortsha>` (12 hex characters) and the original image name is retagged.
+4. Watchtower tags the image with its original name and with `NAME:git-SHORT_SHA`, where *`SHORT_SHA`* is the commit's first 12 hex characters.
 5. Watchtower recreates the container from the running inspect config.
 6. Stamp labels are written onto the new container.
 
@@ -692,9 +697,25 @@ Override that default with `com.centurylinklabs.watchtower.git-watch`.
 
 #### What Is Written After a Rebuild
 
+A rebuilt container, whether Watchtower recreated it or Compose applied it, carries the association labels it needs on its next check.
+
+- `com.centurylinklabs.watchtower.git-repo` is written without credentials.
+- `com.centurylinklabs.watchtower.git-host` is written as the API origin, without credentials or a query.
+- `com.centurylinklabs.watchtower.git-ref`, `com.centurylinklabs.watchtower.git-semver-policy`, `com.centurylinklabs.watchtower.git-dockerfile`, and `com.centurylinklabs.watchtower.git-context` are written only when a label or a [Git Image](../../configuration/git-monitoring/index.md#git_image) mapping supplied them.
+- Values that came from the [Git Dockerfile](../../configuration/git-monitoring/index.md#git_dockerfile) or [Git Context](../../configuration/git-monitoring/index.md#git_context) configuration options are not written.
+    A later change to those options still applies to the rebuilt container.
+- The built-in defaults, the `main` ref and the `none` semver policy, are not written either.
+
 `git-watch=true` is written only when the source container already had an explicit enabling watch label.
 When the watcher was on only because of the [Git Enable](../../configuration/git-monitoring/index.md#git_enable) configuration option, the replacement has no `git-watch` label.
 Setting [Git Enable](../../configuration/git-monitoring/index.md#git_enable) to `false` later still applies.
+
+!!! Note "Containers rebuilt through Compose by v1.24.0 or earlier"
+    Those releases also wrote the default ref, semver policy, Dockerfile, and context onto containers rebuilt through Compose.
+    A container rebuilt that way treats them as its own labels.
+    A later change to [Git Dockerfile](../../configuration/git-monitoring/index.md#git_dockerfile) or [Git Context](../../configuration/git-monitoring/index.md#git_context) does not reach it.
+    To check a container, run `docker inspect -f '{{json .Config.Labels}}' CONTAINER` and look for `com.centurylinklabs.watchtower.git-dockerfile` and `com.centurylinklabs.watchtower.git-context`. Replace *`CONTAINER`* with the container name.
+    If you did not set them, recreate the container with `docker compose up -d --force-recreate SERVICE` so it starts from the labels in your Compose file. Replace *`SERVICE`* with the container's Compose service.
 
 ### Where Settings Come From
 
@@ -836,6 +857,7 @@ That container is skipped for the session.
 `patch`, `minor`, and `major` consider release tags only.
 A pre-release such as `v1.2.4-rc.1` is ignored.
 Build metadata (`v1.2.3+sha`) does not change the comparison.
+When release tags compare equal, such as `v1.2.3` and `1.2.3` or `v1.2.3+a` and `v1.2.3+b`, Watchtower uses the tag whose name sorts first.
 A pre-release baseline still advances to the later release (`v1.2.3-rc.1` to `v1.2.3`).
 
 ### Per-Image Mapping
@@ -921,7 +943,7 @@ An HTTPS origin uses the token, or the username and password.
 ### Docker Secrets
 
 !!! Important "Prefer Docker Secrets for tokens and passwords"
-    Point the [Git Auth Token](../../configuration/git-monitoring/index.md#git_auth_token) and [Git Password](../../configuration/git-monitoring/index.md#git_password) configuration options at a mounted file, typically `/run/secrets/<name>`.
+    Point the [Git Auth Token](../../configuration/git-monitoring/index.md#git_auth_token) and [Git Password](../../configuration/git-monitoring/index.md#git_password) configuration options at a mounted file, typically `/run/secrets/SECRET_NAME`, where *`SECRET_NAME`* is the name of the Docker secret.
     Watchtower reads the file contents at startup.
     Do not put the value in the compose file or in the Watchtower process environment.
 
@@ -970,13 +992,20 @@ The [Git Insecure Skip TLS](../../configuration/git-monitoring/index.md#git_inse
                 image: nickfedor/watchtower
                 volumes:
                     - /var/run/docker.sock:/var/run/docker.sock
-                    - /path/to/id_ed25519:/run/secrets/id_ed25519:ro
-                    - /path/to/known_hosts:/run/secrets/known_hosts:ro
+                    - SSH_KEY_FILE:/run/secrets/id_ed25519:ro
+                    - KNOWN_HOSTS_FILE:/run/secrets/known_hosts:ro
                 environment:
                     WATCHTOWER_GIT_ENABLE: "true"
                     WATCHTOWER_GIT_SSH_KEY_PATH: /run/secrets/id_ed25519
                     WATCHTOWER_GIT_SSH_KNOWN_HOSTS: /run/secrets/known_hosts
         ```
+
+        Replace the following:
+
+        - *`SSH_KEY_FILE`*: the path of the SSH private key on the Docker host
+        - *`KNOWN_HOSTS_FILE`*: the path of the `known_hosts` file on the Docker host
+
+        A relative path starts with `./` and is read from the Compose project directory, which is the directory of the first Compose file unless you set `--project-directory`.
 
 === "Docker CLI"
 
@@ -988,7 +1017,7 @@ The [Git Insecure Skip TLS](../../configuration/git-monitoring/index.md#git_inse
         docker run -d \
             --name watchtower \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v $(pwd)/secrets/git_auth_token.txt:/run/secrets/git_auth_token:ro \
+            -v "$(pwd)/secrets/git_auth_token.txt:/run/secrets/git_auth_token:ro" \
             --restart unless-stopped \
             -e WATCHTOWER_GIT_ENABLE=true \
             -e WATCHTOWER_GIT_AUTH_TOKEN=/run/secrets/git_auth_token \
@@ -1001,14 +1030,19 @@ The [Git Insecure Skip TLS](../../configuration/git-monitoring/index.md#git_inse
         docker run -d \
             --name watchtower \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /path/to/id_ed25519:/run/secrets/id_ed25519:ro \
-            -v /path/to/known_hosts:/run/secrets/known_hosts:ro \
+            -v "SSH_KEY_FILE:/run/secrets/id_ed25519:ro" \
+            -v "KNOWN_HOSTS_FILE:/run/secrets/known_hosts:ro" \
             --restart unless-stopped \
             -e WATCHTOWER_GIT_ENABLE=true \
             -e WATCHTOWER_GIT_SSH_KEY_PATH=/run/secrets/id_ed25519 \
             -e WATCHTOWER_GIT_SSH_KNOWN_HOSTS=/run/secrets/known_hosts \
             nickfedor/watchtower
         ```
+
+        Replace the following:
+
+        - *`SSH_KEY_FILE`*: the absolute path of the SSH private key on the Docker host
+        - *`KNOWN_HOSTS_FILE`*: the absolute path of the `known_hosts` file on the Docker host
 
 ### Hosts
 
@@ -1148,6 +1182,10 @@ They report stale only when the remote has advanced past the known running revis
 ### Disable Container Restart
 
 The [Disable Container Restart](../../configuration/update-behavior/index.md#disable_container_restart) configuration option can ask Docker to build, or Compose to build, but cannot persist the stamp on the running container.
-The next session uses image identity or the remembered tip, and rebuilds only if the remote has advanced again.
+The container stays stale until you recreate it.
+Watchtower remembers the image it built for that container and commit.
+Later sessions report the container stale with that image and build again only when the remote advances.
+The memory lasts only while Watchtower runs.
+The first session after Watchtower restarts builds the current commit once more.
 
 When the watcher is off, the container stays on the registry digest path.

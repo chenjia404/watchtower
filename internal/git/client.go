@@ -13,24 +13,26 @@ import (
 	"unicode"
 
 	"github.com/rs/zerolog"
-	"golang.org/x/mod/semver"
 
-	"github.com/nicholas-fedor/watchtower/internal/compose"
-	gitPkg "github.com/nicholas-fedor/watchtower/pkg/container/git"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	composeLabels "github.com/nicholas-fedor/watchtower/internal/compose/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container/provenance"
+	"github.com/nicholas-fedor/watchtower/internal/git/semver"
+	gitConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/git"
 )
 
-// Options configures a Git watcher client. Credentials stay here, not on UpdateParams.
+// Options configures a Git watcher client. Credentials stay here, not on [gitConfig.Defaults].
 type Options struct {
+	Hosts           map[string]string
 	Token           string
 	Username        string
 	Password        string
 	SSHKeyPath      string
 	SSHKnownHosts   string
-	Timeout         time.Duration
 	CABundle        []byte
+	Timeout         time.Duration
 	InsecureSkipTLS bool
-	Hosts           map[string]string
 }
 
 // CheckRequest is a remote staleness query for one associated container.
@@ -45,24 +47,37 @@ type CheckRequest struct {
 
 // CheckResult is the outcome of a remote Git check.
 type CheckResult struct {
-	Stale  bool
 	Commit string
 	Tag    string
 	Kind   string
 	// Ref is the branch or tag name used to clone (empty when unknown).
-	Ref string
+	Ref   string
+	Stale bool
 }
 
 // Client inspects remotes and clones repositories for Git-sourced updates.
 type Client struct {
-	log      *zerolog.Logger
-	opts     Options
-	http     *http.Client
-	lister   RefLister
-	origins  map[string]url.URL
-	mu       sync.Mutex
-	seen     map[string]seenStamp
+	// lister lists a remote's branches and tags for staleness checks.
+	lister RefLister
+	// log receives the client's log lines.
+	log *zerolog.Logger
+	// http sends provider API requests, such as tag lists and host probes.
+	http *http.Client
+	// origins maps a hostname to the HTTP API origin found for it.
+	origins map[string]url.URL
+	// seen holds, per repository, ref, and policy, the remote tip last
+	// observed without a rebuild.
+	seen map[string]seenStamp
+	// rejected holds, per Compose member, the commit a failed apply wrote and
+	// the baseline to check against instead.
 	rejected map[string]rejectedApply
+	// unrestarted holds, per container, the commit and image of a build the
+	// no-restart configuration option left unused.
+	unrestarted map[container.ContainerID]unrestartedBuild
+	// opts holds the credentials, timeout, and host mappings the client uses.
+	opts Options
+	// mu guards seen, rejected, and unrestarted.
+	mu sync.Mutex
 }
 
 // seenStamp is a remote tip observed without rebuilding the running container.
@@ -78,6 +93,14 @@ type rejectedApply struct {
 	commit         string
 	previousCommit string
 	previousTag    string
+}
+
+// unrestartedBuild is an image built for a container that was not recreated.
+type unrestartedBuild struct {
+	// commit is the commit the image was built from.
+	commit string
+	// image is the image the build produced.
+	image container.ImageID
 }
 
 // unacceptedRevision is a baseline that cannot match a real Git object.
@@ -160,14 +183,14 @@ func (c *Client) Check(ctx context.Context, req CheckRequest) (CheckResult, erro
 	defer cancel()
 
 	req.Ref = cmpOr(req.Ref, "main")
-	req.Policy = cmpOr(req.Policy, types.GitPolicyNone)
+	req.Policy = cmpOr(req.Policy, semver.PolicyNone)
 
 	err := validateRef(req.Ref)
 	if err != nil {
 		return CheckResult{}, err
 	}
 
-	if req.Policy != types.GitPolicyNone {
+	if req.Policy != semver.PolicyNone {
 		return c.checkTagPolicy(ctx, req)
 	}
 
@@ -188,7 +211,7 @@ func (c *Client) Check(ctx context.Context, req CheckRequest) (CheckResult, erro
 //   - error: Non-nil on clone or checkout failure. The directory is removed on error.
 func (c *Client) Clone(ctx context.Context, repo string, rev CheckResult) (string, error) {
 	if c == nil {
-		return "", fmt.Errorf("%w: client is nil", ErrCloneFailed)
+		return "", fmt.Errorf("%w: client is nil", errCloneFailed)
 	}
 
 	ctx, cancel := c.WithTimeout(ctx)
@@ -196,7 +219,7 @@ func (c *Client) Clone(ctx context.Context, repo string, rev CheckResult) (strin
 
 	dir, err := os.MkdirTemp("", "watchtower-git-*")
 	if err != nil {
-		return "", fmt.Errorf("%w: mkdir: %w", ErrCloneFailed, err)
+		return "", fmt.Errorf("%w: mkdir: %w", errCloneFailed, err)
 	}
 
 	err = cloneCheckout(ctx, dir, repo, rev, c)
@@ -215,34 +238,28 @@ func (c *Client) Clone(ctx context.Context, repo string, rev CheckResult) (strin
 //   - ctx: Cancellation and timeout.
 //   - client: Git monitor client.
 //   - c: Container to inspect.
-//   - params: Update parameters with mappings and defaults.
+//   - defaults: Git settings with mappings and defaults.
 //
 // Returns:
 //   - CheckResult: Empty result when the container is not associated.
-//   - error: Non-nil on monitor failure.
+//   - error: Wraps [semver.ErrInvalidPolicy] or [provenance.ErrInvalidHost] for an invalid label. Non-nil on monitor failure.
 func CheckContainer(
 	ctx context.Context,
 	client *Client,
-	c types.Container,
-	params types.UpdateParams,
+	c *container.Container,
+	defaults gitConfig.Defaults,
 ) (CheckResult, error) {
-	assoc, ok := gitPkg.ResolveAssociation(c, params)
+	assoc, ok := provenance.ResolveAssociation(c, defaults)
 	if !ok {
 		return CheckResult{}, nil
 	}
 
-	if raw := strings.TrimSpace(policyLabelValue(c)); raw != "" && !types.ValidGitPolicy(strings.ToLower(raw)) {
-		return CheckResult{}, fmt.Errorf("%w: %s", ErrInvalidPolicy, raw)
+	err := assoc.Validate()
+	if err != nil {
+		return CheckResult{}, err //nolint:wrapcheck // Validate's error already names the invalid label.
 	}
 
-	if raw := strings.TrimSpace(assoc.Host); raw != "" {
-		_, err := gitPkg.ParseAPIOrigin(raw)
-		if err != nil {
-			return CheckResult{}, fmt.Errorf("%w: %w", ErrInvalidHost, err)
-		}
-	}
-
-	lastCommit, lastTag := gitPkg.Baseline(c)
+	lastCommit, lastTag := provenance.Baseline(c)
 	if commit, tag, rejected := client.unacceptedBaseline(ApplyStampKeyFrom(c), lastCommit); rejected {
 		lastCommit = commit
 		lastTag = tag
@@ -314,22 +331,22 @@ type ApplyStampKey struct {
 //
 // Returns:
 //   - ApplyStampKey: Project name, directory, config files, service, and replica number.
-func ApplyStampKeyFrom(c types.Container) ApplyStampKey {
+func ApplyStampKeyFrom(c *container.Container) ApplyStampKey {
 	if c == nil {
 		return ApplyStampKey{}
 	}
 
-	dir, _ := c.GetLabel(gitPkg.ComposeDirLabel)
+	dir, _ := c.GetLabel(labels.ComposeDir)
 
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return ApplyStampKey{}
 	}
 
-	projectName, _ := c.GetLabel(compose.ComposeProjectLabel)
-	files, _ := c.GetLabel(compose.ComposeConfigFilesLabel)
-	service, _ := c.GetLabel(compose.ComposeServiceLabel)
-	number, _ := c.GetLabel(compose.ComposeContainerNumber)
+	projectName, _ := c.GetLabel(composeLabels.ComposeProjectLabel)
+	files, _ := c.GetLabel(composeLabels.ComposeConfigFilesLabel)
+	service, _ := c.GetLabel(composeLabels.ComposeServiceLabel)
+	number, _ := c.GetLabel(composeLabels.ComposeContainerNumber)
 
 	service = strings.TrimSpace(service)
 	if service == "" {
@@ -416,6 +433,62 @@ func (c *Client) AcceptApply(key ApplyStampKey, commit string) {
 	delete(c.rejected, memberKey)
 }
 
+// RecordUnrestartedBuild records an image built for a container that the
+// no-restart configuration option leaves running.
+//
+// The running container keeps its old stamp. Later checks still find it
+// stale for the same commit. [Client.UnrestartedBuild] lets a later session in
+// this process find the image instead of building it again. The record lasts
+// until Watchtower exits.
+//
+// Parameters:
+//   - containerID: Container that was not recreated.
+//   - commit: Commit the image was built from.
+//   - image: Image the build produced.
+func (c *Client) RecordUnrestartedBuild(containerID container.ContainerID, commit string, image container.ImageID) {
+	if c == nil || containerID == "" || commit == "" || image == "" {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.unrestarted == nil {
+		c.unrestarted = make(map[container.ContainerID]unrestartedBuild)
+	}
+
+	c.unrestarted[containerID] = unrestartedBuild{
+		commit: strings.ToLower(strings.TrimSpace(commit)),
+		image:  image,
+	}
+}
+
+// UnrestartedBuild returns the image recorded by [Client.RecordUnrestartedBuild]
+// for a container and commit.
+//
+// Parameters:
+//   - containerID: Container to look up.
+//   - commit: Commit the current check wants to build.
+//
+// Returns:
+//   - container.ImageID: The image built earlier from commit, or empty when
+//     none was recorded or it was built from another commit.
+func (c *Client) UnrestartedBuild(containerID container.ContainerID, commit string) container.ImageID {
+	if c == nil {
+		return ""
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	built, ok := c.unrestarted[containerID]
+	if !ok || !sameRevision(commit, built.commit) {
+		return ""
+	}
+
+	return built.image
+}
+
 // repositoryOperationError wraps a remote operation failure without exposing repository credentials.
 //
 // Parameters:
@@ -433,9 +506,9 @@ func repositoryOperationError(operation, repo string, err error) error {
 
 	classified := classifyTransport(err)
 	switch {
-	case errors.Is(classified, ErrAuthRequired),
-		errors.Is(classified, ErrAuthFailed),
-		errors.Is(classified, ErrRepoNotFound):
+	case errors.Is(classified, errAuthRequired),
+		errors.Is(classified, errAuthFailed),
+		errors.Is(classified, errRepoNotFound):
 		return fmt.Errorf("%s %s: %w", operation, safeRepo, classified)
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%s %s: %w", operation, safeRepo, context.Canceled)
@@ -500,7 +573,7 @@ func (c *Client) checkTagPolicy(ctx context.Context, req CheckRequest) (CheckRes
 		byName[tag.Name] = tag.Hash
 	}
 
-	lastTag := baselineTag(req.LastTag)
+	lastTag := semver.Baseline(req.LastTag)
 	inferred := false
 	// An empty or non-semver stamp still names a release when the commit
 	// matches that tag. Use the tag so patch and minor do not jump to the
@@ -513,14 +586,14 @@ func (c *Client) checkTagPolicy(ctx context.Context, req CheckRequest) (CheckRes
 	}
 
 	if lastTag == "" && req.LastCommit == "" {
-		selected, ok := SelectTag("", names, req.Policy)
+		selected, ok := semver.SelectTag("", names, req.Policy)
 		if !ok {
 			// No usable semver tags. Observe the configured ref without
 			// treating the missing baseline as a reason to rebuild.
 			return c.checkExactRef(ctx, CheckRequest{
 				Repo:       req.Repo,
 				Ref:        req.Ref,
-				Policy:     types.GitPolicyNone,
+				Policy:     semver.PolicyNone,
 				Host:       req.Host,
 				LastCommit: req.LastCommit,
 			})
@@ -535,7 +608,7 @@ func (c *Client) checkTagPolicy(ctx context.Context, req CheckRequest) (CheckRes
 		}, nil
 	}
 
-	selected, ok := SelectTag(lastTag, names, req.Policy)
+	selected, ok := semver.SelectTag(lastTag, names, req.Policy)
 	if !ok {
 		if inferred {
 			return CheckResult{
@@ -739,26 +812,15 @@ func (c *Client) remember(repo, ref, policy, commit, tag string) {
 // Returns:
 //   - string: Matching tag name, or empty.
 func tagForCommit(byName map[string]string, commit string) string {
-	bestName := ""
-	bestCanon := ""
+	var matches []string
 
 	for name, hash := range byName {
-		if !sameRevision(commit, hash) {
-			continue
-		}
-
-		canon := canonicalize(name)
-		if !semver.IsValid(canon) || semver.Prerelease(canon) != "" {
-			continue
-		}
-
-		if bestCanon == "" || semver.Compare(canon, bestCanon) > 0 {
-			bestCanon = canon
-			bestName = name
+		if sameRevision(commit, hash) {
+			matches = append(matches, name)
 		}
 	}
 
-	return bestName
+	return semver.HighestRelease(matches)
 }
 
 // tagName returns the resolved name when the ref is a tag.
@@ -864,24 +926,4 @@ func isHexSHA(s string) bool {
 	}
 
 	return true
-}
-
-// policyLabelValue returns the raw git-semver-policy label, or empty.
-//
-// Parameters:
-//   - c: Container to inspect.
-//
-// Returns:
-//   - string: Raw label value, or empty when unset.
-func policyLabelValue(c types.Container) string {
-	if c == nil {
-		return ""
-	}
-
-	val, ok := c.GetLabel(gitPkg.SemverPolicyLabel)
-	if !ok {
-		return ""
-	}
-
-	return val
 }

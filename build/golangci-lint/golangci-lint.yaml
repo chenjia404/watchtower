@@ -16,6 +16,7 @@ run:
   timeout: 5m # Maximum time allowed for linting (5 minutes)
   allow-parallel-runners: true # Allow multiple parallel golangci-lint instances running.
   allow-serial-runners: true # Allow multiple golangci-lint instances running, but serialize them around a lock.
+  relative-path-mode: gomod # Exclusion paths are relative to the go.mod of the module being checked.
 
 # Formatters Configuration
 formatters:
@@ -25,7 +26,10 @@ formatters:
     - gofumpt # Enforce a stricter format than gofmt, while being backwards compatible.
     - goimports # Manages Go import lines, adds missing imports, removes unused ones
     - golines # Checks if code is formatted, and fixes long lines.
-    - swaggo # Check if swaggo comments are formatted.
+
+  exclusions:
+    paths:
+      - ^tools/ # Separate modules, formatted from their own directory with their own import grouping.
 
   settings:
     gci:
@@ -107,7 +111,6 @@ linters:
     - errorlint # Errorlint is a linter for that can be used to find code that will cause problems with the error wrapping scheme introduced in Go 1.13.
     - exptostd # Detects functions from golang.org/x/exp/ that can be replaced by std functions.
     - fatcontext # Detects nested contexts in loops and function literals.
-    - ginkgolinter # Enforces standards of using ginkgo and gomega.
     - gocritic # Provides diagnostics that check for bugs, performance and style issues.
     - godot # Check if comments end in a period.
     - goheader # Checks if file header matches to pattern.
@@ -144,7 +147,6 @@ linters:
     - dogsled # Checks assignments with too many blank identifiers (e.g. x, _, _, _, := f()).
     - dupl # Detects duplicate fragments of code.
     - durationcheck # Check for two durations multiplied together.
-    - embeddedstructfieldcheck # Embedded types should be at the top of the field list of a struct, and there must be an empty line separating embedded fields from regular fields.
     - errchkjson # Checks types passed to the json encoding functions. Reports unsupported types and reports occurrences where the check for the returned error can be omitted.
     - errname # Checks that sentinel errors are prefixed with the `Err` and error types are suffixed with the `Error`.
     - errcheck # Errcheck is a program for checking for unchecked errors in Go code. These unchecked errors can be critical bugs in some cases.
@@ -154,6 +156,7 @@ linters:
     - funcorder # Checks the order of functions, methods, and constructors.
     - gocheckcompilerdirectives # Checks that go compiler directive comments (//go:) are valid.
     - gochecksumtype # Run exhaustiveness checks on Go "sum types".
+    - gocyclo # Computes and checks the cyclomatic complexity of functions. [fast]
     - godoclint # Checks Golang's documentation practice (godoc).
     - godox # Detects usage of FIXME, TODO and other keywords inside comments.
     - gomoddirectives # Manage the use of 'replace', 'retract', and 'excludes' directives in go.mod.
@@ -194,13 +197,14 @@ linters:
     - arangolint # Opinionated best practices for arangodb client.
     - cyclop # Checks function and package cyclomatic complexity.
     - depguard # Checks if package imports are in a list of acceptable packages.
+    - embeddedstructfieldcheck # Embedded types should be at the top of the field list of a struct. Disabled because betteralign decides field order.
     - exhaustruct # Checks if all structure fields are initialized.
     - funlen # Checks for long functions.
+    - ginkgolinter # Enforces standards of using ginkgo and gomega.
     - gochecknoglobals # Check that no global variables exist.
     - gochecknoinits # Checks that no init functions are present in Go code.
     - gocognit # Computes and checks the cognitive complexity of functions.
     - goconst # Finds repeated strings that could be replaced by a constant.
-    - gocyclo # Computes and checks the cyclomatic complexity of functions. [fast]
     - gomodguard # Allow and blocklist linter for direct Go module dependencies. This is different from depguard where there are different block types for example version constraints and module recommendations.
     - interfacebloat # A linter that checks the number of methods inside an interface. [fast]
     - ireturn # Accept Interfaces, Return Concrete Types.
@@ -241,8 +245,16 @@ linters:
           severity: warning
           disabled: false
           exclude:
-            - ".*internal/api/metrics/.*"
-            - ".*internal/metrics/.*"
+            - ".*internal/observability/metrics/.*"
+    wrapcheck:
+      # Constructors that build a new error rather than return one from another call.
+      extra-ignore-sigs:
+        - ratelimit.FromResponse(
+        - ratelimit.FromErrorMessage(
+    gocyclo:
+      # Functions above this complexity are reported. The functions listed under
+      # exclusions are already above it and are excluded until they are split up.
+      min-complexity: 25
     testifylint:
       enable-all: true
     varnamelen:
@@ -303,22 +315,22 @@ linters:
       - path: "doc.go$"
         linters:
           - dupword
-      # Exclude G117 (potential exposure of secrets via JSON marshaling) false positives for struct field names
-      - path: "pkg/notifications/email.go"
+      # Functions above the gocyclo threshold today. Remove an entry when its function is split up.
+      - path: "internal/git/project/checkout.go"
         linters:
-          - gosec
-        text: "G117"
-      - path: "pkg/types/config.go"
+          - gocyclo
+        text: "of func `Checkout` is high"
+      - path: "internal/update/restart/restart.go"
         linters:
-          - gosec
-        text: "G117"
-      - path: "pkg/types/registry_credentials.go"
+          - gocyclo
+        text: "of func `restartStaleContainer` is high"
+      - path: "internal/registry/digest/digest.go"
         linters:
-          - gosec
-        text: "G117"
+          - gocyclo
+        text: "of func `fetchDigest` is high"
     paths:
       - ".*/mocks/.*"
-      - ".*/internal/api/swagger/.*"
+      - "^internal/api/swagger/"
     warn-unused: true
 
 # Issues Configuration

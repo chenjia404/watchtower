@@ -1,0 +1,424 @@
+package provenance
+
+import (
+	"bytes"
+	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/nicholas-fedor/watchtower/internal/container/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
+	gitConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/git"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/containerfixture"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/logcapture"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/modelfixture"
+)
+
+// TestResolveReportMeta verifies the report metadata for a container: its Git
+// source, from labels, mappings, or OCI annotations, the current and latest
+// versions, and the changelog URL, with credentials redacted throughout.
+func TestResolveReportMeta(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns empty metadata for a nil container", func(t *testing.T) {
+		t.Parallel()
+
+		assert.Equal(t, ReportMeta{}, ResolveReportMeta(nil, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}))
+	})
+
+	t.Run("prefers a git-repo label over mapping and OCI source", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("myapp:latest"),
+			containerfixture.WithLabels(map[string]string{
+				labels.GitRepo:      "https://github.com/org/from-label.git",
+				labels.GitRef:       "release",
+				labels.ChangelogURL: "https://example.com/changelog/{tag}",
+			}),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel: "https://github.com/org/from-oci.git",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{
+			Images: map[string]gitConfig.Image{
+				"myapp:latest": {
+					Repo: "https://github.com/org/from-map.git",
+					Ref:  "mapped",
+				},
+			},
+		}, ChangelogVars{Tag: "v1.2.3"}, oci.Annotations{})
+
+		assert.Equal(t, "https://github.com/org/from-label.git", meta.GitRepo)
+		assert.Equal(t, "release", meta.GitRef)
+		assert.Equal(t, "https://example.com/changelog/v1.2.3", meta.Changelog)
+		assert.Equal(t, "https://github.com/org/from-oci.git", meta.Source)
+	})
+
+	t.Run("preserves bare local Git repository paths", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithLabels(map[string]string{
+				labels.GitRepo: "../repos/app?release=1",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{})
+		assert.Equal(t, "../repos/app?release=1", meta.GitRepo)
+	})
+
+	t.Run("redacts credentials and query tokens from Git metadata", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithLabels(map[string]string{
+				labels.GitRepo:      "https://user:secret@github.com/org/app.git?access_token=query#main",
+				labels.ChangelogURL: "https://example.com/notes?version=2#install",
+			}),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel:        "https://source:source-secret@example.com/org/source.git?token=source-query",
+				oci.URLLabel:           "https://example.com/image?format=json&author=team#download",
+				oci.DocumentationLabel: "https://example.com/docs?lang=en#install",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{})
+		assert.Equal(t, "https://github.com/org/app.git#main", meta.GitRepo)
+		assert.NotContains(t, meta.GitRepo, "secret")
+		assert.NotContains(t, meta.GitRepo, "query")
+		assert.Equal(t, "https://example.com/notes?version=2#install", meta.Changelog)
+		assert.Equal(t, "https://example.com/org/source.git", meta.Source)
+		assert.Equal(t, "https://example.com/image?format=json&author=team#download", meta.ImageURL)
+		assert.Equal(t, "https://example.com/docs?lang=en#install", meta.Documentation)
+	})
+
+	t.Run("uses an image mapping then OCI source when labels are absent", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("myapp:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel:        "https://github.com/org/from-oci.git",
+				oci.URLLabel:           "https://example.com/image",
+				oci.DocumentationLabel: "https://example.com/docs",
+				oci.RevisionLabel:      "abc123",
+				oci.VersionLabel:       "v2.0.0",
+			}),
+		)
+
+		mapped := ResolveReportMeta(c, gitConfig.Defaults{
+			Images: map[string]gitConfig.Image{
+				"myapp:latest": {Repo: "https://github.com/org/from-map.git", Ref: "mapped"},
+			},
+		}, ChangelogVars{}, oci.Annotations{})
+		assert.Equal(t, "https://github.com/org/from-map.git", mapped.GitRepo)
+		assert.Equal(t, "mapped", mapped.GitRef)
+		assert.Equal(t, "https://github.com/org/from-map/releases", mapped.Changelog)
+
+		ociOnly := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{})
+		assert.Equal(t, "https://github.com/org/from-oci.git", ociOnly.GitRepo)
+		assert.Empty(t, ociOnly.GitRef)
+		assert.Equal(t, "https://github.com/org/from-oci/releases", ociOnly.Changelog)
+		assert.Equal(t, "https://github.com/org/from-oci.git", ociOnly.Source)
+		assert.Equal(t, "https://example.com/image", ociOnly.ImageURL)
+		assert.Equal(t, "https://example.com/docs", ociOnly.Documentation)
+		assert.Equal(t, "abc123", ociOnly.CurrentRevision)
+		assert.Empty(t, ociOnly.LatestRevision)
+		assert.Equal(t, "v2.0.0", ociOnly.CurrentVersion)
+		assert.Empty(t, ociOnly.LatestVersion)
+	})
+
+	t.Run("reports current and latest versions from separate images", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.RevisionLabel: "old123",
+				oci.VersionLabel:  "10.11.5",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{
+			Revision: "new456",
+			Version:  "10.11.6",
+		})
+
+		assert.Equal(t, "10.11.5", meta.CurrentVersion)
+		assert.Equal(t, "10.11.6", meta.LatestVersion)
+		assert.Equal(t, "old123", meta.CurrentRevision)
+		assert.Equal(t, "new456", meta.LatestRevision)
+	})
+
+	t.Run("resolves project-scoped fields from the latest image", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel:        "https://github.com/org/old.git",
+				oci.URLLabel:           "https://example.com/old",
+				oci.DocumentationLabel: "https://example.com/old-docs",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{
+			Source:        "https://github.com/org/new.git",
+			URL:           "https://example.com/new",
+			Documentation: "https://example.com/new-docs",
+			Version:       "1.0.0",
+		})
+
+		assert.Equal(t, "https://github.com/org/new.git", meta.GitRepo)
+		assert.Equal(t, "https://github.com/org/new.git", meta.Source)
+		assert.Equal(t, "https://example.com/new", meta.ImageURL)
+		assert.Equal(t, "https://example.com/new-docs", meta.Documentation)
+		assert.Equal(t, "https://github.com/org/new/releases", meta.Changelog)
+	})
+
+	t.Run("falls back per field when the latest image omits an annotation", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel: "https://github.com/org/app.git",
+				oci.URLLabel:    "https://example.com/image",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{Version: "1.0.0"})
+
+		assert.Equal(t, "https://github.com/org/app.git", meta.Source)
+		assert.Equal(t, "https://example.com/image", meta.ImageURL)
+		assert.Equal(t, "1.0.0", meta.LatestVersion)
+	})
+
+	t.Run("derives a versioned changelog when a release tag is known", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel:  "https://github.com/org/app.git",
+				oci.VersionLabel: "10.11.6",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{Tag: "v10.11.6"}, oci.Annotations{
+			Version: "10.11.6",
+		})
+		assert.Equal(t, "https://github.com/org/app/releases/tag/v10.11.6", meta.Changelog)
+	})
+
+	t.Run("derives changelog URLs for known and mapped hosts", func(t *testing.T) {
+		t.Parallel()
+
+		gitlab := modelfixture.Container(containerfixture.WithImageName("app:latest"), containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "https://gitlab.com/org/app.git",
+		}))
+		assert.Equal(t, "https://gitlab.com/org/app/-/releases", ResolveReportMeta(gitlab, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+
+		codeberg := modelfixture.Container(containerfixture.WithImageName("app:latest"), containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "https://codeberg.org/org/app.git",
+		}))
+		assert.Equal(t, "https://codeberg.org/org/app/releases", ResolveReportMeta(codeberg, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+
+		mappedHost := modelfixture.Container(containerfixture.WithImageName("app:latest"), containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "git@git.example.com:org/app.git",
+			labels.GitHost: "https://git.example.com:3000/gitea",
+		}))
+		assert.Equal(t, "https://git.example.com:3000/gitea/org/app/releases", ResolveReportMeta(mappedHost, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+
+		ghe := modelfixture.Container(containerfixture.WithImageName("app:latest"), containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "https://github.company.com/org/app.git",
+			labels.GitHost: "https://github.company.com/github",
+		}))
+		assert.Equal(t, "https://github.company.com/github/org/app/releases", ResolveReportMeta(ghe, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+
+		nested := modelfixture.Container(containerfixture.WithImageName("app:latest"), containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "https://gitlab.com/group/sub/repo.git",
+		}))
+		assert.Equal(t, "https://gitlab.com/group/sub/repo/-/releases", ResolveReportMeta(nested, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+	})
+
+	t.Run("redacts credentials from the new image's annotations", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel: "https://github.com/org/old.git",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{
+			Source:        "https://newuser:newscret@github.com/org/new.git?token=query#main",
+			URL:           "https://example.com/image?signature=abc&format=json",
+			Documentation: "https://example.com/docs?lang=en#install",
+		})
+
+		// The new image's values are the ones reported, so redaction must reach
+		// them. Userinfo goes and sensitive query keys go, benign ones stay.
+		assert.Equal(t, "https://github.com/org/new.git#main", meta.GitRepo)
+		assert.NotContains(t, meta.GitRepo, "newscret")
+		assert.NotContains(t, meta.GitRepo, "query")
+		assert.Equal(t, "https://example.com/image?format=json", meta.ImageURL)
+		assert.NotContains(t, meta.ImageURL, "signature")
+		assert.Equal(t, "https://example.com/docs?lang=en#install", meta.Documentation)
+	})
+
+	t.Run("leaves changelog empty for an unknown host without OCI URL fields", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(containerfixture.WithImageName("app:latest"), containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "https://unknown.example/org/app.git",
+		}))
+		assert.Empty(t, ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+	})
+
+	t.Run("falls back to OCI URL then documentation for changelog", func(t *testing.T) {
+		t.Parallel()
+
+		urlOnly := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.URLLabel: "https://example.com/image",
+			}),
+		)
+		assert.Equal(t, "https://example.com/image", ResolveReportMeta(urlOnly, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+
+		docsOnly := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.DocumentationLabel: "https://example.com/docs",
+			}),
+		)
+		assert.Equal(t, "https://example.com/docs", ResolveReportMeta(docsOnly, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{}).Changelog)
+	})
+
+	t.Run("uses a mapping ref when the container is not watcher-associated", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(containerfixture.WithImageName("myapp:latest"))
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{
+			Images: map[string]gitConfig.Image{
+				"myapp:latest": {Ref: "from-map"},
+			},
+		}, ChangelogVars{}, oci.Annotations{})
+		assert.Empty(t, meta.GitRepo)
+		assert.Equal(t, "from-map", meta.GitRef)
+	})
+
+	t.Run("never uses an OCI version as a display ref", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.VersionLabel: "1.4.0",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{})
+		assert.Empty(t, meta.GitRef)
+		assert.Equal(t, "1.4.0", meta.CurrentVersion)
+	})
+
+	t.Run("does not treat OCI source as a watcher association", func(t *testing.T) {
+		t.Parallel()
+
+		c := modelfixture.Container(
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithImageLabels(map[string]string{
+				oci.SourceLabel: "https://github.com/org/from-oci.git",
+			}),
+		)
+
+		meta := ResolveReportMeta(c, gitConfig.Defaults{}, ChangelogVars{}, oci.Annotations{})
+		assert.Equal(t, "https://github.com/org/from-oci.git", meta.GitRepo)
+
+		assoc, ok := ResolveAssociation(c, gitConfig.Defaults{})
+		assert.False(t, ok)
+		assert.Equal(t, Association{}, assoc)
+	})
+}
+
+// The changelog log entry is what makes the legacy notification line appear, and
+// it must only be emitted when the feature is enabled.
+func TestLogChangelogOnlyWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		labels     map[string]string
+		policy     updateConfig.Policy
+		wantEvents int
+	}{
+		{
+			name:       "disabled",
+			labels:     map[string]string{labels.GitRepo: "https://github.com/org/app.git"},
+			wantEvents: 0,
+		},
+		{
+			name:       "changelog url alone is not enough",
+			labels:     map[string]string{labels.ChangelogURL: "https://example.com/notes"},
+			wantEvents: 0,
+		},
+		{
+			name:       "global flag",
+			labels:     map[string]string{labels.GitRepo: "https://github.com/org/app.git"},
+			policy:     updateConfig.Policy{EnableChangelog: true},
+			wantEvents: 1,
+		},
+		{
+			name:       "container label",
+			labels:     map[string]string{labels.EnableChangelog: "true"},
+			wantEvents: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := modelfixture.Container(containerfixture.WithLabels(tt.labels))
+			meta := ReportMeta{Changelog: "https://example.com/notes"}
+
+			var buf bytes.Buffer
+
+			log := zerolog.New(&buf)
+
+			LogChangelog(&log, c, tt.policy, meta)
+
+			events := logcapture.Entries[logcapture.Entry](t, buf.String())
+			assert.Len(t, events, tt.wantEvents, "log output: %s", buf.String())
+		})
+	}
+}
+
+// TestLogChangelogSkipsEmptyURL verifies that no entry is logged without a
+// resolved changelog URL or a container.
+func TestLogChangelogSkipsEmptyURL(t *testing.T) {
+	t.Parallel()
+
+	c := modelfixture.Container()
+
+	var buf bytes.Buffer
+
+	log := zerolog.New(&buf)
+
+	LogChangelog(&log, c, updateConfig.Policy{EnableChangelog: true}, ReportMeta{})
+	LogChangelog(&log, nil, updateConfig.Policy{EnableChangelog: true}, ReportMeta{
+		Changelog: "https://example.com/notes",
+	})
+
+	assert.Empty(t, buf.String())
+}

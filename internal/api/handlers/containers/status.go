@@ -4,9 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nicholas-fedor/watchtower/pkg/container"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	containerImage "github.com/nicholas-fedor/watchtower/internal/container/image"
 )
+
+// ContainerLister lists the containers the handler reports on.
+type ContainerLister interface {
+	// ListContainers returns the containers that pass every filter.
+	ListContainers(ctx context.Context, filter ...filters.Filter) ([]*container.Container, error)
+}
 
 // Status describes a single watched container's current image identity.
 type Status struct {
@@ -28,7 +35,8 @@ type ListFunc func(ctx context.Context) ([]Status, error)
 
 // filterStatuses filters a slice of statuses by name and image query parameters.
 func filterStatuses(statuses []Status, name, image string) []Status {
-	var filtered []Status
+	// Start empty so a filter that matches nothing encodes as [] rather than null.
+	filtered := make([]Status, 0, len(statuses))
 
 	for _, status := range statuses {
 		if name != "" && status.Name != name {
@@ -56,8 +64,8 @@ func filterStatuses(statuses []Status, name, image string) []Status {
 // Returns:
 //   - []Status: Status for each watched container.
 //   - error: Non-nil if listing containers fails.
-func ListContainerStatuses(ctx context.Context, client container.Client, filter types.Filter) ([]Status, error) {
-	var list []types.Container
+func ListContainerStatuses(ctx context.Context, client ContainerLister, filter filters.Filter) ([]Status, error) {
+	var list []*container.Container
 
 	var err error
 
@@ -79,16 +87,11 @@ func ListContainerStatuses(ctx context.Context, client container.Client, filter 
 	return statuses, nil
 }
 
-func containerToStatus(c types.Container) Status {
-	status := Status{
+func containerToStatus(c *container.Container) Status {
+	return Status{
 		Name:    c.Name(),
 		Image:   c.ImageName(),
 		ImageID: string(c.ImageID()),
+		Digest:  containerImage.LocalDigest(c),
 	}
-
-	if info := c.ImageInfo(); info != nil {
-		status.Digest = container.ExtractImageDigest(info.RepoDigests, c.ImageName())
-	}
-
-	return status
 }

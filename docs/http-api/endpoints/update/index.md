@@ -21,27 +21,29 @@ Watchtower supports using the `image` URL query parameter to filter updates for 
 The following `curl` command would trigger an update of all container images monitored by Watchtower:
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update"
 ```
+
+Replace *`API_TOKEN`* with your HTTP API token.
 
 #### Image Filtering with Tags
 
-You can specify image tags to target containers running a specific version (e.g., `foo/bar:1.0`).
+You can specify image tags to target containers running a specific version (e.g., `org/app:1.0`).
 
-For example, to update only containers using `foo/bar:1.0` and `foo/baz:latest`:
+For example, to update only containers using `org/app:1.0` and `org/worker:latest`:
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?image=foo/bar:1.0,foo/baz:latest"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?image=org/app:1.0,org/worker:latest"
 ```
 
 #### Image Filtering without Tags
 
 If no tag is provided, Watchtower matches containers regardless of their tag.
 
-The following `curl` command would trigger an update for the images `foo/bar` and `foo/baz`:
+The following `curl` command would trigger an update for the images `org/app` and `org/worker`:
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?image=foo/bar,foo/baz"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?image=org/app,org/worker"
 ```
 
 ### Container Name
@@ -55,7 +57,7 @@ You can specify exact container names or Go regex patterns to match containers.
 For example, to update only containers with names starting with `web-`:
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?container=^web-.*"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?container=^web-.*"
 ```
 
 #### Multiple Container Patterns
@@ -63,7 +65,7 @@ curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?contai
 Use commas to specify multiple patterns:
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?container=^web-.*,^api-.*"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?container=^web-.*,^api-.*"
 ```
 
 #### Regex Pattern Matching
@@ -84,7 +86,7 @@ It accepts Go durations such as `30s`, `2m`, or `10m`.
 The value is capped by the configured update API timeout (`--http-api-update-timeout` / `WATCHTOWER_HTTP_API_UPDATE_TIMEOUT`, default `10m`).
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?timeout=15m"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?timeout=15m"
 ```
 
 !!! Note
@@ -99,7 +101,7 @@ The `/v1/update` endpoint supports an `async` query parameter to trigger updates
 Adding the `?async=true` parameter to a POST request causes the handler to spawn the update in a background goroutine and return immediately with HTTP 202 Accepted.
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?async=true"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?async=true"
 ```
 
 Response:
@@ -112,26 +114,25 @@ Content-Type: application/json
 Equivalent example for a targeted async update:
 
 ```bash
-curl -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update?image=foo/bar:latest&async=true"
+curl -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update?image=org/app:latest&async=true"
 ```
 
 The same concurrency behavior applies to async requests: full updates return 429 if another update is already in progress, while targeted updates block until the lock is available before spawning the async goroutine.
 
 #### Status Codes for Async Requests
 
-| Status Code | Description                                                                               |
-|:-----------:|:------------------------------------------------------------------------------------------|
-|     202     | Update triggered successfully and running asynchronously                                  |
-|     401     | Invalid or missing authentication token                                                   |
-|     408     | Update handler timed out (exceeded configured limit, default 10m)                         |
-|     429     | Another update is already in progress (full updates only) or the request was rate limited |
-|     500     | Internal server error during request processing                                           |
-|     503     | Client cancelled while waiting on update lock (targeted updates only)                     |
+| Status Code | Description                                                                                                                                 |
+|:-----------:|:--------------------------------------------------------------------------------------------------------------------------------------------|
+|     202     | Update triggered successfully and running asynchronously                                                                                    |
+|     401     | Invalid or missing authentication token                                                                                                     |
+|     429     | Another update is already in progress (full updates only) or the request was rate limited                                                   |
+|     500     | Internal server error during request processing                                                                                             |
+|     503     | Update handler timed out (exceeded configured limit, default 10m), or client cancelled while waiting on update lock (targeted updates only) |
 
 The following example shows what happens when a full update is requested while another update is already running:
 
 ```bash
-curl -i -X POST -H "Authorization: Bearer mytoken" "localhost:8080/v1/update"
+curl -i -X POST -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/update"
 ```
 
 Response:
@@ -179,6 +180,7 @@ The `/v1/update` endpoint returns a JSON response containing the results of the 
 - `failed`: Number of containers where the update failed
 - `restarted`: Number of containers that were restarted due to linked dependencies
 - `skipped`: Number of containers that were skipped during the update
+- `scan_failed`: `true` when the update ended in an error. The counts are then those the update reached. Omitted otherwise
 
 ### Timing Section
 
@@ -194,15 +196,14 @@ The `/v1/update` endpoint returns a JSON response containing the results of the 
 
 The `/v1/update` endpoint returns the following HTTP status codes:
 
-| Status Code | Description                                                                               |
-|:-----------:|:------------------------------------------------------------------------------------------|
-|     200     | Update completed successfully                                                             |
-|     202     | Update triggered successfully and running asynchronously (with `?async=true`)             |
-|     401     | Invalid or missing authentication token                                                   |
-|     408     | Update handler timed out (exceeded configured limit, default 10m)                         |
-|     429     | Another update is already in progress (full updates only) or the request was rate limited |
-|     500     | Internal server error during request processing                                           |
-|     503     | Client cancelled while waiting on update lock (targeted updates only)                     |
+| Status Code | Description                                                                                                                                 |
+|:-----------:|:--------------------------------------------------------------------------------------------------------------------------------------------|
+|     200     | Update completed successfully                                                                                                               |
+|     202     | Update triggered successfully and running asynchronously (with `?async=true`)                                                               |
+|     401     | Invalid or missing authentication token                                                                                                     |
+|     429     | Another update is already in progress (full updates only) or the request was rate limited                                                   |
+|     500     | Internal server error during request processing                                                                                             |
+|     503     | Update handler timed out (exceeded configured limit, default 10m), or client cancelled while waiting on update lock (targeted updates only) |
 
 ## Error Response Format
 
@@ -269,7 +270,7 @@ Watchtower enforces two independent mechanisms that can each return HTTP 429 (To
 
 - The `/v1/update` handler has a timeout enforced by Fiber's timeout middleware. The default is 10 minutes.
 - The timeout covers the full lifecycle: waiting for the concurrency lock, performing the container update scan, and returning results.
-- When the timeout is exceeded, the handler returns HTTP 408 (Request Timeout) and the handler goroutine is abandoned.
+- When the timeout is exceeded, the handler returns HTTP 503 (Service Unavailable) and the handler goroutine is abandoned.
 - The handler listens on `c.Context().Done()` for cooperative cancellation — targeted updates waiting for the lock will return HTTP 503 when the request context is cancelled.
 - You can override the timeout per request with the `?timeout=` query parameter, up to the configured maximum.
 
@@ -293,7 +294,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - WATCHTOWER_HTTP_API_TOKEN=mytoken
+      - WATCHTOWER_HTTP_API_TOKEN=API_TOKEN
       - WATCHTOWER_HTTP_API_ENDPOINTS=update,metrics
     labels:
       - "com.centurylinklabs.watchtower.enable=false"

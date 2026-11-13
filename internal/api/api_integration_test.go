@@ -1,4 +1,4 @@
-package api_test
+package api
 
 import (
 	"context"
@@ -11,111 +11,32 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nicholas-fedor/watchtower/internal/api"
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
-	"github.com/nicholas-fedor/watchtower/internal/api/handlers/events"
-	mockAPI "github.com/nicholas-fedor/watchtower/internal/api/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/api/auth"
 	"github.com/nicholas-fedor/watchtower/internal/api/routes"
-	"github.com/nicholas-fedor/watchtower/internal/logging"
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
-	"github.com/nicholas-fedor/watchtower/internal/scheduling"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	mockRoutes "github.com/nicholas-fedor/watchtower/internal/api/routes/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/observability/events"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+	"github.com/nicholas-fedor/watchtower/internal/update/schedule"
 )
 
 var helperMetrics = metrics.Default()
 
-func testLogger() *zerolog.Logger {
-	l := zerolog.Nop()
-
-	return &l
-}
-
-func withTestLogger(opts config.Options) config.Options {
-	if opts.Logger == nil {
-		opts.Logger = testLogger()
-	}
-
-	return opts
-}
-
-func makeListContainersMock(t *testing.T) *mockContainer.MockClient {
-	t.Helper()
-	mc := mockContainer.NewMockClient(t)
-	mc.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{}, nil).Maybe()
-	mc.EXPECT().ListContainers(mock.Anything).Return([]types.Container{}, nil).Maybe()
-
-	return mc
-}
-
-func makeFilter(_ *testing.T) types.Filter {
-	return func(_ types.FilterableContainer) bool { return true }
-}
-
 // NewEventsBroadcasterHelper creates an event broadcaster for integration tests.
 func NewEventsBroadcasterHelper() *events.Broadcaster { return events.NewBroadcaster() }
-
-func withTestListenAddr(opts config.Options) config.Options {
-	opts = withTestLogger(opts)
-
-	if opts.Host == "" {
-		opts.Host = "127.0.0.1"
-	}
-
-	if opts.Port == "" {
-		opts.Port = "0"
-	}
-
-	return opts
-}
-
-func runServerAndShutdown(t *testing.T, opts config.Options) {
-	t.Helper()
-
-	opts = withTestListenAddr(opts)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- api.SetupAndStartAPI(ctx, opts)
-	}()
-
-	select {
-	case err := <-errCh:
-		assert.True(t, err == nil || errors.Is(err, context.Canceled),
-			"unexpected error: %v", err)
-		cancel()
-		time.Sleep(50 * time.Millisecond)
-
-		return
-	case <-time.After(500 * time.Millisecond):
-		// Blocking mode still inside SetupAndStartAPI.
-	}
-
-	cancel()
-
-	select {
-	case err := <-errCh:
-		assert.True(t, err == nil || errors.Is(err, context.Canceled),
-			"unexpected error: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not shut down within expected time")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Health probes
 // ---------------------------------------------------------------------------
 
 func TestIntegration_HealthProbes_ViaFullSetup(t *testing.T) {
-	opts := config.Options{
+	opts := routes.Options{
 		Token:            "test-token",
 		EnableMetricsAPI: true,
 		RateLimit:        60,
@@ -125,10 +46,10 @@ func TestIntegration_HealthProbes_ViaFullSetup(t *testing.T) {
 }
 
 func TestIntegration_HealthProbes_CustomRoute(t *testing.T) {
-	mc := mockContainer.NewMockClient(t)
-	mc.EXPECT().ListContainers(mock.Anything).Return([]types.Container{}, nil)
+	mc := mockRoutes.NewMockClient(t)
+	mc.EXPECT().ListContainers(mock.Anything).Return([]*container.Container{}, nil)
 
-	app := api.New(testLogger(), 60, api.ProxyConfig{}, api.CORSConfig{}, false)
+	app := newApp(newTestLogger(t), 60, proxyConfig{}, corsConfig{}, false)
 	app.Get("/health/custom", func(c fiber.Ctx) error {
 		_, err := mc.ListContainers(c.Context())
 		if err != nil {
@@ -155,12 +76,12 @@ func TestIntegration_SetupAndStartAPI_NoAPIs(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	err := api.SetupAndStartAPI(ctx, withTestLogger(config.Options{Token: "test"}))
+	_, err := SetupAndStartAPI(ctx, withTestLogger(t, routes.Options{Token: "test"}))
 	assert.NoError(t, err)
 }
 
 func TestIntegration_SetupAndStartAPI_MetricsOnly(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:            "test-token",
 		EnableMetricsAPI: true,
 		RateLimit:        60,
@@ -169,7 +90,7 @@ func TestIntegration_SetupAndStartAPI_MetricsOnly(t *testing.T) {
 }
 
 func TestIntegration_SetupAndStartAPI_ContainersOnly(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:               "test-token",
 		EnableContainersAPI: true,
 		RateLimit:           60,
@@ -179,18 +100,19 @@ func TestIntegration_SetupAndStartAPI_ContainersOnly(t *testing.T) {
 }
 
 func TestIntegration_SetupAndStartAPI_AllAPIs(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:               "test-token",
 		EnableUpdateAPI:     true,
+		UpdateLock:          schedule.NewUpdateLock(),
 		EnableMetricsAPI:    true,
 		EnableContainersAPI: true,
 		RateLimit:           60,
 		Client:              makeListContainersMock(t),
 		Filter:              makeFilter(t),
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return helperMetrics },
 		UnblockHTTPAPI: true,
 	})
@@ -202,26 +124,28 @@ func TestIntegration_SetupAndStartAPI_MissingUpdateDependencies(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		opts   config.Options
+		opts   routes.Options
 		errMsg string
 	}{
 		{
 			name: "nil RunUpdatesWithNotifications",
-			opts: config.Options{
+			opts: routes.Options{
 				Token:                       "test",
 				EnableUpdateAPI:             true,
+				UpdateLock:                  schedule.NewUpdateLock(),
 				RunUpdatesWithNotifications: nil,
-				FilterByImage:               func(_ []string, f types.Filter) types.Filter { return f },
+				FilterByImage:               func(_ []string, f filters.Filter) filters.Filter { return f },
 				DefaultMetrics:              func() *metrics.Metrics { return helperMetrics },
 			},
 			errMsg: "RunUpdatesWithNotifications must be provided",
 		},
 		{
 			name: "nil FilterByImage",
-			opts: config.Options{
+			opts: routes.Options{
 				Token:           "test",
 				EnableUpdateAPI: true,
-				RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+				UpdateLock:      schedule.NewUpdateLock(),
+				RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 					return &metrics.Metric{}
 				},
 				FilterByImage:  nil,
@@ -231,13 +155,14 @@ func TestIntegration_SetupAndStartAPI_MissingUpdateDependencies(t *testing.T) {
 		},
 		{
 			name: "nil DefaultMetrics",
-			opts: config.Options{
+			opts: routes.Options{
 				Token:           "test",
 				EnableUpdateAPI: true,
-				RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+				UpdateLock:      schedule.NewUpdateLock(),
+				RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 					return &metrics.Metric{}
 				},
-				FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+				FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 				DefaultMetrics: nil,
 			},
 			errMsg: "DefaultMetrics must be provided",
@@ -246,7 +171,7 @@ func TestIntegration_SetupAndStartAPI_MissingUpdateDependencies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := api.SetupAndStartAPI(ctx, withTestLogger(tt.opts))
+			_, err := SetupAndStartAPI(ctx, withTestLogger(t, tt.opts))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.errMsg)
 		})
@@ -262,7 +187,7 @@ func TestIntegration_GracefulShutdown_MetricsAPI(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- api.SetupAndStartAPI(ctx, withTestLogger(config.Options{
+		errCh <- startAPI(t, ctx, withTestLogger(t, routes.Options{
 			Token:            "test-token",
 			EnableMetricsAPI: true,
 			RateLimit:        60,
@@ -286,18 +211,19 @@ func TestIntegration_GracefulShutdown_AllAPIs(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- api.SetupAndStartAPI(ctx, withTestLogger(config.Options{
+		errCh <- startAPI(t, ctx, withTestLogger(t, routes.Options{
 			Token:               "test-token",
 			EnableUpdateAPI:     true,
+			UpdateLock:          schedule.NewUpdateLock(),
 			EnableMetricsAPI:    true,
 			EnableContainersAPI: true,
 			RateLimit:           60,
 			Client:              makeListContainersMock(t),
 			Filter:              makeFilter(t),
-			RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+			RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 				return &metrics.Metric{}
 			},
-			FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+			FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 			DefaultMetrics: func() *metrics.Metrics { return helperMetrics },
 			UnblockHTTPAPI: true,
 		}))
@@ -320,18 +246,19 @@ func TestIntegration_GracefulShutdownTiming(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- api.SetupAndStartAPI(ctx, withTestLogger(config.Options{
+		errCh <- startAPI(t, ctx, withTestLogger(t, routes.Options{
 			Token:               "test-token",
 			EnableUpdateAPI:     true,
+			UpdateLock:          schedule.NewUpdateLock(),
 			EnableMetricsAPI:    true,
 			EnableContainersAPI: true,
 			RateLimit:           60,
 			Client:              makeListContainersMock(t),
 			Filter:              makeFilter(t),
-			RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+			RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 				return &metrics.Metric{}
 			},
-			FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+			FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 			DefaultMetrics: func() *metrics.Metrics { return helperMetrics },
 			UnblockHTTPAPI: true,
 		}))
@@ -344,20 +271,9 @@ func TestIntegration_GracefulShutdownTiming(t *testing.T) {
 	case err := <-errCh:
 		assert.True(t, err == nil || errors.Is(err, context.Canceled),
 			"unexpected error: %v", err)
-	case <-time.After(api.ShutdownGracePeriod + 2*time.Second):
+	case <-time.After(shutdownGracePeriod + 2*time.Second):
 		t.Fatal("server did not shut down within expected time")
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Server interface
-// ---------------------------------------------------------------------------
-
-func TestIntegration_ServerInterface(t *testing.T) {
-	mockServer := mockAPI.NewMockServer(t)
-	mockServer.EXPECT().Listen(mock.Anything, mock.Anything).Return(nil).Maybe()
-	mockServer.EXPECT().ShutdownWithTimeout(mock.Anything).Return(nil).Maybe()
-	assert.NotNil(t, mockServer)
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +298,7 @@ func TestIntegration_GetAPIAddr(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, api.GetAPIAddr(tt.host, tt.port))
+			assert.Equal(t, tt.want, GetAPIAddr(tt.host, tt.port))
 		})
 	}
 }
@@ -392,7 +308,7 @@ func TestIntegration_GetAPIAddr(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegration_ConcurrentRequests(t *testing.T) {
-	app := api.New(testLogger(), 60, api.ProxyConfig{}, api.CORSConfig{}, false)
+	app := newApp(newTestLogger(t), 60, proxyConfig{}, corsConfig{}, false)
 
 	var wg sync.WaitGroup
 	for range 10 {
@@ -441,10 +357,11 @@ func TestIntegration_EnablementCombinations(t *testing.T) {
 
 	for _, c := range combinations {
 		t.Run(c.name, func(t *testing.T) {
-			opts := config.Options{
+			opts := routes.Options{
 				Token:               "test-token",
 				EventsToken:         "events-token",
 				EnableUpdateAPI:     c.enableUpdateAPI,
+				UpdateLock:          schedule.NewUpdateLock(),
 				EnableMetricsAPI:    c.enableMetricsAPI,
 				EnableContainersAPI: c.enableContainersAPI,
 				EnableHistoryAPI:    c.enableHistoryAPI,
@@ -454,10 +371,10 @@ func TestIntegration_EnablementCombinations(t *testing.T) {
 				RateLimit:           60,
 				Client:              makeListContainersMock(t),
 				Filter:              makeFilter(t),
-				RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+				RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 					return &metrics.Metric{}
 				},
-				FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+				FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 				DefaultMetrics: func() *metrics.Metrics { return helperMetrics },
 				UnblockHTTPAPI: true,
 			}
@@ -475,7 +392,7 @@ func TestIntegration_EnablementCombinations(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegration_HistoryAPI(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:            "test-token",
 		EnableHistoryAPI: true,
 		RateLimit:        60,
@@ -490,7 +407,7 @@ func TestIntegration_HistoryAPI(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegration_ImagesAPI(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:           "test-token",
 		EnableImagesAPI: true,
 		RateLimit:       60,
@@ -504,7 +421,7 @@ func TestIntegration_ImagesAPI(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegration_ConfigAPI(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:           "test-token",
 		EnableConfigAPI: true,
 		RateLimit:       60,
@@ -516,7 +433,7 @@ func TestIntegration_ConfigAPI(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegration_EventsAPI(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:            "test-token",
 		EventsToken:      "events-token",
 		EnableEventsAPI:  true,
@@ -530,7 +447,7 @@ func TestIntegration_EventsAPI(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegration_ContainerDetailsAPI(t *testing.T) {
-	runServerAndShutdown(t, config.Options{
+	runServerAndShutdown(t, routes.Options{
 		Token:               "test-token",
 		EnableContainersAPI: true,
 		RateLimit:           60,
@@ -546,33 +463,34 @@ func TestIntegration_ContainerDetailsAPI(t *testing.T) {
 func TestIntegration_CheckDuringUpdate(t *testing.T) {
 	testMetrics := metrics.Default()
 
-	mc := mockContainer.NewMockClient(t)
-	mc.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{}, nil).Maybe()
-	mc.EXPECT().ListContainers(mock.Anything).Return([]types.Container{}, nil).Maybe()
+	mc := mockRoutes.NewMockClient(t)
+	mc.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{}, nil).Maybe()
+	mc.EXPECT().ListContainers(mock.Anything).Return([]*container.Container{}, nil).Maybe()
 
 	updateDone := make(chan struct{})
 
-	app := api.New(testLogger(), 60, api.ProxyConfig{}, api.CORSConfig{}, false)
+	app := newApp(newTestLogger(t), 60, proxyConfig{}, corsConfig{}, false)
 
-	opts := config.Options{
+	opts := routes.Options{
 		Token:           "test-token",
 		EnableUpdateAPI: true,
+		UpdateLock:      schedule.NewUpdateLock(),
 		EnableCheckAPI:  true,
 		UnblockHTTPAPI:  true,
 		Client:          mc,
 		Filter:          makeFilter(t),
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			<-updateDone
 
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
 	}
 
-	opts = withTestLogger(opts)
+	opts = withTestLogger(t, opts)
 
-	authMiddleware := api.NewAPIAuthMiddleware(testLogger(), opts.Token)
+	authMiddleware := auth.NewAPIMiddleware(newTestLogger(t), opts.Token)
 
 	err := routes.ValidateAndRegister(t.Context(), app, authMiddleware, opts)
 	require.NoError(t, err)
@@ -630,24 +548,28 @@ func TestIntegration_APIAndScheduling_ConcurrentWithUnblockHTTPAPI(t *testing.T)
 	testCtx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	opts := withTestListenAddr(config.Options{
+	// The API and the scheduler share one update lock, as in production.
+	lock := schedule.NewUpdateLock()
+
+	opts := withTestListenAddr(t, routes.Options{
 		Token:            "test-token",
 		EnableUpdateAPI:  true,
+		UpdateLock:       lock,
 		EnableMetricsAPI: true,
 		RateLimit:        60,
 		Client:           makeListContainersMock(t),
 		Filter:           makeFilter(t),
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
 		UnblockHTTPAPI: true, // API must return so scheduling can proceed.
 	})
 
 	apiDone := make(chan error, 1)
 	go func() {
-		apiDone <- api.SetupAndStartAPI(testCtx, opts)
+		apiDone <- startAPI(t, testCtx, opts)
 	}()
 
 	select {
@@ -660,30 +582,18 @@ func TestIntegration_APIAndScheduling_ConcurrentWithUnblockHTTPAPI(t *testing.T)
 	schedCtx, schedCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer schedCancel()
 
-	// Seed the lock token the same way production does when creating a new lock.
-	// An empty channel is treated as "update in progress" by WaitForRunningUpdate.
-	lock := make(chan bool, 1)
-	lock <- true
-
-	err := scheduling.RunUpgradesOnSchedule(schedCtx, scheduling.ScheduleDeps{
-		Logger:              testLogger(),
-		Filter:              func(_ types.FilterableContainer) bool { return true },
-		FilterDesc:          "test filter",
+	err := schedule.RunUpgradesOnSchedule(schedCtx, schedule.ScheduleDeps{
+		Logger:              newTestLogger(t),
+		Filter:              func(_ filters.FilterableContainer) bool { return true },
 		Lock:                lock,
 		ScheduleSpec:        "@every 1h",
-		WriteStartupMessage: logging.WriteStartupMessage,
-		RunUpdate: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		WriteStartupMessage: nil,
+		RunUpdate: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		Client:                     nil,
-		Scope:                      "",
-		Notifier:                   nil,
-		MetaVersion:                "",
-		UpdateOnStart:              false,
-		SkipFirstRun:               false,
-		CurrentWatchtowerContainer: nil,
-		StartupMessageSent:         true,
-		BaseParams: types.UpdateParams{
+		UpdateOnStart:         false,
+		ReplacedOlderInstance: false,
+		BaseParams: updateParams.Params{
 			Cleanup:             false,
 			MonitorOnly:         false,
 			EphemeralSelfUpdate: false,
@@ -699,30 +609,31 @@ func TestIntegration_APIAndScheduling_ConcurrentWithUnblockHTTPAPI(t *testing.T)
 // ---------------------------------------------------------------------------
 
 func TestIntegration_UpdateHonorsReviveStoppedAndComposeDependsOn(t *testing.T) {
-	var captured types.UpdateParams
+	var captured updateParams.Params
 
-	app := api.New(testLogger(), 60, api.ProxyConfig{}, api.CORSConfig{}, false)
+	app := newApp(newTestLogger(t), 60, proxyConfig{}, corsConfig{}, false)
 
-	opts := config.Options{
+	opts := routes.Options{
 		Token:           "test-token",
 		EnableUpdateAPI: true,
+		UpdateLock:      schedule.NewUpdateLock(),
 		UnblockHTTPAPI:  true,
-		BaseParams: types.UpdateParams{
+		BaseParams: updateParams.Params{
 			ReviveStopped:       true,
 			UseComposeDependsOn: true,
 		},
 		Client: makeListContainersMock(t),
 		Filter: makeFilter(t),
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, params types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, params updateParams.Params) *metrics.Metric {
 			captured = params
 
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return helperMetrics },
 	}
 
-	authMiddleware := api.NewAPIAuthMiddleware(testLogger(), opts.Token)
+	authMiddleware := auth.NewAPIMiddleware(newTestLogger(t), opts.Token)
 
 	err := routes.ValidateAndRegister(t.Context(), app, authMiddleware, opts)
 	require.NoError(t, err)

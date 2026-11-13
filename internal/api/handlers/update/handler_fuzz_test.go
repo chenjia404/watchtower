@@ -13,8 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	"github.com/nicholas-fedor/watchtower/internal/update/schedule"
 )
+
+// maxFuzzQueryLength bounds the encoded query of a fuzzed request, so the request
+// line fits the server's 8 KiB read buffer, which rejects longer request lines
+// before any handler runs.
+const maxFuzzQueryLength = 4096
 
 // FuzzExtractImagesHandler fuzzes the image-name parsing logic through the
 // Handler struct with arbitrary query parameter values.
@@ -30,9 +36,9 @@ func FuzzExtractImagesHandler(f *testing.F) {
 	f.Add("registry.com/org/image:v1.2.3")
 
 	f.Fuzz(func(t *testing.T, raw string) {
-		h := New(testLogger(), func(_ context.Context, _, _ []string) *metrics.Metric {
+		h := New(newNopLogger(), func(_ context.Context, _, _ []string) *metrics.Metric {
 			return &metrics.Metric{}
-		}, nil)
+		}, nil, testMaxTimeout)
 
 		app := fiber.New(fiber.Config{})
 		app.Post("/test", func(c fiber.Ctx) error {
@@ -54,7 +60,12 @@ func FuzzExtractImagesHandler(f *testing.F) {
 			return nil
 		})
 
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/test?image="+url.QueryEscape(raw), nil)
+		query := "image=" + url.QueryEscape(raw)
+		if len(query) > maxFuzzQueryLength {
+			t.Skip("request line longer than the server reads")
+		}
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/test?"+query, nil)
 
 		resp, err := app.Test(req)
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -79,9 +90,9 @@ func FuzzExtractContainersHandler(f *testing.F) {
 	f.Add(strings.Repeat("a,", 50))
 
 	f.Fuzz(func(t *testing.T, raw string) {
-		h := New(testLogger(), func(_ context.Context, _, _ []string) *metrics.Metric {
+		h := New(newNopLogger(), func(_ context.Context, _, _ []string) *metrics.Metric {
 			return &metrics.Metric{}
-		}, nil)
+		}, nil, testMaxTimeout)
 
 		app := fiber.New(fiber.Config{})
 		app.Post("/test", func(c fiber.Ctx) error {
@@ -103,7 +114,12 @@ func FuzzExtractContainersHandler(f *testing.F) {
 			return nil
 		})
 
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/test?container="+url.QueryEscape(raw), nil)
+		query := "container=" + url.QueryEscape(raw)
+		if len(query) > maxFuzzQueryLength {
+			t.Skip("request line longer than the server reads")
+		}
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/test?"+query, nil)
 
 		resp, err := app.Test(req)
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -116,21 +132,21 @@ func FuzzExtractContainersHandler(f *testing.F) {
 	})
 }
 
-// FuzzHandlerNew fuzzes the Handler constructor to ensure it never panics
-// with various lock channel configurations.
+// FuzzHandlerNew fuzzes the Handler constructor to ensure it never panics,
+// with or without an update lock.
 func FuzzHandlerNew(f *testing.F) {
 	f.Add(true)
 	f.Add(false)
 
 	f.Fuzz(func(t *testing.T, withLock bool) {
-		var lock chan bool
+		var lock *schedule.UpdateLock
 		if withLock {
-			lock = make(chan bool, 1)
+			lock = schedule.NewUpdateLock()
 		}
 
-		h := New(testLogger(), func(_ context.Context, _, _ []string) *metrics.Metric {
+		h := New(newNopLogger(), func(_ context.Context, _, _ []string) *metrics.Metric {
 			return &metrics.Metric{}
-		}, lock)
+		}, lock, testMaxTimeout)
 
 		require.NotNil(t, h)
 		assert.Equal(t, "/v1/update", h.Path)

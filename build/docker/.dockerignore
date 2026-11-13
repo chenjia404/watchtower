@@ -5,7 +5,6 @@
 
 # Ignore CI/CD and configuration files
 .circleci/
-.codacy.yml
 .editorconfig
 .all-contributorsrc
 .codecov.yaml
@@ -22,8 +21,7 @@ examples/
 
 # Ignore test directories and data
 test/
-internal/actions/mocks/
-pkg/*/mocks/
+internal/update/mocks/
 
 # Ignore scripts and tools
 scripts/

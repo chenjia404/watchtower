@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,40 +14,58 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
+	"github.com/nicholas-fedor/watchtower/internal/api/routes"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/logcapture"
 )
 
+// newTestLogger returns a logger that writes each event to the test's log, so a
+// failing test shows what it logged.
+//
+// Parameters:
+//   - t: Test that receives the log lines.
+//
+// Returns:
+//   - *zerolog.Logger: Logger writing to t.
+func newTestLogger(t *testing.T) *zerolog.Logger {
+	t.Helper()
+
+	// Frame 4 skips zerolog's write path, so each line names the log call.
+	w := zerolog.TestWriter{T: t, Frame: 4}
+
+	return new(zerolog.New(w))
+}
+
 func TestNew_ProxyConfig(t *testing.T) {
-	app := New(
-		testLogger(),
+	app := newApp(
+		newTestLogger(t),
 		60,
-		ProxyConfig{
+		proxyConfig{
 			TrustedProxies: []string{"127.0.0.1"},
 			ProxyHeader:    "X-Real-IP",
 		},
-		CORSConfig{},
+		corsConfig{},
 		false,
 	)
 	assert.NotNil(t, app)
 
-	app2 := New(
-		testLogger(),
+	app2 := newApp(
+		newTestLogger(t),
 		60,
-		ProxyConfig{
+		proxyConfig{
 			TrustedProxies: []string{"10.0.0.0/8"},
 		},
-		CORSConfig{},
+		corsConfig{},
 		false,
 	)
 	assert.NotNil(t, app2)
 }
 
 func TestNew_CORSConfig(t *testing.T) {
-	app := New(
-		testLogger(),
+	app := newApp(
+		newTestLogger(t),
 		60,
-		ProxyConfig{},
-		CORSConfig{
+		proxyConfig{},
+		corsConfig{
 			AllowedOrigins: []string{"https://example.com"},
 		},
 		false,
@@ -74,11 +91,11 @@ func TestNew_CORSConfig(t *testing.T) {
 }
 
 func TestNew_CORSWildcard(t *testing.T) {
-	app := New(
-		testLogger(),
+	app := newApp(
+		newTestLogger(t),
 		60,
-		ProxyConfig{},
-		CORSConfig{
+		proxyConfig{},
+		corsConfig{
 			AllowedOrigins: []string{"*"},
 		},
 		false,
@@ -108,11 +125,11 @@ func TestNew_CORSWildcard(t *testing.T) {
 }
 
 func TestNew_CORSCustomMethodsHeaders(t *testing.T) {
-	app := New(
-		testLogger(),
+	app := newApp(
+		newTestLogger(t),
 		60,
-		ProxyConfig{},
-		CORSConfig{
+		proxyConfig{},
+		corsConfig{
 			AllowedOrigins: []string{"https://example.com"},
 			AllowedMethods: []string{"GET", "POST"},
 			AllowedHeaders: []string{"Content-Type", "X-Custom-Header"},
@@ -145,11 +162,11 @@ func TestNew_CORSCustomMethodsHeaders(t *testing.T) {
 }
 
 func TestNew_NoCORSWhenNoOrigins(t *testing.T) {
-	app := New(
-		testLogger(),
+	app := newApp(
+		newTestLogger(t),
 		60,
-		ProxyConfig{},
-		CORSConfig{},
+		proxyConfig{},
+		corsConfig{},
 		false,
 	)
 	assert.NotNil(t, app)
@@ -180,25 +197,13 @@ func TestNew(t *testing.T) {
 	}{
 		{
 			name:               "default rate limit",
-			log:                testLogger(),
+			log:                newTestLogger(t),
 			rateLimitPerMinute: 60,
 			wantNil:            false,
 		},
 		{
-			name:               "zero rate limit falls back to default",
-			log:                testLogger(),
-			rateLimitPerMinute: 0,
-			wantNil:            false,
-		},
-		{
-			name:               "negative rate limit falls back to default",
-			log:                testLogger(),
-			rateLimitPerMinute: -1,
-			wantNil:            false,
-		},
-		{
 			name:               "custom rate limit",
-			log:                testLogger(),
+			log:                newTestLogger(t),
 			rateLimitPerMinute: 120,
 			wantNil:            false,
 		},
@@ -206,11 +211,11 @@ func TestNew(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := New(
+			got := newApp(
 				tt.log,
 				tt.rateLimitPerMinute,
-				ProxyConfig{},
-				CORSConfig{},
+				proxyConfig{},
+				corsConfig{},
 				false,
 			)
 			if tt.wantNil {
@@ -224,7 +229,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestTimeoutMiddleware(t *testing.T) {
-	handler := config.TimeoutMiddleware()
+	handler := routes.TimeoutMiddleware()
 	require.NotNil(t, handler)
 
 	app := fiber.New(fiber.Config{})
@@ -246,6 +251,8 @@ func TestTimeoutMiddleware(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+// TestTimeoutMiddleware_Timeout verifies that a request whose handler
+// outlasts the timeout gets 503 Service Unavailable, which the API documents.
 func TestTimeoutMiddleware_Timeout(t *testing.T) {
 	const testTimeout = 10 * time.Millisecond
 
@@ -260,7 +267,9 @@ func TestTimeoutMiddleware_Timeout(t *testing.T) {
 	app.Get("/test", handler, func(c fiber.Ctx) error {
 		<-c.Context().Done()
 
-		return fiber.ErrRequestTimeout
+		// The deadline error counts as a timeout even if the handler returns
+		// before the middleware notices the deadline.
+		return c.Context().Err()
 	})
 
 	req := httptest.NewRequestWithContext(
@@ -276,16 +285,17 @@ func TestTimeoutMiddleware_Timeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		defer resp.Body.Close()
 
-		assert.Equal(t, http.StatusRequestTimeout, resp.StatusCode)
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	})
 }
 
 func TestNew_OnListenHook(t *testing.T) {
-	var buf bytes.Buffer
+	// The listen hook logs from the server goroutine while the test polls.
+	var buf logcapture.Buffer
 
 	logger := zerolog.New(&buf).Level(zerolog.DebugLevel)
 
-	app := New(&logger, 60, ProxyConfig{}, CORSConfig{}, false)
+	app := newApp(&logger, 60, proxyConfig{}, corsConfig{}, false)
 
 	app.Get("/test", func(c fiber.Ctx) error {
 		return c.SendString("ok")
@@ -297,8 +307,9 @@ func TestNew_OnListenHook(t *testing.T) {
 		})
 	}()
 
+	// Wait for the second of the two listen messages.
 	require.Eventually(t, func() bool {
-		return strings.Contains(buf.String(), "Starting HTTP API server")
+		return strings.Contains(buf.String(), "HTTP API server is enabled")
 	}, 2*time.Second, 50*time.Millisecond)
 
 	output := buf.String()

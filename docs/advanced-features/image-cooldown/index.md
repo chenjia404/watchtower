@@ -69,15 +69,15 @@ When set, the label value takes precedence over the global configuration.
             image: nginx
             labels:
                 com.centurylinklabs.watchtower.cooldown-delay: "48h"
-            ...
+            # ...
     ```
 
 === "Docker CLI"
 
     ```bash title="docker run"
     docker run -d \
-    --label=com.centurylinklabs.watchtower.cooldown-delay="48h" \
-    nginx
+      --label=com.centurylinklabs.watchtower.cooldown-delay="48h" \
+      nginx
     ```
 
 === "Dockerfile"
@@ -92,7 +92,7 @@ Setting the label to `"0"` disables cooldown for that container, even when a glo
 LABEL com.centurylinklabs.watchtower.cooldown-delay="0"
 ```
 
-!!! Note "If a container's cooldown label cannot be parsed as a valid duration, Watchtower falls back to the global cooldown value and logs a warning."
+!!! Note "If a container's cooldown label cannot be parsed as a valid duration, Watchtower falls back to the global cooldown value. It logs a warning the first time it reads the label for that container, and logs later reads at debug level."
 
 !!! Warning "No-Pull Precedence"
     When the [`no-pull`](../../configuration/update-behavior/index.md#disable_image_pulling) configuration option  is enabled globally (or the `com.centurylinklabs.watchtower.no-pull` label is set on a container), Watchtower does not fetch new images from the registry.
@@ -195,10 +195,16 @@ flowchart TD
     class C decision
 ```
 
-1. **Manifest fetch**: Watchtower sends a `GET` request to `/v2/<image>/manifests/<tag>` with `Accept` headers covering both OCI and Docker manifest formats.
+1. **Manifest fetch**: Watchtower sends a `GET` request to `/v2/IMAGE/manifests/TAG` with `Accept` headers covering both OCI and Docker manifest formats.
 2. **Platform selection**: For multi-platform images (manifest lists or OCI indexes), Watchtower selects the manifest matching the runtime OS and architecture. Cross-platform monitoring can be configured via `WATCHTOWER_COOLDOWN_PLATFORM_OS` and `WATCHTOWER_COOLDOWN_PLATFORM_ARCH`. For ARM images with multiple variants (e.g., `v7`, `v8`), specify `WATCHTOWER_COOLDOWN_PLATFORM_VARIANT` to disambiguate.
-3. **Config blob fetch**: The manifest's config digest is used to fetch `/v2/<image>/blobs/<digest>`. This is a small JSON document (typically <15 KB).
+3. **Config blob fetch**: The manifest's config digest is used to fetch `/v2/IMAGE/blobs/DIGEST`. This is a small JSON document (typically <15 KB).
 4. **Timestamp extraction**: The `created` field from the config JSON is parsed as the image creation time.
+
+These requests include the following values:
+
+- *`IMAGE`*: the image repository, such as `library/nginx`
+- *`TAG`*: the image tag
+- *`DIGEST`*: the config digest from the manifest
 
 No image layers are downloaded during this process.
 
@@ -215,12 +221,12 @@ No image layers are downloaded during this process.
 
 After determining the image age, Watchtower evaluates four outcomes:
 
-| Outcome        | Condition                          | Behavior                                                          |
-|----------------|------------------------------------|-------------------------------------------------------------------|
-| **Proceeding** | Image age > cooldown duration      | The update proceeds normally                                      |
-| **Proceeding** | Image age is negative (clock skew) | The update proceeds with a warning to avoid indefinite deferral   |
-| **Deferring**  | Image age <= cooldown duration     | The update is skipped; the container remains on its current image |
-| **Deferring**  | Image age unavailable              | The update is skipped for safety                                  |
+| Outcome        | Condition                            | Behavior                                                                                 |
+|----------------|--------------------------------------|------------------------------------------------------------------------------------------|
+| **Proceeding** | Image age > cooldown duration        | The update proceeds normally                                                             |
+| **Deferring**  | Image age <= cooldown duration       | The update is skipped and the container remains on its current image                     |
+| **Deferring**  | Image creation time is in the future | The update is skipped with a warning until the cooldown duration after the creation time |
+| **Deferring**  | Image age unavailable                | The update is skipped for safety                                                         |
 
 ```mermaid
 flowchart TD
@@ -231,16 +237,14 @@ flowchart TD
     D -->|No| E[Defer update for safety]
     D -->|Yes| G{Age strictly exceeds cooldown?}
     G -->|Yes| F
-    G -->|No| I{Age is negative?}
-    I -->|Yes| F
-    I -->|No| H[Defer update — within cooldown]
+    G -->|No| H[Defer update — within cooldown]
 
     classDef step fill:#003343,stroke:#000,stroke-width:2px;
     classDef decision fill:#003343,stroke:#000,stroke-width:2px;
     classDef defer fill:#8B0000,stroke:#000,stroke-width:2px;
 
     class A,C,F step
-    class B,D,G,I decision
+    class B,D,G decision
     class E,H defer
 ```
 
@@ -250,7 +254,7 @@ The cooldown feature relies on the `created` field from the image config blob. S
 
 - **Build timestamp, not push timestamp**: The `created` field records when the image was **built**, not when it was pushed to the registry. An image built days ago but only just tagged and pushed will appear old, potentially bypassing the intended cooldown window.
 - **Manipulated timestamps**: A compromised image could include a fabricated creation timestamp, making a freshly published malicious image appear mature. Cooldown is a defense-in-depth measure, not a guarantee of image integrity.
-- **Clock skew**: If the Watchtower host and the registry have significantly different system clocks, age calculations may be inaccurate. NTP synchronization on all involved hosts is recommended to minimize this risk. When the image creation time is in the future (negative age), Watchtower logs a warning and proceeds with the update to avoid indefinite deferral.
+- **Clock skew**: If the Watchtower host and the registry have significantly different system clocks, age calculations may be inaccurate. NTP synchronization on all involved hosts is recommended to minimize this risk. When the image creation time is in the future (negative age), Watchtower logs a warning and treats the image as new, deferring the update until the cooldown duration has passed after the creation time.
 - **Missing `created` field**: Some registries or image build tools may not populate the `created` field. When the field is absent, Watchtower cannot determine the image age and defers the update as a safety measure (see the warning above).
 
 ### Registry Usage Impact
@@ -309,11 +313,57 @@ Authenticating with a Docker Hub account raises the limit from 100 to 200 pulls,
 
 #### GitHub Container Registry (ghcr.io)
 
-GHCR.io does not publish Docker Hub-style pull quotas. Anonymous pulls of a public org share an undocumented edge token bucket, observed as `allowed: 44000/minute` with a sub-millisecond `retry-after`. That includes `lscr.io/linuxserver/*` images, which Watchtower remaps to `ghcr.io` for digest and auth.
+GHCR does not publish Docker Hub-style pull quotas. Requests for a public org's packages draw from one undocumented token bucket per org, observed as `allowed: 44000/minute` with a sub-millisecond `retry-after`. The same bucket serves `lscr.io/linuxserver/*` images, which Watchtower remaps to `ghcr.io` for digest checks and authentication.
 
-Unauthenticated GHCR checks reuse one anonymous token across public images and run one at a time. Later images in that token lifetime skip the registry challenge. Tiny waits are floored to 100ms and retried for up to 30 seconds. Those retries and the exhaustion of that window stay at debug so they do not become notifications. The container is **failed** for the cycle. A Retry-After longer than 30 seconds is logged as a warning and is not retried until the next run.
+!!! Important "Shared org buckets run dry at the top of every hour"
+    Buckets for popular orgs such as `linuxserver` are observed empty for the first one to two minutes of each hour, when scheduled update tools fire together. A run that starts at `:00` sends its first pulls into that window. See [Scheduling Around the Hour](#scheduling_around_the_hour).
 
-`docker login ghcr.io` (or equivalent credentials in `config.json` / `REPO_USER` and `REPO_PASS`) uses a per-user bucket and restores parallel GHCR checks. Login to `lscr.io` alone does not count. Credential lookup uses `ghcr.io` after the remap.
+##### Handling a 429 Response
+
+Watchtower reads the `retry-after` value of a `429` response and handles it in one of three ways:
+
+| `retry-after`          | Meaning                              | Watchtower response                                                                                                   |
+|------------------------|--------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| Below 100ms            | The shared bucket is empty right now | Ignores the value and backs off exponentially from 100ms toward 30 seconds, for up to 3 minutes from the first throttle |
+| 100ms to 30 seconds    | A wait the registry asked for        | Honors the wait as sent, with jitter, for up to 30 seconds                                                            |
+| Longer than 30 seconds | A backoff beyond one cycle           | Logs a warning and leaves the image for the next run                                                                  |
+
+After a `429`, Watchtower also paces later requests to that registry so they cannot empty the bucket again in a burst. Pacing depends on whether the `429` advertised a rate:
+
+| `429` advertised a rate | For 3 minutes after the wait                                                                             | Afterwards                                        |
+|-------------------------|----------------------------------------------------------------------------------------------------------|---------------------------------------------------|
+| Yes                     | One request at a time, at the advertised rate                                                            | The advertised rate, with bursts up to its budget |
+| No                      | One request per `retry-after` wait, held between 100ms and 30 seconds, or 100ms when the `429` sent none | Not paced                                         |
+
+Retries within a cycle are logged at debug so they do not become notifications. When the retry window is exhausted:
+
+- The container is marked **Failed** for the cycle.
+- One warning naming the container is logged and included in log-based notifications.
+- The report notification lists the container under Failed with the registry error.
+
+##### Anonymous and Authenticated Checks
+
+=== "Anonymous"
+
+    - One anonymous token is reused across public images, and later images in that token lifetime skip the registry challenge.
+    - Checks run one at a time so parallel requests cannot drain the shared bucket in a burst.
+    - Every request draws from the org's shared bucket.
+
+=== "Authenticated"
+
+    - `docker login ghcr.io`, or equivalent credentials in `config.json` or `REPO_USER` and `REPO_PASS`, separates your checks from anonymous throttling and restores parallel checks.
+    - Pulls of a public org can still land in that org's shared bucket, so credentials reduce but do not remove top-of-the-hour throttling.
+    - Login to `lscr.io` alone does not count. Credential lookup uses `ghcr.io` after the remap.
+
+##### Scheduling Around the Hour
+
+Schedule Watchtower away from the top of the hour:
+
+```text
+--schedule "0 17 3 * * *"
+```
+
+Interval runs follow the start time, so start Watchtower a few minutes past the hour when polling with `--interval`.
 
 #### Per-Registry Impact Summary
 
@@ -322,7 +372,7 @@ Unauthenticated GHCR checks reuse one anonymous token across public images and r
 | Docker Hub (unauthenticated)    | 100 / 6 hours               | Moderate — may exceed limit with many containers on short intervals |
 | Docker Hub (authenticated free) | 200 / 6 hours               | Low — sufficient for most deployments                               |
 | Docker Hub (paid)               | Unlimited                   | None                                                                |
-| GHCR.io                         | ~44,000 / minute fill rate (small burst, org-scoped when anonymous) | Low — unauthenticated checks are sequential and retry for up to 30s. Authenticate to `ghcr.io` for a per-user bucket and parallel checks. |
+| GHCR.io                         | ~44,000 / minute fill rate (small burst, org-scoped) | Low — checks back off for up to 3 minutes when the org bucket is empty. Authenticate to `ghcr.io` for parallel checks and schedule away from the top of the hour. |
 
 ### Monitor-Only Containers
 

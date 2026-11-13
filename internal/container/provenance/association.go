@@ -1,0 +1,388 @@
+package provenance
+
+import (
+	"cmp"
+	"fmt"
+	"strings"
+
+	"github.com/rs/zerolog"
+
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container/redact"
+	"github.com/nicholas-fedor/watchtower/internal/git/semver"
+	gitConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/git"
+)
+
+// DefaultDockerfile is used when no Dockerfile path is configured.
+const DefaultDockerfile = "Dockerfile"
+
+// associationLabelKeys lists every label [Association.Labels] can write. A
+// recreated container drops them all before the new set is written. A label
+// the new association leaves out does not survive from the old one.
+var associationLabelKeys = []string{
+	labels.GitRepo,
+	labels.GitRef,
+	labels.GitSemverPolicy,
+	labels.GitHost,
+	labels.GitDockerfile,
+	labels.GitContext,
+	labels.GitWatch,
+}
+
+// Association is a Git monitor association from labels or image mapping.
+type Association struct {
+	Repo       string
+	Ref        string
+	Policy     string
+	Host       string
+	Dockerfile string
+	Context    string
+
+	// invalidPolicy is the git-semver-policy label value when it names no
+	// policy. Policy then holds the mapping or default policy instead.
+	invalidPolicy string
+
+	// RefFromDefault is true when Ref came from the process default, not a
+	// label or image mapping. [Association.Labels] does not persist those values.
+	RefFromDefault bool
+	// PolicyFromDefault is true when Policy came from the process default.
+	PolicyFromDefault bool
+	// DockerfileFromDefault is true when Dockerfile came from the process default.
+	DockerfileFromDefault bool
+	// ContextFromDefault is true when Context came from the process default.
+	ContextFromDefault bool
+
+	// persistWatch is true when the container's own git-watch label turned the
+	// watcher on. A watcher turned on only by the git-enable configuration
+	// option leaves it false.
+	persistWatch bool
+}
+
+// Validate reports an invalid git-semver-policy or git-host label.
+//
+// The policy label is checked first. A policy label that names no policy is
+// invalid even when an image mapping supplies the policy.
+//
+// Returns:
+//   - error: Wraps [semver.ErrInvalidPolicy] or [ErrInvalidHost]. It is nil
+//     when both labels are valid or unset.
+func (a Association) Validate() error {
+	if a.invalidPolicy != "" {
+		return fmt.Errorf("%w: %s", semver.ErrInvalidPolicy, a.invalidPolicy)
+	}
+
+	if a.Host != "" {
+		_, err := ParseAPIOrigin(a.Host)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Labels returns the Git association labels a rebuilt replacement carries.
+//
+// They keep a git-image mapping working after the image is renamed to
+// name:git-<sha>. The repository is written without credentials, and the host
+// as its API origin. Ref, policy, Dockerfile, and context labels are written
+// only when a label or image mapping supplied them. Later changes to the
+// process-wide defaults still apply to the replacement. git-watch=true is
+// written only when the container's own git-watch label enabled the watcher.
+// Otherwise the git-enable configuration option keeps deciding.
+//
+// Returns:
+//   - map[string]string: Labels to write, or nil when the repository is empty
+//     or cannot be written without credentials.
+func (a Association) Labels() map[string]string {
+	repo := redact.GitURL(a.Repo)
+	if repo == "" {
+		return nil
+	}
+
+	out := map[string]string{labels.GitRepo: repo}
+
+	if a.Ref != "" && !a.RefFromDefault {
+		out[labels.GitRef] = a.Ref
+	}
+
+	if a.Policy != "" && !a.PolicyFromDefault {
+		out[labels.GitSemverPolicy] = a.Policy
+	}
+
+	// A host that is not an API origin fails Validate, and no rebuild runs for
+	// it. An empty or invalid host is left off rather than written unchecked.
+	origin, err := ParseAPIOrigin(a.Host)
+	if err == nil {
+		out[labels.GitHost] = origin.String()
+	}
+
+	if a.Dockerfile != "" && !a.DockerfileFromDefault {
+		out[labels.GitDockerfile] = a.Dockerfile
+	}
+
+	if a.Context != "" && !a.ContextFromDefault {
+		out[labels.GitContext] = a.Context
+	}
+
+	if a.persistWatch {
+		out[labels.GitWatch] = "true"
+	}
+
+	return out
+}
+
+// ResolveAssociation returns the monitor association for a container.
+//
+// Highest wins: Watchtower labels, then an exact ImageName() mapping.
+// OCI annotations never associate a container.
+//
+// Parameters:
+//   - c: Container to inspect.
+//   - defaults: Git settings with image mappings and defaults.
+//
+// Returns:
+//   - Association: Repo, ref, policy, and user-specified build paths when associated.
+//     Dockerfile and Context are empty when unset. Callers default to Dockerfile
+//     and the repository root.
+//   - bool: True when a git-repo label or image mapping is present.
+func ResolveAssociation(c *container.Container, defaults gitConfig.Defaults) (Association, bool) {
+	if c == nil {
+		return Association{}, false
+	}
+
+	rawPolicy := label(c, labels.GitSemverPolicy)
+	labelPolicy := semver.ParsePolicy(rawPolicy)
+
+	invalidPolicy := ""
+	if labelPolicy == "" {
+		invalidPolicy = rawPolicy
+	}
+
+	persistWatch, _ := watchLabel(c)
+
+	// Container labels win over --git-image mappings.
+	if repo := label(c, labels.GitRepo); repo != "" {
+		ref, refDefault := sourced(refLabel(c), "", defaultRef(defaults))
+		policy, policyDefault := sourced(labelPolicy, "", defaultPolicy(defaults))
+		dockerfile, dockerfileDefault := sourced(label(c, labels.GitDockerfile), "", defaults.Dockerfile)
+		context, contextDefault := sourced(label(c, labels.GitContext), "", defaults.Context)
+
+		return Association{
+			Repo:                  repo,
+			Ref:                   ref,
+			Policy:                policy,
+			Host:                  label(c, labels.GitHost),
+			Dockerfile:            dockerfile,
+			Context:               context,
+			invalidPolicy:         invalidPolicy,
+			RefFromDefault:        refDefault,
+			PolicyFromDefault:     policyDefault,
+			DockerfileFromDefault: dockerfileDefault,
+			ContextFromDefault:    contextDefault,
+			persistWatch:          persistWatch,
+		}, true
+	}
+
+	mapping := imageMapping(c.ImageName(), defaults.Images)
+	if mapping.Repo == "" {
+		return Association{}, false
+	}
+
+	ref, refDefault := sourced("", mapping.Ref, defaultRef(defaults))
+	policy, policyDefault := sourced("", mapping.Policy, defaultPolicy(defaults))
+	dockerfile, dockerfileDefault := sourced(label(c, labels.GitDockerfile), mapping.Dockerfile, defaults.Dockerfile)
+	context, contextDefault := sourced(label(c, labels.GitContext), mapping.Context, defaults.Context)
+
+	return Association{
+		Repo:                  mapping.Repo,
+		Ref:                   ref,
+		Policy:                policy,
+		Host:                  label(c, labels.GitHost),
+		Dockerfile:            dockerfile,
+		Context:               context,
+		invalidPolicy:         invalidPolicy,
+		RefFromDefault:        refDefault,
+		PolicyFromDefault:     policyDefault,
+		DockerfileFromDefault: dockerfileDefault,
+		ContextFromDefault:    contextDefault,
+		persistWatch:          persistWatch,
+	}, true
+}
+
+// sourced returns the first non-empty value and whether it came from fallback.
+//
+// Parameters:
+//   - primary: Highest-precedence value, usually a container label.
+//   - secondary: Image-mapping value. Empty when there is no mapping.
+//   - fallback: Process default.
+//
+// Returns:
+//   - string: Chosen value.
+//   - bool: True when the chosen value is the process default.
+func sourced(primary, secondary, fallback string) (string, bool) {
+	if primary != "" {
+		return primary, false
+	}
+
+	if secondary != "" {
+		return secondary, false
+	}
+
+	return fallback, fallback != ""
+}
+
+// ShouldMonitor reports whether Git monitoring should run for the container.
+//
+// Watchtower itself is excluded so registry self-update remains the default path.
+// The container must be associated via a git-repo label or git-image mapping.
+// git-watch=true without association stays on the registry path.
+//
+// Parameters:
+//   - log: Optional logger for the unassociated git-watch=true debug line.
+//   - c: Container to inspect.
+//   - defaults: Git settings including the process-wide monitor default.
+//
+// Returns:
+//   - bool: True when Git staleness checks and rebuilds apply.
+func ShouldMonitor(log *zerolog.Logger, c *container.Container, defaults gitConfig.Defaults) bool {
+	if c == nil || c.IsWatchtower() {
+		return false
+	}
+
+	_, associated := ResolveAssociation(c, defaults)
+	watch := isWatch(c, defaults)
+
+	// A watch override without association is a misconfig. Stay on the registry path.
+	if watch && !associated {
+		if log != nil {
+			log.Debug().
+				Str("container", c.Name()).
+				Str("image", c.ImageName()).
+				Msg("git-watch is set but container is not associated via git-repo or --git-image")
+		}
+
+		return false
+	}
+
+	return associated && watch
+}
+
+// label returns the trimmed container label value for key.
+//
+// Parameters:
+//   - c: Container to inspect.
+//   - key: Label key.
+//
+// Returns:
+//   - string: Trimmed value, or empty when the label is missing.
+func label(c *container.Container, key string) string {
+	if c == nil {
+		return ""
+	}
+
+	val, ok := c.GetLabel(key)
+	if !ok {
+		return ""
+	}
+
+	return strings.TrimSpace(val)
+}
+
+// refLabel returns git-ref, falling back to the git-branch alias.
+//
+// Parameters:
+//   - c: Container to inspect.
+//
+// Returns:
+//   - string: Ref label value, or empty.
+func refLabel(c *container.Container) string {
+	return cmp.Or(label(c, labels.GitRef), label(c, labels.GitBranch))
+}
+
+// imageMapping returns the git-image mapping for an exact ImageName() key.
+//
+// Parameters:
+//   - imageName: Container image name including tag.
+//   - images: Process-wide mappings.
+//
+// Returns:
+//   - gitConfig.Image: Zero value when no exact key exists.
+func imageMapping(imageName string, images map[string]gitConfig.Image) gitConfig.Image {
+	if images == nil || imageName == "" {
+		return gitConfig.Image{}
+	}
+
+	return images[imageName]
+}
+
+// isWatch reports whether the per-container or process-wide monitor is on.
+//
+// Parameters:
+//   - c: Container to inspect.
+//   - defaults: Git settings with the process-wide monitor default.
+//
+// Returns:
+//   - bool: True when the watcher should run, ignoring association.
+func isWatch(c *container.Container, defaults gitConfig.Defaults) bool {
+	if enabled, set := watchLabel(c); set {
+		return enabled
+	}
+
+	return defaults.Enable
+}
+
+// watchLabel reads the git-watch label.
+//
+// Enabling values are 1, t, true and yes. Disabling values are 0, f, false
+// and no. Case and surrounding spaces are ignored. A missing, blank or
+// unrecognized value counts as unset.
+//
+// Parameters:
+//   - c: Container to inspect.
+//
+// Returns:
+//   - enabled: True when the label turns the watcher on.
+//   - set: True when the label holds an enabling or disabling value.
+//
+//nolint:nonamedreturns // Same-type returns need names.
+func watchLabel(c *container.Container) (enabled, set bool) {
+	val := label(c, labels.GitWatch)
+
+	switch strings.ToLower(val) {
+	case "1", "t", "true", "yes":
+		return true, true
+	case "0", "f", "false", "no":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// defaultRef returns the process default ref, or main.
+//
+// Parameters:
+//   - defaults: Git settings.
+//
+// Returns:
+//   - string: Default Git ref.
+func defaultRef(defaults gitConfig.Defaults) string {
+	if defaults.DefaultRef != "" {
+		return defaults.DefaultRef
+	}
+
+	return "main"
+}
+
+// defaultPolicy returns the process default semver policy, or none when the
+// default names no policy.
+//
+// Parameters:
+//   - defaults: Git settings.
+//
+// Returns:
+//   - string: Canonical policy.
+func defaultPolicy(defaults gitConfig.Defaults) string {
+	return cmp.Or(semver.ParsePolicy(defaults.SemverPolicy), semver.PolicyNone)
+}

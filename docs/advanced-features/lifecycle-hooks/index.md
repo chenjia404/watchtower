@@ -23,6 +23,8 @@ Watchtower supports four distinct lifecycle hook types that execute at different
 | **Post-update** | Executed after starting the new container                             | Per container, immediately after starting  |
 | **Post-check**  | Executed for each filtered container after the update cycle completes | Per container, after all updates           |
 
+An update cycle that ends before it checks any container runs no check hooks. This happens when the monitored containers cannot be ordered by their dependencies, for example when two of them share a name.
+
 ## Configuration
 
 ### Enabling Lifecycle Hooks
@@ -114,6 +116,10 @@ By default, hook commands timeout after 1 minute. Override this with timeout lab
     LABEL com.centurylinklabs.watchtower.lifecycle.post-update-timeout="0"
     ```
 
+!!! Note
+    A timeout must be a whole number of minutes of 0 or more.
+    Any other value, such as `-1` or `1.5`, logs a warning and uses the 1 minute default.
+
 #### Custom User Execution
 
 By default, hooks run as the monitored container's configured user and group (`uid:gid`).
@@ -121,7 +127,8 @@ By default, hooks run as the monitored container's configured user and group (`u
 Both global and individual, container-specific uid/gid configurations are supported.
 
 !!! Note
-    Container labels take precedence over global flags/variables.
+    - Container labels take precedence over global flags/variables.
+    - A UID or GID label outside 0 to 2147483647 logs a warning. The hook then uses the global UID or GID. Without one, it runs as the container's configured user.
 
 === "Global Configuration"
 
@@ -161,10 +168,48 @@ Both global and individual, container-specific uid/gid configurations are suppor
 
 Lifecycle hooks utilize Docker's exec API through the following sequence:
 
-1. **Exec Creation**: `ContainerExecCreate` creates an exec instance with the specified command
-2. **Exec Start**: `ContainerExecStart` begins execution of the command
-3. **Output Capture**: `ContainerExecAttach` captures stdout/stderr output
-4. **Status Monitoring**: `ContainerExecInspect` monitors execution status and exit codes
+1. **Exec Creation**: `ExecCreate` creates an exec instance with the specified command
+2. **Exec Start and Output Capture**: `ExecAttach` starts the command and reads its stdout and stderr output to the end
+3. **Status Monitoring**: `ExecInspect` monitors execution status and exit codes
+
+### Hook Output and Security
+
+A hook runs inside the container. Its output therefore comes from whatever runs there, which may be a compromised application or a third-party image. Watchtower treats the output as untrusted text:
+
+- It reads the whole output. A command that prints a lot never blocks.
+- It keeps only the last 2 KiB. A leading `…` marks output whose beginning was dropped.
+- Before the text is logged or sent, it removes:
+    - Terminal escape sequences, such as colours, cursor movement, window titles, clipboard writes and hyperlinks
+    - Control characters other than newlines, tabs and carriage returns
+    - Invisible Unicode format characters, such as bidirectional text controls, zero-width characters and tag characters
+- A carriage return directly before a newline is dropped. Any other carriage return becomes a newline, as do the Unicode line and paragraph separators.
+- It replaces the user information of URLs, such as the `dana:s3cret` in `https://dana:s3cret@git.example.com`, with `xxxxx`. Query values such as `?token=…` stay as printed.
+- It puts the output on one line, joining its lines with ` | `. No line of hook output can then pass for one of Watchtower's own notification lines.
+- The output never changes what Watchtower does. Only the exit code decides whether the update continues, is skipped or fails.
+
+The kept output goes to these places:
+
+| Hook                  | When the command succeeds                     | When the command fails                                                                                                                                                                              |
+|-----------------------|-----------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Pre-update            | The debug log, in the "Executed command" line | The error-level "Could not update container" log line and the notifications that carry it. The failed container's error in report templates such as `default`, `json.v1` and the porcelain formats. |
+| Pre-check, post-check | The debug log, in the "Executed command" line | The debug log only                                                                                                                                                                                  |
+| Post-update           | The debug log, in the "Executed command" line | The debug log only                                                                                                                                                                                  |
+
+The HTTP API and its event stream do not include hook output.
+
+!!! Warning "Keep secrets out of hook output"
+    Notification services are third parties. Debug logs are often shipped to other systems. Apart from the user information of URLs, Watchtower sends hook output as the command printed it. It does not try to recognize other secrets. The replacement runs on the kept 2 KiB. When the cut falls inside a URL, a fragment such as `token@host` can remain. Guessing from names and formats would hide ordinary output and still miss real secrets.
+
+    A failing pre-update hook that prints credentials, for example through `set -x`, `env` or `curl -v`, can send them to every notification service. Write verbose output to a file inside the container or to `/dev/null`. Print only a short reason when the command fails.
+
+!!! Note "Markup, mentions and look-alike characters"
+    Watchtower does not escape the text for each notification service. A service may act on markup or mentions in it:
+
+    - Discord parses `@everyone` in a message.
+    - Email sent with Shoutrrr's `usehtml` option renders the text as HTML.
+    - Telegram's HTML and Markdown parse modes format it.
+
+    Characters that look alike, such as a Cyrillic `а` in place of a Latin `a`, stay as written, since removing them would break text in other languages.
 
 ### Environment Variables
 
@@ -552,14 +597,13 @@ Hook execution results are evaluated based on exit codes, with different behavio
     === "Docker Compose"
 
         ```yaml
-        version: '3.8'
         services:
           postgres:
             image: postgres:13
             environment:
               POSTGRES_DB: mydb
               POSTGRES_USER: user
-              POSTGRES_PASSWORD: pass
+              POSTGRES_PASSWORD: 'DB_PASSWORD'
             volumes:
               - postgres_data:/var/lib/postgresql/data
               - ./backup.sh:/usr/local/bin/backup.sh:ro
@@ -571,7 +615,7 @@ Hook execution results are evaluated based on exit codes, with different behavio
               - "com.centurylinklabs.watchtower.lifecycle.post-update-timeout=15"
 
           watchtower:
-            image: nicholas-fedor/watchtower
+            image: nickfedor/watchtower:latest
             volumes:
               - /var/run/docker.sock:/var/run/docker.sock
             environment:
@@ -581,6 +625,8 @@ Hook execution results are evaluated based on exit codes, with different behavio
         volumes:
           postgres_data:
         ```
+
+        Replace *`DB_PASSWORD`* with a password for the database user, inside the single quotes so that YAML reads every character as part of it. Inside the quotes, write each `'` as `''`. Write each `$` as `$$`, because Compose reads a `$` as the start of a variable even inside quotes.
 
 === "Application Graceful Shutdown"
 
@@ -604,7 +650,6 @@ Hook execution results are evaluated based on exit codes, with different behavio
     === "Docker Compose"
 
         ```yaml
-        version: '3.8'
         services:
           node-app:
             image: node:18
@@ -622,7 +667,7 @@ Hook execution results are evaluated based on exit codes, with different behavio
               - "com.centurylinklabs.watchtower.lifecycle.post-update-timeout=5"
 
           watchtower:
-            image: nicholas-fedor/watchtower
+            image: nickfedor/watchtower:latest
             volumes:
               - /var/run/docker.sock:/var/run/docker.sock
             environment:
@@ -650,7 +695,6 @@ Hook execution results are evaluated based on exit codes, with different behavio
     === "Docker Compose"
 
         ```yaml
-        version: '3.8'
         services:
           notification-service:
             image: alpine:latest
@@ -662,7 +706,7 @@ Hook execution results are evaluated based on exit codes, with different behavio
               - "com.centurylinklabs.watchtower.lifecycle.pre-update=/usr/local/bin/notify.sh"
 
           watchtower:
-            image: nicholas-fedor/watchtower
+            image: nickfedor/watchtower:latest
             volumes:
               - /var/run/docker.sock:/var/run/docker.sock
             environment:
@@ -734,5 +778,5 @@ Look for log messages containing:
 
 - "Executing pre-check command"
 - "Executing pre-update command"
-- "Command output captured"
+- "Executed command"
 - "Command execution failed"

@@ -1,22 +1,20 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"testing/synctest"
 	"time"
 
-	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -25,166 +23,32 @@ import (
 
 	dockerContainer "github.com/moby/moby/api/types/container"
 
-	"github.com/nicholas-fedor/watchtower/internal/actions"
+	mockCmd "github.com/nicholas-fedor/watchtower/cmd/mocks"
 	"github.com/nicholas-fedor/watchtower/internal/api"
-	"github.com/nicholas-fedor/watchtower/internal/api/handlers/update"
-	appconfig "github.com/nicholas-fedor/watchtower/internal/config"
-	"github.com/nicholas-fedor/watchtower/internal/flags"
-	"github.com/nicholas-fedor/watchtower/internal/logging"
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
-	"github.com/nicholas-fedor/watchtower/internal/scheduling"
-	"github.com/nicholas-fedor/watchtower/internal/util"
-	"github.com/nicholas-fedor/watchtower/pkg/container"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
-	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	containerClient "github.com/nicholas-fedor/watchtower/internal/container/client"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
+	"github.com/nicholas-fedor/watchtower/internal/settings"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/logcapture"
+	"github.com/nicholas-fedor/watchtower/internal/update"
 )
 
-// testLogger returns a discarded zerolog logger for tests that do not assert on logs.
-func testLogger() *zerolog.Logger {
-	nop := zerolog.Nop()
+// newTestLogger returns a logger that writes each event to the test's log, so a
+// failing test shows what it logged.
+//
+// Parameters:
+//   - t: Test that receives the log lines.
+//
+// Returns:
+//   - *zerolog.Logger: Logger writing to t.
+func newTestLogger(t *testing.T) *zerolog.Logger {
+	t.Helper()
 
-	return &nop
-}
+	// Frame 4 skips zerolog's write path, so each line names the log call.
+	w := zerolog.TestWriter{T: t, Frame: 4}
 
-const testFilterDesc = "test filter"
-
-func TestFormatDuration(t *testing.T) {
-	tests := []struct {
-		name     string
-		duration time.Duration
-		expected string
-	}{
-		{
-			name:     "zero duration",
-			duration: 0,
-			expected: "0 seconds",
-		},
-		{
-			name:     "only seconds",
-			duration: 45 * time.Second,
-			expected: "45 seconds",
-		},
-		{
-			name:     "minutes and seconds",
-			duration: 2*time.Minute + 30*time.Second,
-			expected: "2 minutes 30 seconds",
-		},
-		{
-			name:     "hours, minutes, seconds",
-			duration: 1*time.Hour + 30*time.Minute + 45*time.Second,
-			expected: "1 hour 30 minutes 45 seconds",
-		},
-		{
-			name:     "single hour",
-			duration: 1 * time.Hour,
-			expected: "1 hour",
-		},
-		{
-			name:     "single minute",
-			duration: 1 * time.Minute,
-			expected: "1 minute",
-		},
-		{
-			name:     "single second",
-			duration: 1 * time.Second,
-			expected: "1 second",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := util.FormatDuration(tt.duration)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestFormatTimeUnit(t *testing.T) {
-	tests := []struct {
-		name         string
-		value        int64
-		singular     string
-		plural       string
-		forceInclude bool
-		expected     string
-	}{
-		{
-			name:         "zero value not forced",
-			value:        0,
-			singular:     "second",
-			plural:       "seconds",
-			forceInclude: false,
-			expected:     "",
-		},
-		{
-			name:         "zero value forced",
-			value:        0,
-			singular:     "second",
-			plural:       "seconds",
-			forceInclude: true,
-			expected:     "0 seconds",
-		},
-		{
-			name:         "singular value",
-			value:        1,
-			singular:     "hour",
-			plural:       "hours",
-			forceInclude: false,
-			expected:     "1 hour",
-		},
-		{
-			name:         "plural value",
-			value:        5,
-			singular:     "minute",
-			plural:       "minutes",
-			forceInclude: false,
-			expected:     "5 minutes",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := util.FormatTimeUnit(tt.value, tt.singular, tt.plural, tt.forceInclude)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestFilterEmpty(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []string
-		expected []string
-	}{
-		{
-			name:     "all empty",
-			input:    []string{"", "", ""},
-			expected: nil,
-		},
-		{
-			name:     "all non-empty",
-			input:    []string{"a", "b", "c"},
-			expected: []string{"a", "b", "c"},
-		},
-		{
-			name:     "mixed empty and non-empty",
-			input:    []string{"", "a", "", "b", ""},
-			expected: []string{"a", "b"},
-		},
-		{
-			name:     "empty slice",
-			input:    []string{},
-			expected: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := util.FilterEmpty(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
+	return new(zerolog.New(w))
 }
 
 func TestAwaitDockerClient(t *testing.T) {
@@ -212,13 +76,12 @@ func TestAwaitDockerClient(t *testing.T) {
 func TestLifecycleFlags(t *testing.T) {
 	cmd := &cobra.Command{}
 
-	flags.SetDefaults()
-	flags.RegisterAll(cmd)
+	settings.RegisterAll(cmd)
 
 	err := cmd.ParseFlags([]string{"--lifecycle-uid", "1000", "--lifecycle-gid", "1001"})
 	require.NoError(t, err)
 
-	cfg, err := appconfig.Load(testLogger(), cmd, nil)
+	cfg, err := settings.Load(newTestLogger(t), cmd, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1000, cfg.Lifecycle.UID, "lifecycle UID should be set to 1000")
@@ -264,801 +127,23 @@ func TestGetAPIAddr(t *testing.T) {
 	}
 }
 
-// TestUpdateLockSerialization verifies that the updateLock mechanism properly serializes updates,
-// preventing concurrent access to the Docker client. This test simulates multiple update operations
-// running simultaneously, ensuring only one update executes at a time, mimicking the behavior
-// of updateOnStart and scheduled updates in the main application.
-func TestUpdateLockSerialization(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// Initialize the update lock channel with the same pattern as in runMain
-		updateLock := make(chan bool, 1)
-		updateLock <- true
-
-		// Atomic counters to track concurrent execution and completion
-		var (
-			running   int32
-			started   int32
-			completed int32
-		)
-
-		// WaitGroup to synchronize test completion
-		var wg sync.WaitGroup
-
-		// Simulate the update function used in runMain and runUpgradesOnSchedule
-		updateFunc := func(id int) {
-			select {
-			case v := <-updateLock:
-				// Acquired lock, perform update
-				defer func() { updateLock <- v }()
-
-				// Track that only one update is running at a time
-				current := atomic.AddInt32(&running, 1)
-				require.Equal(
-					t,
-					int32(1),
-					current,
-					"Only one update should be running at a time, but %d are running",
-					current,
-				)
-
-				atomic.AddInt32(&started, 1)
-
-				// Simulate update work with a delay
-				synctest.Wait()
-
-				atomic.AddInt32(&running, -1)
-				atomic.AddInt32(&completed, 1)
-
-			default:
-				// Lock not available, skip update (same as in the actual code)
-				t.Logf("Update %d skipped due to concurrent update in progress", id)
-			}
-		}
-
-		// Simulate concurrent updateOnStart and scheduled updates
-		numUpdates := 2
-		for i := range numUpdates {
-			wg.Add(1)
-
-			go func(id int) {
-				defer wg.Done()
-
-				updateFunc(id)
-			}(i)
-		}
-
-		// Wait for all goroutines to complete
-		wg.Wait()
-
-		// Verify that only one update executed due to lock serialization
-		assert.Equal(t, int32(1), started, "Only one update should have started due to lock")
-		assert.Equal(t, int32(1), completed, "Only one update should have completed")
-		assert.Equal(t, int32(0), running, "No updates should be running after completion")
-	})
-}
-
-// TestConcurrentScheduledAndFullAPIUpdate verifies that a full API-triggered update (no image params)
-// returns 429 immediately when a scheduled update is in progress, rather than blocking indefinitely.
-func TestConcurrentScheduledAndFullAPIUpdate(t *testing.T) {
-	updateLock := make(chan bool, 1)
-	updateLock <- true
-
-	scheduledStarted := make(chan struct{})
-	scheduledDone := make(chan struct{})
-
-	updateFn := func(_ context.Context, _, _ []string) *metrics.Metric {
-		t.Error("API update function should not be called when lock is held for full updates")
-
-		return &metrics.Metric{Scanned: 1, Updated: 1, Failed: 0}
-	}
-
-	handler := update.New(testLogger(), updateFn, updateLock)
-
-	go func() {
-		v := <-updateLock
-
-		close(scheduledStarted)
-
-		// Hold the lock until the API request has been asserted, then release.
-		<-scheduledDone
-
-		updateLock <- v
-	}()
-
-	<-scheduledStarted
-
-	testApp := fiber.New(fiber.Config{})
-	testApp.Post(handler.Path, handler.Handle)
-
-	req, err := http.NewRequestWithContext(
-		context.Background(),
-		http.MethodPost,
-		"/v1/update",
-		http.NoBody,
-	)
-	require.NoError(t, err)
-
-	resp, err := testApp.Test(req)
-	require.NoError(t, err)
-
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode,
-		"full API update should be rejected with 429 while scheduled update holds the lock")
-
-	close(scheduledDone)
-}
-
-func TestHandleAsync(t *testing.T) {
-	apiStarted := make(chan struct{})
-	apiCompleted := make(chan struct{})
-
-	updateLock := make(chan bool, 1)
-	updateLock <- true
-
-	scheduledStarted := make(chan struct{})
-	scheduledCompleted := make(chan struct{})
-
-	updateFn := func(_ context.Context, _, _ []string) *metrics.Metric {
-		close(apiStarted)
-		time.Sleep(50 * time.Millisecond)
-		close(apiCompleted)
-
-		return &metrics.Metric{Scanned: 1, Updated: 1, Failed: 0}
-	}
-
-	handler := update.New(testLogger(), updateFn, updateLock)
-
-	go func() {
-		v := <-updateLock
-
-		t.Log("Scheduled: acquired lock")
-		close(scheduledStarted)
-
-		// Hold the lock for a window to simulate a running scheduled update.
-		// Block until either the API update goroutine starts (which would
-		// indicate a locking bug) or the window elapses.
-		select {
-		case <-apiStarted:
-			t.Error("Targeted API update should not have started while scheduled update is running")
-
-			updateLock <- v
-
-			return
-		case <-time.After(50 * time.Millisecond):
-		}
-
-		close(scheduledCompleted)
-		t.Log("Scheduled: releasing lock")
-
-		updateLock <- v
-	}()
-
-	<-scheduledStarted
-
-	go func() {
-		testApp := fiber.New(fiber.Config{})
-		testApp.Post(handler.Path, handler.Handle)
-
-		req, err := http.NewRequestWithContext(
-			context.Background(),
-			http.MethodPost,
-			"/v1/update?image=myapp:latest",
-			http.NoBody,
-		)
-		if err != nil {
-			t.Errorf("Failed to create request: %v", err)
-
-			return
-		}
-
-		resp, err := testApp.Test(req)
-		if err != nil {
-			t.Errorf("Failed to test request: %v", err)
-
-			return
-		}
-		defer resp.Body.Close()
-	}()
-
-	<-scheduledCompleted
-
-	select {
-	case <-apiStarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for API update to start")
-	}
-
-	select {
-	case <-apiCompleted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for API update to complete")
-	}
-}
-
-// testScheduleDeps returns ScheduleDeps with shared defaults for cmd scheduling tests.
-// Callers set Filter, FilterDesc, Lock, UpdateOnStart, and BaseParams.EphemeralSelfUpdate as needed.
-func testScheduleDeps(
-	filter types.Filter,
-	filterDesc string,
-	lock chan bool,
-	updateOnStart bool,
-) scheduling.ScheduleDeps {
-	return scheduling.ScheduleDeps{
-		Logger:       testLogger(),
-		Filter:       filter,
-		FilterDesc:   filterDesc,
-		Lock:         lock,
-		ScheduleSpec: "",
-		// Suppress startup messaging in unit tests (Logger still set for safety if re-enabled).
-		Startup: logging.StartupParams{
-			Logger:           logging.New(io.Discard, logging.InfoLevel),
-			NoStartupMessage: true,
-		},
-		WriteStartupMessage: logging.WriteStartupMessage,
-		RunUpdate:           runUpdatesWithNotifications,
-		UpdateOnStart:       updateOnStart,
-		BaseParams:          types.UpdateParams{},
-	}
-}
-
-// TestUpdateOnStartTriggersImmediateUpdate verifies that the --update-on-start flag
-// triggers an immediate update before scheduling periodic updates.
-func TestUpdateOnStartTriggersImmediateUpdate(t *testing.T) {
-	// Create a command with update-on-start flag enabled
-	cmd := &cobra.Command{}
-	flags.RegisterSystemFlags(cmd)
-	err := cmd.ParseFlags([]string{"--update-on-start", "--no-startup-message"})
-	require.NoError(t, err)
-
-	// Track if update function was called
-	updateCalled := make(chan bool, 1)
-	updateCallCount := int32(0)
-
-	// Mock the update function to signal when called
-	originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-	runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-		atomic.AddInt32(&updateCallCount, 1)
-
-		select {
-		case updateCalled <- true:
-		default:
-		}
-
-		return &metrics.Metric{Scanned: 1, Updated: 0, Failed: 0}
-	}
-
-	defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-	// Create a context that will cancel quickly to avoid running the scheduler
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-
-	// Create update lock
-	updateLock := make(chan bool, 1)
-	updateLock <- true
-
-	// Call runUpgradesOnSchedule with a filter that matches no containers
-	filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-	filterDesc := testFilterDesc
-
-	// The function should trigger immediate update and then start scheduler
-	deps := testScheduleDeps(filter, filterDesc, updateLock, true)
-	err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-
-	// Should not return an error (context cancellation is expected)
-	require.NoError(t, err)
-
-	// Verify that update was called immediately
-	select {
-	case <-updateCalled:
-		// Expected: update was called
-	default:
-		t.Error("Update function was not called immediately with --update-on-start")
-	}
-
-	// Verify only one update call occurred (the immediate one)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&updateCallCount))
-}
-
-// TestUpdateOnStartIntegratesWithCronScheduling verifies that update-on-start
-// works with cron scheduling without causing duplicate updates.
-func TestUpdateOnStartIntegratesWithCronScheduling(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// Create a command with update-on-start flag enabled and a schedule
-		cmd := &cobra.Command{}
-		flags.RegisterSystemFlags(cmd)
-		err := cmd.ParseFlags(
-			[]string{"--update-on-start", "--schedule", "@every 1h", "--no-startup-message"},
-		)
-		require.NoError(t, err)
-
-		// Track update calls
-		updateCallCount := int32(0)
-		updateCalls := make(chan time.Time, 10)
-
-		// Mock the update function
-		originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-		runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-			callTime := time.Now()
-
-			atomic.AddInt32(&updateCallCount, 1)
-
-			select {
-			case updateCalls <- callTime:
-			default:
-			}
-
-			return &metrics.Metric{Scanned: 1, Updated: 0, Failed: 0}
-		}
-
-		defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-		// Create a context that allows some time for scheduler to start but not run updates
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-
-		// Create update lock
-		updateLock := make(chan bool, 1)
-		updateLock <- true
-
-		// Call runUpgradesOnSchedule
-		filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-		filterDesc := testFilterDesc
-
-		startTime := time.Now()
-		deps := testScheduleDeps(filter, filterDesc, updateLock, true)
-		err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-
-		// Should not return an error (context cancellation is expected)
-		require.NoError(t, err)
-
-		// Wait a bit for any scheduled calls
-		synctest.Wait()
-
-		// Verify that at least one update was called (the immediate one)
-		callCount := atomic.LoadInt32(&updateCallCount)
-		assert.GreaterOrEqual(t, callCount, int32(1), "At least one update should have been called")
-
-		// Verify that the first call happened immediately (within 10ms of start)
-		select {
-		case callTime := <-updateCalls:
-			timeSinceStart := callTime.Sub(startTime)
-			assert.Less(
-				t,
-				timeSinceStart,
-				10*time.Millisecond,
-				"First update should happen immediately",
-			)
-		default:
-			t.Error("No update calls were recorded")
-		}
-
-		// Verify no duplicate immediate calls occurred
-		assert.LessOrEqual(
-			t,
-			callCount,
-			int32(2),
-			"Should not have more than 2 update calls in short test period",
-		)
-	})
-}
-
-// TestUpdateOnStartLockingBehavior verifies that update-on-start respects the update lock
-// and doesn't run concurrent updates.
-func TestUpdateOnStartLockingBehavior(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// Create a command with update-on-start flag enabled
-		cmd := &cobra.Command{}
-		flags.RegisterSystemFlags(cmd)
-		err := cmd.ParseFlags([]string{"--update-on-start", "--no-startup-message"})
-		require.NoError(t, err)
-
-		// Create update lock that's initially unavailable (simulating another update in progress)
-		updateLock := make(chan bool, 1)
-		// Don't put anything in the lock initially
-
-		// Track if update function was called
-		updateCalled := make(chan bool, 1)
-
-		// Mock the update function
-		originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-		runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-			select {
-			case updateCalled <- true:
-			default:
-			}
-
-			return &metrics.Metric{Scanned: 1, Updated: 0, Failed: 0}
-		}
-
-		defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-		// Create a short context
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		defer cancel()
-
-		// Call runUpgradesOnSchedule
-		filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-		filterDesc := testFilterDesc
-
-		deps := testScheduleDeps(filter, filterDesc, updateLock, false)
-		err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-
-		// Should not return an error
-		require.NoError(t, err)
-
-		// Verify that update was NOT called because lock was unavailable
-		select {
-		case <-updateCalled:
-			t.Error("Update should not have been called when lock is unavailable")
-		default:
-			// Expected: no update call
-		}
-	})
-}
-
-// TestUpdateOnStartSelfUpdateScenario verifies that update-on-start works correctly
-// in self-update scenarios where Watchtower updates itself.
-func TestUpdateOnStartSelfUpdateScenario(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// Create a command with update-on-start flag enabled
-		cmd := &cobra.Command{}
-		flags.RegisterSystemFlags(cmd)
-		err := cmd.ParseFlags([]string{"--update-on-start", "--no-startup-message"})
-		require.NoError(t, err)
-
-		updateOnStart, _ := cmd.Flags().GetBool("update-on-start")
-
-		// Track update calls
-		updateCalled := make(chan bool, 1)
-
-		// Mock the update function
-		originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-		runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-			select {
-			case updateCalled <- true:
-			default:
-			}
-
-			return &metrics.Metric{Scanned: 1, Updated: 1, Failed: 0}
-		}
-
-		defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-		// Create a short context
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		defer cancel()
-
-		// Create update lock
-		updateLock := make(chan bool, 1)
-		updateLock <- true
-
-		// Call runUpgradesOnSchedule with a filter that includes containers
-		filter := types.Filter(func(_ types.FilterableContainer) bool { return true })
-		filterDesc := testFilterDesc
-
-		deps := testScheduleDeps(filter, filterDesc, updateLock, updateOnStart)
-		err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-
-		// Should not return an error
-		require.NoError(t, err)
-
-		// Verify that update was called for self-update scenario
-		select {
-		case <-updateCalled:
-			// Expected: update was called
-		default:
-			t.Error("Update function was not called in self-update scenario")
-		}
-	})
-}
-
-// TestUpdateOnStartMultiInstanceScenario verifies that multiple Watchtower instances
-// with update-on-start don't conflict with each other.
-func TestUpdateOnStartMultiInstanceScenario(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// This test simulates two Watchtower instances both with --update-on-start
-		// They should not conflict due to proper locking
-
-		// Create commands with update-on-start flag enabled
-		cmd1 := &cobra.Command{}
-		flags.RegisterSystemFlags(cmd1)
-		err := cmd1.ParseFlags([]string{"--update-on-start", "--no-startup-message"})
-		require.NoError(t, err)
-
-		updateOnStart1, _ := cmd1.Flags().GetBool("update-on-start")
-
-		cmd2 := &cobra.Command{}
-		flags.RegisterSystemFlags(cmd2)
-		err = cmd2.ParseFlags([]string{"--update-on-start", "--no-startup-message"})
-		require.NoError(t, err)
-
-		updateOnStart2, _ := cmd2.Flags().GetBool("update-on-start")
-
-		// Shared update lock (simulating shared resource)
-		updateLock := make(chan bool, 1)
-		updateLock <- true
-
-		// Track update calls from both instances
-		updateCallCount := int32(0)
-
-		var completed atomic.Int32
-
-		instance1Called := make(chan bool, 1)
-		instance2Called := make(chan bool, 1)
-
-		// Mock the update function
-		originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-		runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-			atomic.AddInt32(&updateCallCount, 1)
-			synctest.Wait() // Simulate update work
-
-			return nil // Don't trigger metrics in test
-		}
-
-		defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-		// Start both instances concurrently
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-
-			filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-			filterDesc := "instance1"
-
-			deps := testScheduleDeps(filter, filterDesc, updateLock, updateOnStart1)
-			err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-			assert.NoError(t, err)
-			completed.Add(1)
-			close(instance1Called)
-		}()
-
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-
-			filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-			filterDesc := "instance2"
-
-			deps := testScheduleDeps(filter, filterDesc, updateLock, updateOnStart2)
-			err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-			assert.NoError(t, err)
-			completed.Add(1)
-			close(instance2Called)
-		}()
-
-		// Wait for both instances to complete
-		<-instance1Called
-		<-instance2Called
-
-		// Verify that both instances shut down properly
-		assert.Equal(
-			t,
-			int32(2),
-			completed.Load(),
-			"Both instances should have shut down properly",
-		)
-
-		// Verify that only one update occurred due to locking (one instance gets the lock first)
-		callCount := atomic.LoadInt32(&updateCallCount)
-		assert.Equal(
-			t,
-			int32(1),
-			callCount,
-			"Only one update should occur due to lock serialization",
-		)
-		// Verify the lock is properly released after the test
-		lockAvailable := false
-
-		select {
-		case v := <-updateLock:
-			lockAvailable = true
-			// Lock was available, put it back for cleanup
-			updateLock <- v
-		default:
-			// Lock not available
-		}
-
-		assert.True(t, lockAvailable, "Lock should be available after test completion")
-	})
-}
-
-// TestWaitForRunningUpdate_NoUpdateRunning verifies that waitForRunningUpdate returns immediately
-// when no update is currently running (lock channel has a value).
-func TestWaitForRunningUpdate_NoUpdateRunning(t *testing.T) {
-	lock := make(chan bool, 1)
-	lock <- true // Lock is available, no update running
-
-	ctx := context.Background()
-	start := time.Now()
-
-	scheduling.WaitForRunningUpdate(testLogger(), ctx, lock)
-
-	elapsed := time.Since(start)
-
-	// Should return immediately without blocking
-	assert.Less(t, elapsed, 10*time.Millisecond, "Should not block when no update is running")
-}
-
-// TestWaitForRunningUpdate_UpdateRunning verifies that waitForRunningUpdate blocks
-// and waits for an update to complete when one is running (lock channel is empty).
-func TestWaitForRunningUpdate_UpdateRunning(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		lock := make(chan bool, 1)
-		// Don't put anything in lock initially - simulating update in progress
-
-		ctx := context.Background()
-		waitCompleted := make(chan bool, 1)
-
-		go func() {
-			scheduling.WaitForRunningUpdate(testLogger(), ctx, lock)
-
-			waitCompleted <- true
-		}()
-
-		// Wait a bit to ensure waitForRunningUpdate is blocking
-		synctest.Wait()
-
-		// Verify it's still waiting
-		select {
-		case <-waitCompleted:
-			t.Error("waitForRunningUpdate should still be waiting")
-		default:
-			// Expected: still waiting
-		}
-
-		// Now complete the "update" by putting value back in lock
-		lock <- true
-
-		// Wait for waitForRunningUpdate to complete
-		synctest.Wait()
-
-		select {
-		case <-waitCompleted:
-			// Expected: completed after lock was released
-		default:
-			t.Error("waitForRunningUpdate should have completed after lock was released")
-		}
-	})
-}
-
-// TestListContainersWithoutFilterIntegration verifies that client.ListContainers() is called
-// without filter arguments when no filter is provided, and that containers are returned correctly.
-func TestListContainersWithoutFilterIntegration(t *testing.T) {
-	// Set up environment
-	hostname := "test-container"
-	t.Setenv("HOSTNAME", hostname)
-
-	// Create mocks
-	mockClient := mockContainer.NewMockClient(t)
-	mockContainer := mockTypes.NewMockContainer(t)
-
-	// Set up mock expectations for ListContainers called with context
-	mockClient.EXPECT().ListContainers(context.Background()).Return([]types.Container{mockContainer}, nil).Once()
-
-	// Set up container mock to return the expected hostname
-	mockContainer.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-		Config: &dockerContainer.Config{Hostname: hostname},
-	}).Once()
-
-	// Set up IsWatchtower expectation (called to check if container should be preferred)
-	mockContainer.EXPECT().IsWatchtower().Return(false).Once()
-
-	// Set up container mock to return the container ID
-	expectedID := types.ContainerID("test-container-id")
-	mockContainer.EXPECT().ID().Return(expectedID).Once()
-
-	// Execute the function that calls ListContainers with context
-	resultID, err := container.GetContainerIDFromHostname(testLogger(), context.Background(), mockClient)
-
-	// Assert results
-	require.NoError(t, err)
-	assert.Equal(t, expectedID, resultID)
-
-	// Verify mock expectations
-	mockClient.AssertExpectations(t)
-	mockContainer.AssertExpectations(t)
-}
-
-// TestRunUpgradesOnSchedule_ShutdownWaitsForRunningUpdate verifies that runUpgradesOnSchedule
-// waits for any running update to complete before shutting down when receiving a shutdown signal.
-func TestRunUpgradesOnSchedule_ShutdownWaitsForRunningUpdate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		// Create a command without scheduling to keep test simple
-		cmd := &cobra.Command{}
-		flags.RegisterSystemFlags(cmd)
-		err := cmd.ParseFlags([]string{"--no-startup-message"})
-		require.NoError(t, err)
-
-		// Create update lock
-		updateLock := make(chan bool, 1)
-		updateLock <- true
-
-		// Track when shutdown completes
-		shutdownCompleted := make(chan bool, 1)
-
-		// Channels to coordinate the manual update simulation
-		updateStarted := make(chan bool, 1)
-		updateFinished := make(chan bool, 1)
-
-		// Mock runUpdatesWithNotifications to simulate a long-running update
-		originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-		runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-			// Signal that we're in the update
-			synctest.Wait() // Simulate update work
-
-			return nil // Don't trigger metrics in test
-		}
-
-		defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-		// Create a cancelable context for shutdown
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-
-		// Start runUpgradesOnSchedule in a goroutine
-		go func() {
-			filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-			filterDesc := testFilterDesc
-
-			// This should start and wait for context cancellation
-			deps := testScheduleDeps(filter, filterDesc, updateLock, false)
-			err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-			assert.NoError(t, err)
-
-			shutdownCompleted <- true
-		}()
-
-		// Start an update manually to simulate one running
-		go func() {
-			select {
-			case v := <-updateLock:
-				updateStarted <- true
-
-				defer func() {
-					updateLock <- v
-
-					updateFinished <- true
-				}()
-
-				// Simulate longer update work
-				synctest.Wait()
-			default:
-				// Lock not available
-			}
-		}()
-
-		// Wait for the update to start
-		<-updateStarted
-
-		// Cancel context to trigger shutdown
-		cancel()
-
-		// Wait for shutdown to complete
-		<-shutdownCompleted
-
-		// Ensure the manual update completes
-		<-updateFinished
-	})
-}
-
 // TestValidateRollingRestartDependenciesAcceptsCancelableContext verifies that
-// actions.ValidateRollingRestartDependencies properly accepts and uses a cancelable context.
+// update.ValidateRollingRestartDependencies properly accepts and uses a cancelable context.
 func TestValidateRollingRestartDependenciesAcceptsCancelableContext(t *testing.T) {
 	// Create a mock client
-	mockClient := mockContainer.NewMockClient(t)
+	mockClient := mockCmd.NewMockDockerClient(t)
 
 	// Create a filter that accepts all containers
-	filter := types.Filter(func(_ types.FilterableContainer) bool { return true })
+	filter := filters.Filter(func(_ filters.FilterableContainer) bool { return true })
 
 	// Test with cancelable context - context should not be canceled
 	t.Run("cancelable context without cancellation", func(t *testing.T) {
 		ctx := t.Context()
 
 		// Mock expects ListContainers to be called with the cancelable context
-		mockClient.EXPECT().ListContainers(ctx, mock.Anything, mock.Anything).Return([]types.Container{}, nil).Once()
+		mockClient.EXPECT().ListContainers(ctx, mock.Anything, mock.Anything).Return([]*container.Container{}, nil).Once()
 
-		err := actions.ValidateRollingRestartDependencies(testLogger(), ctx, mockClient, filter, true)
+		err := update.ValidateRollingRestartDependencies(newTestLogger(t), ctx, mockClient, filter, true)
 
 		require.NoError(t, err)
 		mockClient.AssertExpectations(t)
@@ -1074,7 +159,7 @@ func TestValidateRollingRestartDependenciesAcceptsCancelableContext(t *testing.T
 		// Mock expects ListContainers to be called with canceled context
 		mockClient.EXPECT().ListContainers(ctx, mock.Anything, mock.Anything).Return(nil, context.Canceled).Once()
 
-		err := actions.ValidateRollingRestartDependencies(testLogger(), ctx, mockClient, filter, true)
+		err := update.ValidateRollingRestartDependencies(newTestLogger(t), ctx, mockClient, filter, true)
 
 		// The function should return the error from ListContainers
 		require.Error(t, err)
@@ -1099,71 +184,12 @@ func TestValidateRollingRestartDependenciesAcceptsCancelableContext(t *testing.T
 		// Mock expects ListContainers to be called with timed out context
 		mockClient.EXPECT().ListContainers(ctx, mock.Anything, mock.Anything).Return(nil, context.DeadlineExceeded).Once()
 
-		err := actions.ValidateRollingRestartDependencies(testLogger(), ctx, mockClient, filter, true)
+		err := update.ValidateRollingRestartDependencies(newTestLogger(t), ctx, mockClient, filter, true)
 
 		// The function should return the error from ListContainers
 		require.Error(t, err)
 		mockClient.AssertExpectations(t)
 	})
-}
-
-// TestEphemeralSelfUpdateExercisesTruePath verifies that RunUpgradesOnSchedule
-// correctly handles ephemeralSelfUpdate=true, which bypasses the exposed-ports
-// self-update restriction by removing the old container before creating a new one.
-func TestEphemeralSelfUpdateExercisesTruePath(t *testing.T) {
-	// Create a command with update-on-start flag enabled
-	cmd := &cobra.Command{}
-	flags.RegisterSystemFlags(cmd)
-	err := cmd.ParseFlags([]string{"--update-on-start", "--no-startup-message"})
-	require.NoError(t, err)
-
-	// Track update calls
-	updateCallCount := int32(0)
-	updateCalled := make(chan struct{}, 1)
-
-	// Mock the update function
-	originalRunUpdatesWithNotifications := runUpdatesWithNotifications
-	runUpdatesWithNotifications = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
-		atomic.AddInt32(&updateCallCount, 1)
-
-		select {
-		case updateCalled <- struct{}{}:
-		default:
-		}
-
-		return &metrics.Metric{Scanned: 1, Updated: 0, Failed: 0}
-	}
-
-	defer func() { runUpdatesWithNotifications = originalRunUpdatesWithNotifications }()
-
-	// Create update lock
-	updateLock := make(chan bool, 1)
-	updateLock <- true
-
-	// Create a context that shuts down quickly
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-
-	filter := types.Filter(func(_ types.FilterableContainer) bool { return false })
-	filterDesc := testFilterDesc
-
-	// Call RunUpgradesOnSchedule with ephemeralSelfUpdate=true
-	deps := testScheduleDeps(filter, filterDesc, updateLock, true)
-	deps.BaseParams.EphemeralSelfUpdate = true
-	err = scheduling.RunUpgradesOnSchedule(ctx, deps)
-
-	require.NoError(t, err)
-
-	// Verify that update was called immediately
-	select {
-	case <-updateCalled:
-		// Expected: update was called
-	default:
-		t.Error("Update function was not called immediately with ephemeralSelfUpdate=true")
-	}
-
-	// Verify at least one update call occurred
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&updateCallCount), int32(1))
 }
 
 // TestCreateSignalContext verifies that the signal-aware context is properly created
@@ -1226,6 +252,24 @@ func TestCreateSignalContextDefault(t *testing.T) {
 		t.Error("Context should not be done initially")
 	default:
 		// Expected: context is not done
+	}
+}
+
+// TestNewClient_FailureLeavesNoClient verifies that newClient returns a nil
+// client when the Docker client cannot be created. preRun and the exit path
+// compare the client with nil, which an interface holding a nil pointer would
+// not equal. It sets environment variables, so it does not run in parallel.
+func TestNewClient_FailureLeavesNoClient(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "tcp://[::1")
+	t.Setenv("DOCKER_TLS_VERIFY", "")
+	t.Setenv("DOCKER_API_VERSION", "")
+
+	got, err := newClient(t.Context(), newTestLogger(t), containerClient.ClientOptions{})
+	require.Error(t, err)
+	// assert.Nil counts an interface holding a nil pointer as nil, so the
+	// interface is compared with nil directly.
+	if got != nil {
+		t.Errorf("newClient returned a non-nil client with its error: %#v", got)
 	}
 }
 
@@ -1386,7 +430,7 @@ func TestContainerLookupWithTimeoutContext(t *testing.T) {
 			t.Setenv("HOSTNAME", "test-hostname")
 
 			// Create a mock client
-			mockClient := mockContainer.NewMockClient(t)
+			mockClient := mockCmd.NewMockDockerClient(t)
 
 			// Create a context that's already timed out
 			ctx, cancel := context.WithTimeout(context.Background(), 0)
@@ -1404,7 +448,7 @@ func TestContainerLookupWithTimeoutContext(t *testing.T) {
 
 			// Call GetCurrentContainerID which internally uses the client
 			// The function will eventually call ListContainers with our expired context
-			_, err := container.GetCurrentContainerID(testLogger(), ctx, mockClient)
+			_, err := containerClient.GetCurrentContainerID(newTestLogger(t), ctx, fstest.MapFS{}, mockClient)
 
 			// Verify error is propagated
 			require.Error(t, err)
@@ -1421,7 +465,7 @@ func TestContainerLookupWithTimeoutContext(t *testing.T) {
 			t.Setenv("HOSTNAME", "test-hostname")
 
 			// Create a mock client
-			mockClient := mockContainer.NewMockClient(t)
+			mockClient := mockCmd.NewMockDockerClient(t)
 
 			ctx, cancel := context.WithCancel(context.Background())
 
@@ -1435,75 +479,7 @@ func TestContainerLookupWithTimeoutContext(t *testing.T) {
 			mockClient.EXPECT().ListContainers(ctx).Return(nil, context.Canceled).Once()
 
 			// Call GetCurrentContainerID
-			_, err := container.GetCurrentContainerID(testLogger(), ctx, mockClient)
-
-			// Verify error is propagated
-			require.Error(t, err)
-			require.ErrorIs(t, err, context.Canceled)
-
-			mockClient.AssertExpectations(t)
-		})
-	})
-}
-
-// TestGetCurrentWatchtowerContainerWithTimeout verifies that GetCurrentWatchtowerContainer
-// properly handles timeout contexts.
-func TestGetCurrentWatchtowerContainerWithTimeout(t *testing.T) {
-	// Test case 1: Context deadline exceeded - verify DeadlineExceeded error is handled
-	t.Run("DeadlineExceeded error is properly handled", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			// Create a mock client
-			mockClient := mockContainer.NewMockClient(t)
-
-			// Create a context that's already timed out
-			ctx, cancel := context.WithTimeout(context.Background(), 0)
-			defer cancel()
-
-			// Wait for context to actually timeout
-			time.Sleep(time.Millisecond)
-
-			// Verify context has expired
-			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-
-			containerID := types.ContainerID("test-container-id")
-
-			// Mock expects GetCurrentWatchtowerContainer to be called with expired context
-			mockClient.EXPECT().GetCurrentWatchtowerContainer(ctx, containerID).
-				Return(nil, context.DeadlineExceeded).Once()
-
-			// Call GetCurrentWatchtowerContainer
-			_, err := mockClient.GetCurrentWatchtowerContainer(ctx, containerID)
-
-			// Verify error is propagated
-			require.Error(t, err)
-			require.ErrorIs(t, err, context.DeadlineExceeded)
-
-			mockClient.AssertExpectations(t)
-		})
-	})
-
-	// Test case 2: Context canceled - verify Canceled error is handled
-	t.Run("Canceled context is properly handled", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			// Create a mock client
-			mockClient := mockContainer.NewMockClient(t)
-
-			ctx, cancel := context.WithCancel(context.Background())
-
-			// Cancel immediately
-			cancel()
-
-			// Verify context is canceled
-			require.ErrorIs(t, ctx.Err(), context.Canceled)
-
-			containerID := types.ContainerID("test-container-id")
-
-			// Mock expects GetCurrentWatchtowerContainer to be called with canceled context
-			mockClient.EXPECT().GetCurrentWatchtowerContainer(ctx, containerID).
-				Return(nil, context.Canceled).Once()
-
-			// Call GetCurrentWatchtowerContainer
-			_, err := mockClient.GetCurrentWatchtowerContainer(ctx, containerID)
+			_, err := containerClient.GetCurrentContainerID(newTestLogger(t), ctx, fstest.MapFS{}, mockClient)
 
 			// Verify error is propagated
 			require.Error(t, err)
@@ -1541,7 +517,7 @@ func TestRootCommand_FlagParsing(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			// Hostnames parse as flag values but fail validateAPIHost at run time.
+			// Hostnames parse as flag values but fail ValidateAPIHost at run time.
 			name:    "http-api-host hostname parses as flag",
 			args:    []string{"--http-api-host", "localhost"},
 			wantErr: false,
@@ -1561,7 +537,7 @@ func TestRootCommand_FlagParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := NewRootCommand()
-			flags.RegisterSystemFlags(cmd)
+			settings.RegisterAll(cmd)
 			cmd.SetArgs(tt.args)
 
 			err := cmd.ParseFlags(tt.args)
@@ -1570,6 +546,142 @@ func TestRootCommand_FlagParsing(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+// TestCommands_ErrorOutput verifies what Cobra prints when a command fails. A
+// flag or argument that does not parse is printed with the usage text, while
+// an error the command returns is left to Execute to report.
+func TestCommands_ErrorOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		// wantOutput lists text Cobra prints. Empty means it prints nothing.
+		wantOutput []string
+		// wantExitError reports whether the command returns an exitError.
+		wantExitError bool
+	}{
+		{
+			name:       "unknown flag",
+			args:       []string{"--bogus"},
+			wantOutput: []string{"Error: unknown flag: --bogus", "Usage:"},
+		},
+		{
+			name:          "root command failure",
+			args:          []string{"--log-format", "bogus"},
+			wantExitError: true,
+		},
+		{
+			name:       "notify-upgrade argument",
+			args:       []string{"notify-upgrade", "extra"},
+			wantOutput: []string{`Error: unknown command "extra" for "watchtower notify-upgrade"`, "Usage:"},
+		},
+		{
+			name:          "notify-upgrade failure",
+			args:          []string{"notify-upgrade", "--log-format", "bogus"},
+			wantExitError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newExecuteCommand(t, newRunProcess(), tt.args...)
+
+			var out bytes.Buffer
+
+			root.SetOut(&out)
+			root.SetErr(&out)
+
+			err := root.Execute()
+			require.Error(t, err)
+
+			_, isExitError := errors.AsType[*exitError](err)
+			assert.Equal(t, tt.wantExitError, isExitError)
+
+			if len(tt.wantOutput) == 0 {
+				assert.Empty(t, out.String())
+			}
+
+			for _, want := range tt.wantOutput {
+				assert.Contains(t, out.String(), want)
+			}
+		})
+	}
+}
+
+// TestIsContainerMainProcess verifies which processes count as the main
+// process of a container. Processes started with docker exec have parent PID 0
+// on most kernels and parent PID 1 on OpenVZ, where PID 1 still does not list
+// them among its children. A host binary can have an init system as its parent.
+func TestIsContainerMainProcess(t *testing.T) {
+	tests := []struct {
+		name        string
+		pid         int
+		ppid        int
+		inContainer bool
+		// children is PID 1's children list, or nil when the kernel has none.
+		children *string
+		want     bool
+	}{
+		{name: "PID 1", pid: 1, ppid: 0, inContainer: true, want: true},
+		{name: "child of the container's init", pid: 7, ppid: 1, inContainer: true, children: new("7\n"), want: true},
+		{name: "one of several children of the container's init", pid: 7, ppid: 1, inContainer: true, children: new("3 7 12"), want: true},
+		{name: "started with docker exec", pid: 8, ppid: 0, inContainer: true, children: new("7"), want: false},
+		{name: "started with docker exec on OpenVZ", pid: 8, ppid: 1, inContainer: true, children: new("7"), want: false},
+		{name: "PID 1 has no children", pid: 8, ppid: 1, inContainer: true, children: new(""), want: false},
+		{name: "a listed PID only shares digits", pid: 7, ppid: 1, inContainer: true, children: new("17 70"), want: false},
+		{name: "kernel without the children list", pid: 7, ppid: 1, inContainer: true, want: false},
+		{name: "started by another process in the container", pid: 9, ppid: 8, inContainer: true, children: new("7"), want: false},
+		{name: "host binary under an init system", pid: 4242, ppid: 1, inContainer: false, children: new("4242"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setPreRunState(t, nil, selfDetection{})
+
+			fsys := fstest.MapFS{}
+			if tt.inContainer {
+				fsys[".dockerenv"] = &fstest.MapFile{}
+			}
+
+			if tt.children != nil {
+				fsys["proc/1/task/1/children"] = &fstest.MapFile{Data: []byte(*tt.children)}
+			}
+
+			setProcessFs(t, fsys)
+
+			processID = func() int { return tt.pid }
+			parentProcessID = func() int { return tt.ppid }
+
+			assert.Equal(t, tt.want, isContainerMainProcess())
+		})
+	}
+}
+
+// TestExitError_Error verifies the text of an exit error with and without a
+// message and a cause.
+func TestExitError_Error(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("cause")
+
+	tests := []struct {
+		name string
+		err  *exitError
+		want string
+	}{
+		{name: "message and cause", err: &exitError{err: cause, msg: "Failed", code: 1}, want: "Failed: cause"},
+		{name: "message only", err: &exitError{err: nil, msg: "Failed", code: 1}, want: "Failed"},
+		{name: "cause only", err: &exitError{err: cause, msg: "", code: 1}, want: "cause"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, tt.err.Error())
+			assert.Equal(t, tt.err.err, errors.Unwrap(tt.err))
 		})
 	}
 }
@@ -1605,9 +717,7 @@ func TestRootCommand_HTTPAPIEndpointsFlag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := NewRootCommand()
-			flags.RegisterDockerFlags(cmd)
-			flags.RegisterSystemFlags(cmd)
-			flags.RegisterNotificationFlags(cmd)
+			settings.RegisterAll(cmd)
 			cmd.SetArgs(tt.args)
 
 			err := cmd.ParseFlags(tt.args)
@@ -1649,7 +759,7 @@ func TestValidateAPIHost(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := appconfig.ValidateAPIHost(tt.host)
+			err := settings.ValidateAPIHost(tt.host)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -1662,21 +772,21 @@ func TestValidateAPIHost(t *testing.T) {
 func TestAnyHTTPAPIConfig(t *testing.T) {
 	t.Parallel()
 
-	assert.False(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{}))
-	assert.True(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{APIToken: "secret"}))
-	assert.True(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{TLSCertPath: "/cert.pem"}))
-	assert.True(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{CORSAllowedOrigins: []string{"https://app.example.com"}}))
-	assert.True(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{APIHostChanged: true}))
-	assert.True(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{APIPortChanged: true}))
-	assert.True(t, appconfig.AnyHTTPAPIConfig(types.RunConfig{APIRateLimitChanged: true}))
+	assert.False(t, settings.AnyHTTPAPIConfig(settings.RunConfig{}))
+	assert.True(t, settings.AnyHTTPAPIConfig(settings.RunConfig{APIToken: "secret"}))
+	assert.True(t, settings.AnyHTTPAPIConfig(settings.RunConfig{TLSCertPath: "/cert.pem"}))
+	assert.True(t, settings.AnyHTTPAPIConfig(settings.RunConfig{CORSAllowedOrigins: []string{"https://app.example.com"}}))
+	assert.True(t, settings.AnyHTTPAPIConfig(settings.RunConfig{APIHostChanged: true}))
+	assert.True(t, settings.AnyHTTPAPIConfig(settings.RunConfig{APIPortChanged: true}))
+	assert.True(t, settings.AnyHTTPAPIConfig(settings.RunConfig{APIRateLimitChanged: true}))
 }
 
 func TestHTTPAPIEndpointsEnabled(t *testing.T) {
 	t.Parallel()
 
-	assert.False(t, appconfig.HTTPAPIEndpointsEnabled(types.RunConfig{}))
-	assert.True(t, appconfig.HTTPAPIEndpointsEnabled(types.RunConfig{EnableHealthAPI: true}))
-	assert.True(t, appconfig.HTTPAPIEndpointsEnabled(types.RunConfig{EnableUpdateAPI: true}))
+	assert.False(t, settings.HTTPAPIEndpointsEnabled(settings.RunConfig{}))
+	assert.True(t, settings.HTTPAPIEndpointsEnabled(settings.RunConfig{EnableHealthAPI: true}))
+	assert.True(t, settings.HTTPAPIEndpointsEnabled(settings.RunConfig{EnableUpdateAPI: true}))
 }
 
 func TestRootCommand_ReviveStoppedFlagParsing(t *testing.T) {
@@ -1700,7 +810,7 @@ func TestRootCommand_ReviveStoppedFlagParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := NewRootCommand()
-			flags.RegisterSystemFlags(cmd)
+			settings.RegisterAll(cmd)
 			cmd.SetArgs(tt.args)
 
 			err := cmd.ParseFlags(tt.args)
@@ -1713,122 +823,91 @@ func TestRootCommand_ReviveStoppedFlagParsing(t *testing.T) {
 	}
 }
 
-func TestResolveCurrentWatchtowerContainerForFallback(t *testing.T) {
-	t.Run("successful resolution", func(t *testing.T) {
-		originalReadMountinfoFunc := container.ReadMountinfoFunc
-		originalReadCgroupFunc := container.ReadCgroupFunc
-		container.ReadMountinfoFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock mountinfo error")
-		}
-		container.ReadCgroupFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock cgroup error")
-		}
+// TestDisableRestarts verifies that disableRestarts sets the restart policy of
+// Watchtower's own container to "no" and reports an error only when that
+// fails, since the runtime may then start Watchtower again. A container whose
+// policy is already "no" needs no update. A process other than the container's
+// main process leaves the policy alone. It changes package state, so it does
+// not run in parallel.
+func TestDisableRestarts(t *testing.T) {
+	tests := []struct {
+		name string
+		// current is the inspected Watchtower container, or nil when it was
+		// not inspected.
+		current *container.Container
+		// pid is the process ID Watchtower runs as.
+		pid int
+		// ppid is the parent process ID. The container's PID 1 lists PID 7
+		// as its only child.
+		ppid int
+		// unknownID leaves Watchtower's own container ID unknown.
+		unknownID  bool
+		wantUpdate bool
+		updateErr  error
+		wantError  bool
+	}{
+		{name: "the update succeeds", current: currentWatchtower(), pid: 1, wantUpdate: true},
+		{name: "the update fails", current: currentWatchtower(), pid: 1, wantUpdate: true, updateErr: errRunTestDocker, wantError: true},
+		{name: "the container was not inspected", pid: 1, wantUpdate: true},
+		{name: "the policy is already no", current: currentWatchtowerWithoutRestarts(), pid: 1, wantUpdate: false},
+		{name: "not the container's main process", current: currentWatchtower(), pid: 42, wantUpdate: false},
+		{name: "main process under an init", current: currentWatchtower(), pid: 7, ppid: 1, wantUpdate: true},
+		{name: "probe started with docker exec on OpenVZ", current: currentWatchtower(), pid: 8, ppid: 1, wantUpdate: false},
+		{name: "the container ID is not known", pid: 1, unknownID: true, wantUpdate: false, wantError: true},
+	}
 
-		defer func() {
-			container.ReadMountinfoFunc = originalReadMountinfoFunc
-			container.ReadCgroupFunc = originalReadCgroupFunc
-		}()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := mockCmd.NewMockDockerClient(t)
+			if tt.wantUpdate {
+				mockClient.EXPECT().SetRestartPolicy(mock.Anything, container.ContainerID("c0c0"),
+					dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyDisabled}).
+					Return(tt.updateErr).Once()
+			}
 
-		t.Setenv("HOSTNAME", "test-hostname")
+			currentID := container.ContainerID("c0c0")
+			if tt.unknownID {
+				currentID = ""
+			}
 
-		mockCnt := mockTypes.NewMockContainer(t)
-		mockClient := mockContainer.NewMockClient(t)
+			setRunState(t, runTestState{client: mockClient, current: tt.current, currentID: currentID})
+			setProcessFs(t, fstest.MapFS{
+				".dockerenv":             &fstest.MapFile{},
+				"proc/1/task/1/children": &fstest.MapFile{Data: []byte("7")},
+			})
 
-		mockClient.EXPECT().ListContainers(mock.Anything).Return([]types.Container{mockCnt}, nil).Once()
-		mockCnt.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-			Config: &dockerContainer.Config{Hostname: "test-hostname"},
-		}).Once()
-		mockCnt.EXPECT().ID().Return(types.ContainerID("test-id")).Once()
-		mockCnt.EXPECT().IsWatchtower().Return(false).Once()
-		mockClient.EXPECT().GetCurrentWatchtowerContainer(mock.Anything, types.ContainerID("test-id")).Return(mockCnt, nil).Once()
+			processID = func() int { return tt.pid }
+			parentProcessID = func() int { return tt.ppid }
 
-		result := resolveCurrentWatchtowerContainerForFallback(testLogger(), context.Background(), mockClient)
+			log, logOutput := logcapture.New(zerolog.ErrorLevel)
+			(&process{log: log}).disableRestarts()
 
-		assert.Equal(t, mockCnt, result)
-	})
+			if tt.wantError {
+				assert.Contains(t, logOutput.String(), logging.RestartsKept)
 
-	t.Run("GetCurrentContainerID returns error", func(t *testing.T) {
-		originalReadMountinfoFunc := container.ReadMountinfoFunc
-		originalReadCgroupFunc := container.ReadCgroupFunc
-		container.ReadMountinfoFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock mountinfo error")
-		}
-		container.ReadCgroupFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock cgroup error")
-		}
+				wantCause := errRunTestDocker
+				if tt.unknownID {
+					wantCause = errUnknownContainerID
+				}
 
-		defer func() {
-			container.ReadMountinfoFunc = originalReadMountinfoFunc
-			container.ReadCgroupFunc = originalReadCgroupFunc
-		}()
+				assert.Contains(t, logOutput.String(), wantCause.Error())
+			} else {
+				assert.Empty(t, logOutput.String())
+			}
+		})
+	}
+}
 
-		t.Setenv("HOSTNAME", "test-hostname")
-
-		mockClient := mockContainer.NewMockClient(t)
-
-		mockClient.EXPECT().ListContainers(mock.Anything).Return(nil, errors.New("list failed")).Once()
-
-		result := resolveCurrentWatchtowerContainerForFallback(testLogger(), context.Background(), mockClient)
-
-		assert.Nil(t, result)
-	})
-
-	t.Run("GetCurrentContainerID returns empty string", func(t *testing.T) {
-		originalReadMountinfoFunc := container.ReadMountinfoFunc
-		originalReadCgroupFunc := container.ReadCgroupFunc
-		container.ReadMountinfoFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock mountinfo error")
-		}
-		container.ReadCgroupFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock cgroup error")
-		}
-
-		defer func() {
-			container.ReadMountinfoFunc = originalReadMountinfoFunc
-			container.ReadCgroupFunc = originalReadCgroupFunc
-		}()
-
-		t.Setenv("HOSTNAME", "test-hostname")
-
-		mockClient := mockContainer.NewMockClient(t)
-
-		mockClient.EXPECT().ListContainers(mock.Anything).Return([]types.Container{}, nil).Once()
-
-		result := resolveCurrentWatchtowerContainerForFallback(testLogger(), context.Background(), mockClient)
-
-		assert.Nil(t, result)
-	})
-
-	t.Run("GetCurrentWatchtowerContainer returns nil", func(t *testing.T) {
-		originalReadMountinfoFunc := container.ReadMountinfoFunc
-		originalReadCgroupFunc := container.ReadCgroupFunc
-		container.ReadMountinfoFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock mountinfo error")
-		}
-		container.ReadCgroupFunc = func(string) ([]byte, error) {
-			return nil, errors.New("mock cgroup error")
-		}
-
-		defer func() {
-			container.ReadMountinfoFunc = originalReadMountinfoFunc
-			container.ReadCgroupFunc = originalReadCgroupFunc
-		}()
-
-		t.Setenv("HOSTNAME", "test-hostname")
-
-		mockCnt := mockTypes.NewMockContainer(t)
-		mockClient := mockContainer.NewMockClient(t)
-
-		mockClient.EXPECT().ListContainers(mock.Anything).Return([]types.Container{mockCnt}, nil).Once()
-		mockCnt.EXPECT().ContainerInfo().Return(&dockerContainer.InspectResponse{
-			Config: &dockerContainer.Config{Hostname: "test-hostname"},
-		}).Once()
-		mockCnt.EXPECT().ID().Return(types.ContainerID("test-id")).Once()
-		mockCnt.EXPECT().IsWatchtower().Return(false).Once()
-		mockClient.EXPECT().GetCurrentWatchtowerContainer(mock.Anything, types.ContainerID("test-id")).Return(nil, nil).Once()
-
-		result := resolveCurrentWatchtowerContainerForFallback(testLogger(), context.Background(), mockClient)
-
-		assert.Nil(t, result)
-	})
+// currentWatchtowerWithoutRestarts returns the Watchtower container the tests
+// run as, with the restart policy "no".
+func currentWatchtowerWithoutRestarts() *container.Container {
+	return container.NewContainer(nil,
+		&dockerContainer.InspectResponse{
+			ID:         "c0c0",
+			Name:       "/watchtower",
+			Config:     &dockerContainer.Config{Labels: map[string]string{watchtowerLabelKey: "true"}},
+			HostConfig: &dockerContainer.HostConfig{},
+		},
+		nil,
+	)
 }

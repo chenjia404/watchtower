@@ -3,15 +3,22 @@ package details
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 
-	"github.com/nicholas-fedor/watchtower/pkg/container"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	containerImage "github.com/nicholas-fedor/watchtower/internal/container/image"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
 )
+
+// ContainerLister lists the containers the handler reports on.
+type ContainerLister interface {
+	// ListContainers returns the containers that pass every filter.
+	ListContainers(ctx context.Context, filter ...filters.Filter) ([]*container.Container, error)
+}
 
 // ContainerDetails holds detailed information about a single watched container.
 type ContainerDetails struct {
@@ -23,6 +30,8 @@ type ContainerDetails struct {
 	ImageID string `json:"image_id"`
 	// Digest is the registry manifest digest (sha256:...).
 	Digest string `json:"digest"`
+	// Scope is the monitoring scope of the container.
+	Scope string `json:"scope"`
 	// Running indicates whether the container is currently running.
 	Running bool `json:"running"`
 	// Watchtower indicates whether this is the Watchtower container itself.
@@ -35,8 +44,6 @@ type ContainerDetails struct {
 	Enabled bool `json:"enabled"`
 	// Stale indicates whether the container's image is outdated.
 	Stale bool `json:"stale"`
-	// Scope is the monitoring scope of the container.
-	Scope string `json:"scope"`
 }
 
 // GetFunc returns detailed container status for all watched containers.
@@ -136,13 +143,13 @@ func (h *Handler) Handle(c fiber.Ctx) error {
 //   - error: Non-nil if listing containers fails.
 func GetContainerDetails(
 	ctx context.Context,
-	client container.Client,
-	filter types.Filter,
+	client ContainerLister,
+	filter filters.Filter,
 	nameFilter,
 	imageFilter string,
-	params types.UpdateParams,
+	params updateParams.Params,
 ) ([]ContainerDetails, error) {
-	var list []types.Container
+	var list []*container.Container
 
 	var err error
 
@@ -178,28 +185,19 @@ func GetContainerDetails(
 
 		scope, _ := c.Scope()
 
-		containerDetails := ContainerDetails{
+		details = append(details, ContainerDetails{
 			Name:        c.Name(),
 			Image:       c.ImageName(),
 			ImageID:     string(c.ImageID()),
+			Digest:      containerImage.LocalDigest(c),
 			Running:     c.IsRunning(),
 			Watchtower:  c.IsWatchtower(),
-			MonitorOnly: c.IsMonitorOnly(params),
-			NoPull:      c.IsNoPull(params),
+			MonitorOnly: c.IsMonitorOnly(params.Policy),
+			NoPull:      c.IsNoPull(params.Policy),
 			Enabled:     enabled,
 			Stale:       c.IsStale(),
 			Scope:       scope,
-		}
-
-		info := c.ImageInfo()
-		if info != nil && len(info.RepoDigests) > 0 {
-			_, digest, found := strings.Cut(info.RepoDigests[0], "@")
-			if found {
-				containerDetails.Digest = digest
-			}
-		}
-
-		details = append(details, containerDetails)
+		})
 	}
 
 	return details, nil

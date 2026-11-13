@@ -3,8 +3,8 @@
 // @description				Watchtower HTTP API for container update management, metrics, and health probes.
 // @contact.name				Nicholas Fedor
 // @contact.url				https://github.com/nicholas-fedor/watchtower
-// @license.name				MIT
-// @license.url				https://opensource.org/licenses/MIT
+// @license.name				Apache-2.0
+// @license.url				https://www.apache.org/licenses/LICENSE-2.0
 // @host						localhost:8080
 // @BasePath					/
 // @schemes					http https
@@ -42,7 +42,7 @@ import (
 	"os"
 
 	"github.com/nicholas-fedor/watchtower/cmd"
-	"github.com/nicholas-fedor/watchtower/internal/logging"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
 )
 
 // main serves as the entry point for the Watchtower application.

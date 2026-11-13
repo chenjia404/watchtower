@@ -1,0 +1,918 @@
+package cleanup
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	cerrdefs "github.com/containerd/errdefs"
+
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	containerImage "github.com/nicholas-fedor/watchtower/internal/container/image"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
+)
+
+// Client lists and removes containers and their images.
+type Client interface {
+	// ListContainers returns the containers that pass every filter.
+	ListContainers(ctx context.Context, filter ...filters.Filter) ([]*container.Container, error)
+	// StopAndRemoveContainer stops the container and removes it. The stop
+	// waits up to timeout.
+	StopAndRemoveContainer(ctx context.Context, target *container.Container, timeout time.Duration) error
+	// RemoveImageByID removes the image. The image name is used in logs.
+	RemoveImageByID(ctx context.Context, imageID container.ImageID, imageName string) error
+}
+
+// RemovedImageInfo represents information about an image that was cleaned up during update operations.
+// It tracks the image ID, container ID, image name, and the container that was using the old image before cleanup.
+type RemovedImageInfo struct {
+	// ImageID is the ID of the image that was cleaned up.
+	ImageID container.ImageID `json:"image_id"`
+	// ContainerID is the ID of the container that was using this image.
+	ContainerID container.ContainerID `json:"container_id"`
+	// ImageName is the name/tag of the image that was cleaned up.
+	ImageName string `json:"image_name"`
+	// ContainerName is the name of the container that was using this image before the update.
+	ContainerName string `json:"container_name"`
+}
+
+// stopContainerTimeout sets the container stop timeout.
+const stopContainerTimeout = 10 * time.Minute
+
+// maxRemovalAttempts sets the maximum number of retries for container removal operations.
+// Docker's default stop timeout is 10 seconds, but Watchtower stops its old
+// instances with a 10 minute timeout. With 30 attempts and a 1s delay between
+// retries, the total retry window is approximately 30 seconds (30 x 1s), which
+// covers the default Docker stop timeout plus overhead for image removal delays.
+const maxRemovalAttempts = 30
+
+// removalRetryDelay sets the delay before retrying removal operations.
+var removalRetryDelay = 1 * time.Second
+
+// Errors for cleaning up Watchtower containers and images.
+var (
+	// errImageRemovalFailed flags failures in image cleanup.
+	errImageRemovalFailed = errors.New("errors occurred during image cleanup")
+	// errStopWatchtowerFailed flags failures in stopping excess Watchtower containers.
+	errStopWatchtowerFailed = errors.New("errors occurred while stopping watchtower containers")
+)
+
+// RemoveExcessWatchtowerInstances ensures a single Watchtower container within the same scope.
+//
+// It identifies multiple Watchtower containers within the same scope, stops all but the current,
+// and collects removed images for deferred removal if enabled, preventing conflicts from concurrent containers.
+// Chain identification uses the current container's labels to determine old containers to remove.
+// Scoped instances only remove other instances in the same scope, allowing coexistence with different scopes.
+// Removal operations respect scope boundaries to prevent cross-scope interference.
+//
+// Parameters:
+//   - log: Process logger. Required and must be non-nil. A nil logger panics on the first log call.
+//   - ctx: Context for cancellation and timeouts.
+//   - client: Container client for Docker operations.
+//   - cleanupImages: Remove images if true.
+//   - watchtowerScope: Scope to filter Watchtower containers.
+//   - removeImageInfos: List that receives the images of removed instances for the caller to remove.
+//     Nil removes them right away.
+//   - currentContainer: The current running Watchtower container.
+//
+// Returns:
+//   - int: Number of removed Watchtower containers.
+//   - error: Non-nil if removal fails, nil if single instance or successful removal.
+func RemoveExcessWatchtowerInstances(log *zerolog.Logger, ctx context.Context,
+	client Client,
+	cleanupImages bool,
+	scope string,
+	removeImageInfos *[]RemovedImageInfo,
+	currentContainer *container.Container,
+) (int, error) {
+	log.Debug().
+		Str("scope", scope).
+		Bool("cleanup_images", cleanupImages).
+		Str("current_container_id", func() string {
+			if currentContainer != nil {
+				return string(currentContainer.ID())
+			}
+
+			return ""
+		}()).
+		Msg("Starting removal of excess Watchtower containers")
+
+	// List all containers to find excess instances
+	allContainers, err := client.ListContainers(ctx, filters.NoFilter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	// Retrieve containers that are excess Watchtower containers within the same scope
+	excessWatchtowerContainers := getExcessContainers(log,
+		scope,
+		currentContainer,
+		allContainers,
+	)
+
+	// If no excess containers found, nothing to remove
+	if len(excessWatchtowerContainers) == 0 {
+		log.Debug().
+			Str("scope", scope).
+			Msg("No excess containers found")
+
+		return 0, nil
+	}
+
+	// Stop and remove the excess containers, collecting removed image info if removal is enabled
+	removed, err := removeExcessContainers(log,
+		ctx,
+		client,
+		excessWatchtowerContainers,
+		cleanupImages,
+		currentContainer,
+		removeImageInfos,
+	)
+	if err != nil {
+		return removed, err
+	}
+
+	return removed, nil
+}
+
+// RemoveOldWatchtowerContainers removes old Watchtower containers that
+// linger from a previous self-update. Unlike RemoveExcessWatchtowerInstances
+// (which runs once at startup), this is designed to be called during each update
+// cycle to catch any old containers that the startup cleanup may have missed.
+//
+// It identifies containers matching the watchtower-old- prefix within the same
+// scope as the current container, stops them, and optionally cleans up their
+// images. This ensures that even if an old container survives the initial
+// cleanup (e.g., it was still stopping), it won't persist across update cycles.
+//
+// The scope is read from the current container in the same listing. An unset
+// or empty scope is the scope "none". Nothing is removed when the current
+// container ID is empty or that container is not listed. This keeps the
+// cleanup out of other instances' scopes.
+//
+// Parameters:
+//   - log: Process logger. Required and must be non-nil. A nil logger panics on the first log call.
+//   - ctx: Context for cancellation and timeouts.
+//   - client: Container client for Docker operations.
+//   - cleanupImages: Remove images if true.
+//   - currentContainerID: ID of the currently running Watchtower container, or empty.
+//   - removeImageInfos: List that receives the images of removed instances for the caller to remove.
+//     Nil removes them right away.
+//
+// Returns:
+//   - int: Number of removed old Watchtower containers.
+//   - error: Non-nil if removal fails, nil if none found or successful removal.
+func RemoveOldWatchtowerContainers(log *zerolog.Logger, ctx context.Context,
+	client Client,
+	cleanupImages bool,
+	currentContainerID container.ContainerID,
+	removeImageInfos *[]RemovedImageInfo,
+) (int, error) {
+	if currentContainerID == "" {
+		return 0, nil
+	}
+
+	// List all containers to find old instances
+	allContainers, err := client.ListContainers(ctx, filters.NoFilter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	// The current container sets the scope to clean up.
+	var current *container.Container
+
+	for _, c := range allContainers {
+		if c.ID() == currentContainerID {
+			current = c
+
+			break
+		}
+	}
+
+	if current == nil {
+		log.Debug().
+			Str("current_container_id", string(currentContainerID)).
+			Msg("Skipping old container cleanup: current container not found in list")
+
+		return 0, nil
+	}
+
+	scope := current.NormalizedScope()
+
+	log.Debug().
+		Str("scope", scope).
+		Str("current_id", string(currentContainerID)).
+		Bool("cleanup_images", cleanupImages).
+		Msg("Checking for old Watchtower containers")
+
+	// Find old Watchtower containers within the same scope
+	var oldContainers []*container.Container
+
+	// Iterate all containers to find old Watchtower containers that
+	// should be cleaned up. Non-Watchtower containers and containers with
+	// normal names are skipped immediately.
+	for _, c := range allContainers {
+		// Skip non-Watchtower containers
+		if !c.IsWatchtower() {
+			continue
+		}
+
+		// Skip containers that are not old predecessors
+		if !container.IsOldContainer(c.Name()) {
+			continue
+		}
+
+		// Scope check: only clean up old containers in the same scope
+		containerScope := c.NormalizedScope()
+
+		if containerScope != scope {
+			log.Debug().
+				Str("container", c.Name()).
+				Str("container_scope", containerScope).
+				Str("current_scope", scope).
+				Msg("Skipping old Watchtower container in different scope")
+
+			continue
+		}
+
+		// The updater's self-detection handles the case where the current
+		// container is old (it exits before reaching this point), but
+		// we still guard here for safety in case this function is called from
+		// a different code path.
+		if c.ID() == currentContainerID {
+			continue
+		}
+
+		oldContainers = append(oldContainers, c)
+	}
+
+	// Find orphaned Watchtower containers that are stuck in the created state.
+	// These can be left behind when a self-update creates a replacement but
+	// fails to start it. The new container never runs and the old instance
+	// may already be running under its original name.
+	var orphanedCreatedContainers []*container.Container
+
+	for _, c := range allContainers {
+		if container.IsOrphanedReplacement(c, current) {
+			orphanedCreatedContainers = append(orphanedCreatedContainers, c)
+		}
+	}
+
+	oldContainers = append(oldContainers, orphanedCreatedContainers...)
+
+	if len(oldContainers) == 0 {
+		log.Debug().Msg("No old or orphaned Watchtower containers found")
+
+		return 0, nil
+	}
+
+	log.Info().
+		Int("count", len(oldContainers)).
+		Int("old_count", len(oldContainers)-len(orphanedCreatedContainers)).
+		Int("orphaned_created_count", len(orphanedCreatedContainers)).
+		Strs("containers", containerNames(oldContainers)).
+		Msg("Found old or orphaned Watchtower containers, cleaning up")
+
+	// Reuse the existing removal logic for old containers
+	removed, err := removeExcessContainers(log,
+		ctx,
+		client,
+		oldContainers,
+		cleanupImages,
+		current,
+		removeImageInfos,
+	)
+	if err != nil {
+		return removed, err
+	}
+
+	return removed, nil
+}
+
+// getExcessContainers retrieves a list of excess Watchtower containers that should be removed.
+//
+// It identifies containers that are duplicates within the same scope or part of a container chain,
+// excluding the current running container, to ensure only one Watchtower instance operates per scope.
+//
+// Parameters:
+//   - watchtowerScope: Scope to filter containers, empty for unscoped.
+//   - currentContainer: The current running Watchtower container (nil if not applicable).
+//   - allContainers: All containers to search for excess instances.
+//
+// Returns:
+//   - []*container.Container: Slice of containers to remove.
+func getExcessContainers(log *zerolog.Logger, watchtowerScope string,
+	currentContainer *container.Container,
+	allContainers []*container.Container,
+) []*container.Container {
+	log.Debug().
+		Str("scope", watchtowerScope).
+		Str("current_container_id", func() string {
+			if currentContainer != nil {
+				return string(currentContainer.ID())
+			}
+
+			return ""
+		}()).
+		Msg("Retrieving excess containers")
+
+	filteredContainers := getFilteredContainers(log,
+		watchtowerScope,
+		currentContainer,
+		allContainers,
+	)
+
+	var chainedContainers []*container.Container
+	if currentContainer != nil {
+		chainedContainers = getChainedContainers(log, allContainers, currentContainer)
+	}
+
+	excessContainers := addExcessContainers(filteredContainers, chainedContainers)
+
+	return excessContainers
+}
+
+// getFilteredContainers returns the Watchtower containers in the given scope other
+// than the current one.
+//
+// When the current container is an old predecessor, the successor it hands off
+// to counts as the current one instead, when one exists. The successor is the
+// non-old container in the same scope whose chain label lists the predecessor's
+// ID, or else the first non-old container in that scope.
+//
+// Parameters:
+//   - log: Process logger.
+//   - scope: Scope UID to filter containers, empty for unscoped.
+//   - currentContainer: The current running Watchtower container (nil if not applicable).
+//   - allContainers: All containers to filter from.
+//
+// Returns:
+//   - []*container.Container: Excess containers to remove, empty when currentContainer is nil.
+func getFilteredContainers(log *zerolog.Logger, scope string,
+	currentContainer *container.Container,
+	allContainers []*container.Container,
+) []*container.Container {
+	if currentContainer == nil {
+		return []*container.Container{}
+	}
+
+	inScope := filters.FilterByScope(log, scope, filters.NoFilter)
+
+	var filteredContainers []*container.Container
+
+	// Check the Watchtower label first so the scope filter's debug lines cover
+	// only Watchtower containers, not every container on the host.
+	for _, c := range allContainers {
+		if c.IsWatchtower() && inScope(c) {
+			filteredContainers = append(filteredContainers, c)
+		}
+	}
+
+	var excessContainers []*container.Container
+
+	currentID := string(currentContainer.ID())
+	if container.IsOldContainer(currentContainer.Name()) {
+		// Detection selected an old predecessor. Prefer its direct
+		// successor in the self-update chain, then any newer instance in its
+		// scope, and keep the predecessor when there is neither.
+		chained, firstInScope := successorOf(currentContainer, filteredContainers)
+
+		switch {
+		case chained != nil:
+			currentID = string(chained.ID())
+		case firstInScope != nil:
+			currentID = string(firstInScope.ID())
+		default:
+		}
+	}
+
+	for _, c := range filteredContainers {
+		if string(c.ID()) != currentID {
+			excessContainers = append(excessContainers, c)
+		}
+	}
+
+	log.Debug().
+		Str("scope", scope).
+		Int("excess_containers_found", len(excessContainers)).
+		Int("filtered_containers_total", len(filteredContainers)).
+		Msg("Filtered excess containers")
+
+	return excessContainers
+}
+
+// getChainedContainers retrieves containers linked in a chain based on the current container's chain label.
+//
+// It parses the container chain label from the current container, identifies the linked
+// Watchtower containers excluding the current one, and returns them as a slice. A linked
+// container that is not a Watchtower container is never returned. If the current container
+// has no chain label or an empty chain label, an empty slice is returned.
+//
+// Parameters:
+//   - log: Process logger.
+//   - allContainers: All containers to search for chained containers.
+//   - currentContainer: The current running Watchtower container (nil if not applicable).
+//
+// Returns:
+//   - []*container.Container: Slice of chained containers excluding the current one.
+func getChainedContainers(log *zerolog.Logger,
+	allContainers []*container.Container,
+	currentContainer *container.Container,
+) []*container.Container {
+	var chainedContainers []*container.Container
+
+	effectiveCurrent := currentContainer
+	if currentContainer != nil && container.IsOldContainer(currentContainer.Name()) {
+		// Detection selected an old predecessor. Only its direct successor in
+		// the self-update chain has a chain label that names the containers to
+		// remove, so without one there is nothing to remove through the chain.
+		effectiveCurrent, _ = successorOf(currentContainer, allContainers)
+	}
+
+	if effectiveCurrent == nil {
+		return []*container.Container{}
+	}
+
+	// Get the (effective) current Watchtower container's com.centurylinklabs.watchtower.container-chain label.
+	chainLabelValue, present := effectiveCurrent.GetContainerChain()
+
+	// If it's not present, there are no chained containers.
+	if !present {
+		return []*container.Container{}
+	}
+
+	// If it's empty, there are no chained containers.
+	if chainLabelValue == "" {
+		return []*container.Container{}
+	}
+
+	// Collect the container IDs from the chain for efficient lookup.
+	containerChainMap := make(map[string]struct{})
+
+	for id := range strings.SplitSeq(chainLabelValue, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			containerChainMap[id] = struct{}{}
+		}
+	}
+
+	// Filter containers that are in the chain, present on the host, and not the effective current.
+	// Chained containers are parent containers that must be removed regardless of scope.
+	for _, c := range allContainers {
+		_, exists := containerChainMap[string(c.ID())]
+		if !exists || c.ID() == effectiveCurrent.ID() {
+			continue
+		}
+
+		// Only a Watchtower container can be a replaced instance.
+		if !c.IsWatchtower() {
+			log.Debug().
+				Str("container_id", string(c.ID())).
+				Str("container_name", c.Name()).
+				Msg("Skipping chained container that is not a Watchtower container")
+
+			continue
+		}
+
+		chainedContainers = append(chainedContainers, c)
+	}
+
+	return chainedContainers
+}
+
+// successorOf finds the newer Watchtower instances that may have replaced an
+// old predecessor. Only non-old Watchtower containers in the predecessor's
+// scope count, where an unset or empty scope is the scope "none".
+//
+// Parameters:
+//   - old: The old predecessor container.
+//   - candidates: Containers to search, in order.
+//
+// Returns:
+//   - *container.Container: The first candidate whose chain label lists the predecessor's ID, or nil.
+//   - *container.Container: The first candidate in the predecessor's scope, or nil.
+func successorOf(old *container.Container, candidates []*container.Container) (*container.Container, *container.Container) {
+	oldScope := old.NormalizedScope()
+
+	var firstInScope *container.Container
+
+	for _, c := range candidates {
+		if !c.IsWatchtower() || container.IsOldContainer(c.Name()) || c.NormalizedScope() != oldScope {
+			continue
+		}
+
+		if firstInScope == nil {
+			firstInScope = c
+		}
+
+		chain, _ := c.GetContainerChain()
+		if container.IsWatchtowerParent(old.ID(), chain) {
+			return c, firstInScope
+		}
+	}
+
+	return nil, firstInScope
+}
+
+// addExcessContainers combines and deduplicates excess and chain containers for removal.
+//
+// It creates a map to deduplicate containers by ID, adding both excess and chain containers,
+// then returns a slice of unique containers to remove.
+//
+// Parameters:
+//   - excessContainers: Containers identified as excess within the scope.
+//   - chainContainers: Containers linked in a chain excluding the current one.
+//
+// Returns:
+//   - []*container.Container: Deduplicated slice of containers to remove.
+func addExcessContainers(excessContainers, chainContainers []*container.Container) []*container.Container {
+	containersToRemoveMap := make(map[container.ContainerID]*container.Container)
+	for _, c := range excessContainers {
+		containersToRemoveMap[c.ID()] = c
+	}
+
+	for _, c := range chainContainers {
+		containersToRemoveMap[c.ID()] = c
+	}
+
+	containersToRemove := make([]*container.Container, 0, len(containersToRemoveMap))
+	for _, c := range containersToRemoveMap {
+		containersToRemove = append(containersToRemove, c)
+	}
+
+	return containersToRemove
+}
+
+// removeExcessContainers attempts to stop and remove a list of excess containers with retries.
+//
+// It stops and removes the provided containers, handling retries on failure, tracks removal successes,
+// and optionally collects image information for deferred removal if images should be cleaned up.
+// Excludes the current running container from removal and manages image cleanup based on removal success.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts.
+//   - client: Container client for Docker operations.
+//   - excessWatchtowerContainers: Slice of Watchtower containers to stop and remove.
+//   - cleanupImages: Remove images if true.
+//   - currentContainer: The current running Watchtower container (nil if not applicable).
+//   - removeImageInfos: List that receives the images of removed instances for the caller to remove.
+//     Nil removes them right away.
+//
+// Returns:
+//   - int: Number of successfully removed containers.
+//   - error: Non-nil if any container removal failed or insufficient removals occurred.
+func removeExcessContainers(log *zerolog.Logger, ctx context.Context,
+	client Client,
+	excessWatchtowerContainers []*container.Container,
+	cleanupImages bool,
+	currentContainer *container.Container,
+	removeImageInfos *[]RemovedImageInfo,
+) (int, error) {
+	log.Debug().
+		Int("excess_count", len(excessWatchtowerContainers)).
+		Bool("cleanup_images", cleanupImages).
+		Msg("Starting removal of excess containers")
+
+	// collected holds the images of the instances this call removes.
+	var collected []RemovedImageInfo
+
+	excessInstancesRemoved := 0
+
+	for i, c := range excessWatchtowerContainers {
+		log.Debug().
+			Str("container_id", string(c.ID())).
+			Str("container_name", c.Name()).
+			Msg("Starting removal attempts for excess container")
+
+		succeeded := false
+		wasNotFound := false
+
+		for attempt := range maxRemovalAttempts {
+			log.Debug().
+				Str("container_id", string(c.ID())).
+				Int("attempt", attempt+1).
+				Int("max_attempts", maxRemovalAttempts).
+				Msg("Attempting to stop and remove container")
+
+			err := client.StopAndRemoveContainer(ctx, c, stopContainerTimeout)
+			if err == nil {
+				log.Debug().
+					Str("container_id", string(c.ID())).
+					Int("attempt", attempt+1).
+					Msg("Successfully stopped and removed container")
+
+				succeeded = true
+
+				break
+			}
+
+			if cerrdefs.IsNotFound(err) {
+				log.Debug().
+					Str("container_id", string(c.ID())).
+					Int("attempt", attempt+1).
+					Msg("Container not found, considering as removed")
+
+				succeeded = true
+				wasNotFound = true
+
+				break
+			}
+
+			log.Debug().
+				Err(err).
+				Str("container_id", string(c.ID())).
+				Int("attempt", attempt+1).
+				Msg("Failed to stop and remove container")
+
+			if attempt < maxRemovalAttempts-1 {
+				select {
+				case <-time.After(removalRetryDelay):
+					// continue to next retry attempt
+				case <-ctx.Done():
+					// The caller still removes the images of the instances
+					// already removed, except images the remaining ones use.
+					if removeImageInfos != nil {
+						addCollectedImages(removeImageInfos, collected, excessWatchtowerContainers[i:])
+					}
+
+					return excessInstancesRemoved, fmt.Errorf("context canceled during retry delay: %w", ctx.Err())
+				}
+			}
+		}
+
+		if succeeded {
+			excessInstancesRemoved++
+
+			if cleanupImages && currentContainer != nil &&
+				c.ImageID() != currentContainer.ImageID() &&
+				!wasNotFound {
+				log.Debug().
+					Str("container_id", string(c.ID())).
+					Str("image_id", string(c.ImageID())).
+					Str("image_name", c.ImageName()).
+					Msg("Collecting image info for deferred removal")
+
+				collected = append(collected, RemovedImageInfo{
+					ImageID:       c.ImageID(),
+					ContainerID:   c.ID(),
+					ImageName:     c.ImageName(),
+					ContainerName: c.Name(),
+				})
+			}
+		}
+	}
+
+	// Keep every image while an instance is still running. Only the images
+	// of this call are dropped, never the caller's earlier entries.
+	if excessInstancesRemoved < len(excessWatchtowerContainers) {
+		collected = nil
+	}
+
+	if removeImageInfos != nil {
+		// The caller removes the images, once per image, with the rest of
+		// its cleanup.
+		addCollectedImages(removeImageInfos, collected, nil)
+	} else if len(collected) > 0 {
+		removedInfos, err := RemoveImages(log, ctx, client, collected)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Int("removed_images_count", len(removedInfos)).
+				Interface("image_infos", removedInfos).
+				Bool("cleanup_images", true).
+				Msg("failed to remove excess images")
+		}
+	}
+
+	if excessInstancesRemoved < len(excessWatchtowerContainers) {
+		return excessInstancesRemoved, fmt.Errorf(
+			"%w: %d of %d instances failed to stop",
+			errStopWatchtowerFailed,
+			len(excessWatchtowerContainers)-excessInstancesRemoved,
+			len(excessWatchtowerContainers),
+		)
+	}
+
+	log.Info().
+		Int("removed_instances", excessInstancesRemoved).
+		Msg(logging.ExcessInstancesRemoved)
+
+	return excessInstancesRemoved, nil
+}
+
+// addCollectedImages adds collected images to the caller's cleanup list,
+// skipping images that a remaining instance still uses.
+//
+// Parameters:
+//   - removeImageInfos: The caller's cleanup list.
+//   - collected: Images of the instances that were removed.
+//   - remaining: Instances that were not removed.
+func addCollectedImages(
+	removeImageInfos *[]RemovedImageInfo,
+	collected []RemovedImageInfo,
+	remaining []*container.Container,
+) {
+	inUse := make(map[container.ImageID]struct{}, len(remaining))
+	for _, c := range remaining {
+		inUse[c.ImageID()] = struct{}{}
+	}
+
+	for _, info := range collected {
+		if _, used := inUse[info.ImageID]; used {
+			continue
+		}
+
+		AddImage(removeImageInfos, info.ImageID, info.ImageName, info.ContainerName, info.ContainerID)
+	}
+}
+
+// AddImage adds cleanup info if not already present.
+//
+// Deduplication is based on the (ImageID, ContainerName) pair so that when
+// notifications are split by container, each container that used the old image
+// receives its own "Removing image" entry.
+//
+// Parameters:
+//   - cleanupImageInfos: Pointer to slice to collect cleaned image info.
+//   - imageID: ID of the image to clean up.
+//   - imageName: Name of the image.
+//   - containerName: Name of the container.
+//   - containerID: ID of the container (optional, pass empty string if not available).
+func AddImage(
+	cleanupImageInfos *[]RemovedImageInfo,
+	imageID container.ImageID,
+	imageName, containerName string,
+	containerID container.ContainerID,
+) {
+	for _, existing := range *cleanupImageInfos {
+		if existing.ImageID == imageID && existing.ContainerName == containerName {
+			return
+		}
+	}
+
+	*cleanupImageInfos = append(*cleanupImageInfos, RemovedImageInfo{
+		ImageID:       imageID,
+		ContainerID:   containerID,
+		ImageName:     imageName,
+		ContainerName: containerName,
+	})
+}
+
+// deduplicateByImageID returns a new slice containing only the first occurrence
+// of each ImageID. This is used to ensure each image is removed exactly once
+// even when multiple containers share the same old image.
+//
+// Parameters:
+//   - images: Slice of RemovedImageInfo that may contain duplicate ImageIDs.
+//
+// Returns:
+//   - []RemovedImageInfo: Slice with one entry per unique ImageID.
+func deduplicateByImageID(images []RemovedImageInfo) []RemovedImageInfo {
+	seen := make(map[container.ImageID]bool, len(images))
+	result := make([]RemovedImageInfo, 0, len(images))
+
+	for _, img := range images {
+		if !seen[img.ImageID] {
+			seen[img.ImageID] = true
+			result = append(result, img)
+		}
+	}
+
+	return result
+}
+
+// RemoveImages removes specified images and returns successfully removed ones.
+//
+// It iterates through the provided images, attempting to remove each from the Docker environment,
+// logging successes or failures for debugging and monitoring. Tracks successfully removed image info.
+// If no images are provided, it returns an empty slice and no error.
+//
+// A removed image is logged at info once for each container that used it. A
+// notification about one of those containers then carries the removal.
+// Grouped notifications show it once, since repeated removal lines of one
+// image are deduplicated.
+//
+// Parameters:
+//   - log: Process logger. Required and must be non-nil. A nil logger panics on the first log call.
+//   - ctx: Context for cancellation and timeouts.
+//   - client: Container client for Docker operations.
+//   - images: Slice of images to remove.
+//
+// Returns:
+//   - []RemovedImageInfo: The entries of the removed images, one for each
+//     container that used one.
+//   - error: Non-nil if any image removal failed, nil otherwise.
+func RemoveImages(log *zerolog.Logger, ctx context.Context,
+	client Client,
+	images []RemovedImageInfo,
+) ([]RemovedImageInfo, error) {
+	// Return early if no images need removal.
+	if len(images) == 0 {
+		log.Debug().Msg("No images provided for removal, skipping")
+
+		return []RemovedImageInfo{}, nil
+	}
+
+	// Remove each image once, even when several containers used it.
+	users := make(map[container.ImageID][]RemovedImageInfo, len(images))
+	for _, info := range images {
+		users[info.ImageID] = append(users[info.ImageID], info)
+	}
+
+	images = deduplicateByImageID(images)
+
+	removed := []RemovedImageInfo{}
+
+	var removalErrors []error
+
+	for _, image := range images {
+		imageID := image.ImageID
+		if imageID == "" {
+			continue // Skip empty IDs to avoid invalid operations.
+		}
+
+		log.Debug().
+			Str("image_id", string(imageID)).
+			Str("image_name", image.ImageName).
+			Str("container_id", string(image.ContainerID)).
+			Msg("Attempting to remove image")
+
+		err := client.RemoveImageByID(ctx, imageID, image.ImageName)
+		if err != nil {
+			// Check if this is a "not found" error (expected when multiple instances remove the same image)
+			switch {
+			case cerrdefs.IsNotFound(err):
+				log.Debug().
+					Str("image_id", string(imageID)).
+					Str("image_name", image.ImageName).
+					Msg("Image already removed")
+			case cerrdefs.IsConflict(err) || errors.Is(err, containerImage.ErrImageInUse):
+				log.Debug().
+					Str("image_id", string(imageID)).
+					Str("image_name", image.ImageName).
+					Msg("Image is in use by active container, skipping removal")
+			case ctx.Err() != nil,
+				errors.Is(err, context.Canceled),
+				errors.Is(err, context.DeadlineExceeded):
+				log.Debug().
+					Err(err).
+					Str("image_id", string(imageID)).
+					Str("image_name", image.ImageName).
+					Msg("Image removal interrupted by cancellation, skipping")
+			default:
+				log.Debug().
+					Err(err).
+					Str("image_id", string(imageID)).
+					Str("image_name", image.ImageName).
+					Msg("Failed to remove image")
+				removalErrors = append(
+					removalErrors,
+					fmt.Errorf("failed to remove image %s: %w", imageID, err),
+				)
+			}
+		} else {
+			for _, user := range users[imageID] {
+				log.Info().
+					Str("container_name", user.ContainerName).
+					Str("image_name", user.ImageName).
+					Str("image_id", imageID.ShortID()).
+					Msg(logging.RemovingImage)
+			}
+
+			removed = append(removed, users[imageID]...)
+		}
+	}
+
+	if len(removalErrors) > 0 {
+		return removed, fmt.Errorf(
+			"%w: %d of %d image removals failed",
+			errImageRemovalFailed,
+			len(removalErrors),
+			len(images),
+		)
+	}
+
+	return removed, nil
+}
+
+// containerNames extracts names from a container list.
+//
+// It creates a slice of container names for logging or debugging purposes, preserving order.
+//
+// Parameters:
+//   - containers: List of containers.
+//
+// Returns:
+//   - []string: List of container names.
+func containerNames(containers []*container.Container) []string {
+	names := make([]string, len(containers))
+	for i, c := range containers {
+		names[i] = c.Name()
+	}
+
+	return names
+}

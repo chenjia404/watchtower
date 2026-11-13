@@ -1,60 +1,10 @@
 package containers
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/nicholas-fedor/watchtower/pkg/container"
 )
-
-// FuzzExtractDigest verifies that ExtractImageDigest never panics and correctly
-// extracts digests from RepoDigests strings in various formats.
-func FuzzExtractDigest(f *testing.F) {
-	f.Add("nginx@sha256:abc123")
-	f.Add("my-registry.com/nginx@sha256:abc123def456")
-	f.Add("")
-	f.Add("no-digest-here")
-	f.Add("@sha256:abc")
-	f.Add("nginx@")
-	f.Add("nginx@sha256:")
-	f.Add("sha256:abc123")
-	f.Add("registry.example.com:5000/org/image@sha256:abcdef1234567890")
-
-	f.Fuzz(func(t *testing.T, repoDigest string) {
-		digest := container.ExtractImageDigest([]string{repoDigest}, "nginx:latest")
-
-		if repoDigest == "" {
-			assert.Empty(t, digest, "empty input should return empty digest")
-
-			return
-		}
-
-		assert.True(t, digest == "" || strings.HasPrefix(digest, "sha256:"),
-			"digest should be empty or start with sha256:, got %q", digest)
-	})
-}
-
-// FuzzExtractDigestMultiple verifies that ExtractImageDigest correctly selects
-// a valid digest from a list of RepoDigests.
-func FuzzExtractDigestMultiple(f *testing.F) {
-	f.Add("nginx@sha256:abc123")
-	f.Add("sha256:invalid,nginx@sha256:valid")
-	f.Add("no-digest,also-no-digest")
-
-	f.Fuzz(func(t *testing.T, digestsStr string) {
-		var digests []string
-		if digestsStr != "" {
-			digests = strings.Split(digestsStr, ",")
-		}
-
-		result := container.ExtractImageDigest(digests, "nginx:latest")
-
-		assert.True(t, result == "" || strings.HasPrefix(result, "sha256:"),
-			"result should be empty or start with sha256:, got %q", result)
-	})
-}
 
 // FuzzFilterStatuses verifies that filterStatuses never panics and correctly
 // filters container statuses by name and image.

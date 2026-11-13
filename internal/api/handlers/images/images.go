@@ -1,15 +1,24 @@
 package images
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/distribution/reference"
 
-	"github.com/nicholas-fedor/watchtower/pkg/container"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	containerImage "github.com/nicholas-fedor/watchtower/internal/container/image"
 )
+
+// ContainerLister lists the containers the handler reports on.
+type ContainerLister interface {
+	// ListContainers returns the containers that pass every filter.
+	ListContainers(ctx context.Context, filter ...filters.Filter) ([]*container.Container, error)
+}
 
 // ImageStatus describes a tracked image and its current state.
 type ImageStatus struct {
@@ -27,7 +36,8 @@ type ImageStatus struct {
 type ListFunc func(ctx context.Context) ([]ImageStatus, error)
 
 func filterImages(statuses []ImageStatus, name, imageID string) []ImageStatus {
-	var filtered []ImageStatus
+	// Start empty so a filter that matches nothing encodes as [] rather than null.
+	filtered := make([]ImageStatus, 0, len(statuses))
 
 	for _, status := range statuses {
 		if name != "" && status.Name != name {
@@ -52,10 +62,10 @@ func filterImages(statuses []ImageStatus, name, imageID string) []ImageStatus {
 //   - filter: Container filter function.
 //
 // Returns:
-//   - []ImageStatus: Status for each tracked image.
+//   - []ImageStatus: Status for each tracked image, sorted by name and then image ID.
 //   - error: Non-nil if listing containers fails.
-func ListImageStatuses(ctx context.Context, client container.Client, filter types.Filter) ([]ImageStatus, error) {
-	var list []types.Container
+func ListImageStatuses(ctx context.Context, client ContainerLister, filter filters.Filter) ([]ImageStatus, error) {
+	var list []*container.Container
 
 	var err error
 
@@ -86,29 +96,31 @@ func ListImageStatuses(ctx context.Context, client container.Client, filter type
 		if existing, ok := imageMap[key]; ok {
 			existing.Containers++
 
+			// Containers can run one image under several tags of a repository.
+			// Keep the smallest name so the entry does not depend on list order.
+			existing.Name = min(existing.Name, imageName)
+
 			continue
 		}
 
-		status := &ImageStatus{
+		imageMap[key] = &ImageStatus{
 			Name:       imageName,
 			ImageID:    imageID,
+			Digest:     containerImage.LocalDigest(c),
 			Containers: 1,
 		}
-
-		if info := c.ImageInfo(); info != nil && len(info.RepoDigests) > 0 {
-			_, digest, found := strings.Cut(info.RepoDigests[0], "@")
-			if found {
-				status.Digest = digest
-			}
-		}
-
-		imageMap[key] = status
 	}
 
 	statuses := make([]ImageStatus, 0, len(imageMap))
 	for _, s := range imageMap {
 		statuses = append(statuses, *s)
 	}
+
+	// Sort for a stable response. The image ID orders one name that points at
+	// several local images.
+	slices.SortFunc(statuses, func(a, b ImageStatus) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.ImageID, b.ImageID))
+	})
 
 	return statuses, nil
 }

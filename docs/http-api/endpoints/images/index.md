@@ -2,12 +2,12 @@
 
 ## Overview
 
-The `/v1/images/` endpoint lists the images tracked by Watchtower along with their current digests and container counts.
+The `/v1/images` endpoint lists the images tracked by Watchtower along with their current digests and container counts.
 Include `images` in [`http-api-endpoints`](../../../configuration/http-api/index.md#http_api_endpoints) to enable this read-only endpoint.
 
 ## Response Format
 
-The `/v1/images` endpoint returns a JSON object with image statuses:
+The `/v1/images` endpoint returns a JSON object with image statuses, sorted by image name and then by image ID:
 
 ```json
 {
@@ -27,7 +27,7 @@ The `/v1/images` endpoint returns a JSON object with image statuses:
 
 - `name`: Image name with tag
 - `image_id`: Local image config ID (sha256:...)
-- `digest`: Registry manifest digest (sha256:...). Empty for locally-built images.
+- `digest`: Registry manifest digest (sha256:...) for the repository in `name`, or the first digest when none matches it. Empty for locally-built images.
 - `containers`: Number of watched containers using this image
 
 ## Parameters
@@ -37,16 +37,20 @@ The `/v1/images` endpoint returns a JSON object with image statuses:
 The `name` parameter filters results to a specific image by exact name.
 
 ```bash
-curl -H "Authorization: Bearer mytoken" "localhost:8080/v1/images?name=nginx:latest"
+curl -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/images?name=nginx:latest"
 ```
+
+Replace *`API_TOKEN`* with your HTTP API token.
 
 ### Image ID
 
 The `id` parameter filters results to a specific image by its image ID.
 
 ```bash
-curl -H "Authorization: Bearer mytoken" "localhost:8080/v1/images?id=sha256:1111..."
+curl -H "Authorization: Bearer API_TOKEN" "localhost:8080/v1/images?id=IMAGE_ID"
 ```
+
+Replace *`IMAGE_ID`* with the image ID, such as the value of `image_id` in a response.
 
 ## HTTP Status Codes
 

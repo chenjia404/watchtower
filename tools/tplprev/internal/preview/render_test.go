@@ -6,10 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nicholas-fedor/tplprev/internal/notify"
-	"github.com/nicholas-fedor/tplprev/internal/templates"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nicholas-fedor/tplprev/internal/notify"
+	"github.com/nicholas-fedor/tplprev/internal/templates"
 )
 
 func TestRenderDefaultReport(t *testing.T) {
@@ -17,11 +18,12 @@ func TestRenderDefaultReport(t *testing.T) {
 
 	result, err := Render(
 		templates.Templates["default"],
-		[]State{ScannedState, UpdatedState, FailedState},
+		[]State{UpdatedState, FailedState, SkippedState},
 		nil,
 	)
 	require.NoError(t, err)
-	assert.Contains(t, result, "1 Scanned, 1 Updated")
+	// The skipped sample is not scanned, as in Watchtower.
+	assert.Contains(t, result, "2 Scanned, 1 Updated")
 	assert.Contains(t, result, "1 Failed")
 	assert.Contains(t, result, "datamatrix")
 	assert.Contains(t, result, "updated to")
@@ -105,6 +107,21 @@ func TestRenderJSONIncludesReport(t *testing.T) {
 	assert.NotEmpty(t, report["updated"])
 	assert.Equal(t, "Title", decoded["title"])
 	assert.Equal(t, "Host", decoded["host"])
+}
+
+// TestRenderReportFocus verifies that a template written for split
+// notifications can read the report's focus in the preview. The preview
+// renders a whole session's report, which has no focus.
+func TestRenderReportFocus(t *testing.T) {
+	t.Parallel()
+
+	result, err := Render(
+		`{{ with .Report.Focus }}{{ .Name }}{{ else }}whole session{{ end }}`,
+		[]State{UpdatedState},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "whole session", result)
 }
 
 func TestRenderLegacyModeOmitsReportRoot(t *testing.T) {

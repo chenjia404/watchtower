@@ -1,0 +1,64 @@
+Found new image: org/app:latest (d0a110000000)
+Found new Git revision: github.com/org/app@v1.2.0 (0123456)
+Stopped stale container: app (c79110000000)
+Started new container: app (d0a110000000)
+Stopped linked container: app (c79110000000)
+Started linked container: app (d0a110000000)
+Cleaned up old image: org/app:latest (01d110000000)
+Skipped image cleanup: org/app:latest (01d110000000): cannot connect to the Docker daemon
+org/app:latest created less than 1d ago - eligible in 22h (Thu, 08 Oct 2026 10:00:00 UTC)
+org/app:latest created more than 1d ago - eligible for update
+org/app:latest creation time unavailable (cooldown: 1d) - update check unavailable
+Successfully removed 1 old Watchtower container
+Docker image usage budget enabled: maximum 10.74 GB, warning at 8.59 GB
+Docker image usage exceeds configured maximum: 11.81 GB of 10.74 GB used (2.15 GB reclaimable, 3 images)
+Docker image usage exceeds configured warning threshold: 9.66 GB of 8.59 GB used (2.15 GB reclaimable, 3 images)
+Failed to query Docker image disk usage: daemon disk usage unavailable
+Changelog: https://github.com/org/app/releases/tag/v1.2.0
+Built image: org/app:latest (b17d10000000)
+Built Compose project: stack (web)
+Git update failed for app. The running container was left in place: example failure
+Compose update failed for stack-web-1. Docker Compose may have partially recreated services: example failure
+Compose update finished with unconfirmed results for web, worker
+Skipped stack-web-1: compose result did not include web
+Skipped stack-web-1: compose result did not identify this replica
+Skipped app: container has no compose service label
+Compose dependency order is unavailable. Using the current container order
+Skipped app: compose directory is not readable
+Compose update failed for stack-web-1. The running container was left in place: example failure
+Compose dependency order is unavailable. Using the current container order
+Compose dependency order is unavailable. Using the current container order
+Skipped app: invalid git-host
+Skipped app: invalid git semver policy
+Run once mode: Watchtower self-update skipped
+Only checking containers in scope: production
+Starting HTTP API server at https://0.0.0.0:8080
+HTTP API server is available at https://0.0.0.0:8080
+Recovered orphaned Watchtower container: watchtower (f00f00f00f00)
+Could not start orphaned Watchtower container: watchtower (f00f00f00f00): failed to start container f00f00f00f00: context deadline exceeded
+Update failed for app (org/app:latest): failed to pull image: org/app:latest: registry rate limited: retry-after 347.256µs allowed 44000 per 1m0s
+Update failed for app (org/app:latest): pre-update command failed: exit code 1
+Ignored depends-on missing-db for app: no container has that name
+Skipped app: depends on itself
+Skipped app: circular dependency
+Could not identify Watchtower's own container. Self-updates are disabled and old instances will not be removed: failed to detect current container ID: no container ID in cgroup file
+Could not inspect Watchtower's own container. Self-updates are disabled: failed to inspect container: context deadline exceeded
+Could not inspect Watchtower's own container to read its scope label. Exiting rather than running without a scope: failed to inspect container: context deadline exceeded
+Could not disable Watchtower's restart policy. The runtime may start it again: failed to set restart policy: context deadline exceeded
+Failed to build run configuration: invalid http-api-host: must be empty or a valid IP address (IPv4 or IPv6): "not-an-ip"
+Rolling restart compatibility validation failed: container has dependencies incompatible with rolling restarts
+API setup failed: API token is empty or unset
+Could not schedule updates: invalid schedule "bad": expected exactly 6 fields, found 1: [bad]
+Invalid pre-update timeout "-1" for app. Using the default of 1 minute
+Invalid post-update timeout "soon" for app. Using the default of 1 minute
+Invalid pre-check timeout "1.5" for app. Using the default of 1 minute
+Invalid post-check timeout "-5" for app. Using the default of 1 minute
+Update panicked: runtime error: invalid memory address or nil pointer dereference
+Update execution failed: failed to list containers: context deadline exceeded
+Could not check app for updates: failed to inspect image: org/app:latest: Error response from daemon: No such image: org/app:latest
+Docker could not pull org/app:latest for app: Get "https://registry.example.com/v2/org/app/manifests/latest": net/http: timeout awaiting response headers
+Starting Watchtower ephemeral self-update
+Could not remove ephemeral orchestrator 0dd0dd000000 after it failed to start: Error response from daemon: removal of container 0dd0dd000000 is already in progress
+Could not update app: no image info available
+Unrecognized message with fields | alpha=one beta=2 
+Unrecognized message without fields

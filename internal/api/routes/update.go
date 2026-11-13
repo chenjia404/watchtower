@@ -2,30 +2,28 @@ package routes
 
 import (
 	"context"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/timeout"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
 	"github.com/nicholas-fedor/watchtower/internal/api/handlers/update"
-	mt "github.com/nicholas-fedor/watchtower/internal/metrics"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	mt "github.com/nicholas-fedor/watchtower/internal/observability/metrics"
 )
 
-func registerUpdateRoute(ctx context.Context, app *fiber.App, auth fiber.Handler, opts config.Options) {
+func registerUpdateRoute(ctx context.Context, app *fiber.App, auth fiber.Handler, opts Options) {
 	updateTimeout := opts.UpdateTimeout
 	if updateTimeout <= 0 {
-		updateTimeout = config.DefaultUpdateTimeout
+		updateTimeout = DefaultUpdateTimeout
 	}
 
-	handler := update.NewWithTimeout(opts.Logger, func(updateCtx context.Context, images, containers []string) *mt.Metric {
-		params := config.BuildUpdateParams(opts)
+	handler := update.New(opts.Logger, func(updateCtx context.Context, images, containers []string) *mt.Metric {
+		params := BuildUpdateParams(opts)
 
 		imageFilter := opts.FilterByImage(images, opts.Filter)
 
 		containerFilter := update.ContainerFilter(containers)
-		combinedFilter := func(c types.FilterableContainer) bool {
+		combinedFilter := func(c filters.FilterableContainer) bool {
 			return imageFilter(c) && containerFilter(c.Name(), true)
 		}
 
@@ -38,16 +36,4 @@ func registerUpdateRoute(ctx context.Context, app *fiber.App, auth fiber.Handler
 	app.Post(handler.Path, auth, timeout.New(handler.Handle, timeout.Config{
 		Timeout: updateTimeout,
 	}))
-
-	// In blocking HTTP API mode, emit the startup message once when the update route registers.
-	if !opts.UnblockHTTPAPI && opts.WriteStartupMessage != nil {
-		startup := opts.Startup
-		startup.Sched = time.Time{}
-		startup.Filtering = opts.FilterDesc
-		startup.Scope = opts.Scope
-		startup.Client = opts.Client
-		startup.Notifier = opts.Notifier
-		startup.Version = opts.Version
-		opts.WriteStartupMessage(startup)
-	}
 }

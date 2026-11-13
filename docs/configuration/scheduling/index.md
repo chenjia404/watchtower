@@ -2,9 +2,14 @@
 
 ## Schedule
 
-Defines when and how often Watchtower checks for new images using a 6-field [Cron expression](https://pkg.go.dev/github.com/robfig/cron@v1.2.0?tab=doc#hdr-CRON_Expression_Format){target="_blank" rel="noopener noreferrer"}.
+Defines when and how often Watchtower checks for new images using a [cron expression](https://pkg.go.dev/github.com/robfig/cron/v3#hdr-CRON_Expression_Format){target="_blank" rel="noopener noreferrer"}. The schedule takes one of these forms:
 
-Example: `--schedule "0 0 4 * * *"` runs daily at 4 AM.
+- 5 fields: minute, hour, day of month, month and day of week.
+- 6 fields, with a seconds field before the minute.
+- A [predefined schedule](https://pkg.go.dev/github.com/robfig/cron/v3#hdr-Predefined_schedules){target="_blank" rel="noopener noreferrer"}, such as `@daily`.
+- An [interval](https://pkg.go.dev/github.com/robfig/cron/v3#hdr-Intervals){target="_blank" rel="noopener noreferrer"}, such as `@every 6h`, counted from when Watchtower starts.
+
+Example: `--schedule "0 4 * * *"` and `--schedule "0 0 4 * * *"` both run daily at 4 AM.
 
 ```text
             Argument: --schedule, -s
@@ -16,10 +21,11 @@ Environment Variable: WATCHTOWER_SCHEDULE
 !!! Note
     - Cannot be used with the [`interval`](#interval) configuration option.
     - Requires a time zone set via `TZ` or a mounted `/etc/localtime` file. See [Time Zone](#time_zone).
+    - Shared registry buckets, such as GHCR's for `lscr.io/linuxserver/*` images, are empty for the first minute or two of every hour. Pick a minute away from `:00`, for example `0 17 3 * * *`. See [GitHub Container Registry](../../advanced-features/image-cooldown/index.md#github_container_registry_ghcrio).
 
 ## Interval
 
-Sets the interval (in seconds) for polling new images.
+Sets the interval (in seconds) for polling new images. Watchtower exits at startup if the value is zero or negative.
 
 ```text
             Argument: --interval, -i

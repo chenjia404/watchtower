@@ -15,7 +15,7 @@ Sets the host interface for binding the HTTP API.
             Argument: --http-api-host
 Environment Variable: WATCHTOWER_HTTP_API_HOST
                 Type: String
-             Default: empty (binds to all interfaces)
+             Default: empty (binds to all IPv4 interfaces)
 ```
 
 !!! Note "See the [HTTP API Host documentation](../../http-api/configuration/host-and-port/index.md#http_api_host) for details"
@@ -79,7 +79,7 @@ Selects which HTTP API endpoints to enable.
 ```text
             Argument: --http-api-endpoints
 Environment Variable: WATCHTOWER_HTTP_API_ENDPOINTS
-                Type: String (comma or space separated list)
+                Type: String (comma or whitespace separated list)
              Default: empty (HTTP API disabled)
 ```
 
@@ -113,7 +113,7 @@ Valid names (case-insensitive):
 
 ## HTTP API Rate Limit
 
-Sets the maximum number of API requests allowed per minute per IP address.
+Sets the maximum number of API requests allowed per minute per IP address. Watchtower exits at startup if the value is less than 1.
 
 ```text
             Argument: --http-api-rate-limit
@@ -127,7 +127,7 @@ Environment Variable: WATCHTOWER_HTTP_API_RATE_LIMIT
 
 ## HTTP API Check Timeout
 
-Sets the maximum duration for the `/v1/check` API endpoint.
+Sets the maximum duration for the `/v1/check` API endpoint. Watchtower exits at startup if the value is negative.
 
 ```text
             Argument: --http-api-check-timeout
@@ -142,7 +142,7 @@ Environment Variable: WATCHTOWER_HTTP_API_CHECK_TIMEOUT
 
 ## HTTP API Update Timeout
 
-Sets the maximum duration for the `/v1/update` API endpoint.
+Sets the maximum duration for the `/v1/update` API endpoint. Watchtower exits at startup if the value is negative.
 
 ```text
             Argument: --http-api-update-timeout

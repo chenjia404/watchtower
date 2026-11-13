@@ -1,0 +1,341 @@
+package image
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
+	"github.com/nicholas-fedor/watchtower/internal/registry"
+	"github.com/nicholas-fedor/watchtower/internal/registry/digest"
+	"github.com/nicholas-fedor/watchtower/internal/registry/ratelimit"
+	registryConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/registry"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	"github.com/nicholas-fedor/watchtower/internal/settings/units"
+)
+
+// ErrImageCooldown indicates the image is within the configured cooldown window
+// and should not be pulled. It is a match target for errors.Is. The cooldown
+// check returns a [CooldownError] that matches it.
+var ErrImageCooldown = errors.New("image is within cooldown period")
+
+// CooldownError reports that a cooldown held back a container's update, with
+// the details that reports and notifications show.
+//
+// Without a Cause the image is within its cooldown window. The error then
+// matches [ErrImageCooldown]. With a Cause the image's age could not be
+// determined. Only Delay is set. The error matches its cause instead of
+// [ErrImageCooldown].
+type CooldownError struct {
+	EligibleAt time.Time // Time the image leaves the cooldown, zero when its age is unknown.
+	Cause      error     // Why the image's age could not be determined, nil within the window.
+	Age        string    // Human-readable image age, empty when unknown.
+	Delay      string    // Human-readable configured cooldown delay.
+	Remaining  string    // Human-readable time left in the cooldown, empty when the age is unknown.
+}
+
+// Error returns the cause's message, or the [ErrImageCooldown] message
+// without a cause.
+//
+// Returns:
+//   - string: The error message.
+func (e *CooldownError) Error() string {
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+
+	return ErrImageCooldown.Error()
+}
+
+// Unwrap returns the cause.
+//
+// Returns:
+//   - error: Why the image's age could not be determined, or nil.
+func (e *CooldownError) Unwrap() error { return e.Cause }
+
+// Is reports whether target is [ErrImageCooldown] and the error has no cause.
+// It reports false for every other target. errors.Is still matches the cause
+// through Unwrap.
+//
+// Parameters:
+//   - target: Error to match.
+//
+// Returns:
+//   - bool: True for [ErrImageCooldown] when the image is within its window.
+func (e *CooldownError) Is(target error) bool {
+	return target == ErrImageCooldown && e.Cause == nil
+}
+
+// isOutsideCooldown reports whether the container's image is outside its
+// cooldown window (safe to pull and update).
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts.
+//   - sourceContainer: Container whose image age to evaluate.
+//   - policy: Update policy with the global cooldown, no-pull and monitor-only settings.
+//
+// Returns:
+//   - bool: true if safe to pull/update, false if deferred.
+//   - error: non-nil when deferred (carries CooldownError for details).
+func (c Client) isOutsideCooldown(
+	ctx context.Context,
+	sourceContainer *container.Container,
+	policy updateConfig.Policy,
+) (bool, error) {
+	delay, skip := shouldCheckCooldown(sourceContainer, policy)
+	if skip {
+		return true, nil
+	}
+
+	clog := cooldownLogger(c.logger(), sourceContainer)
+
+	creationTime, cdErr := fetchImageCreationTime(
+		ctx,
+		sourceContainer,
+		delay,
+		c.registrySettings,
+		c.rateLimiter,
+		clog,
+	)
+	if cdErr != nil {
+		return false, cdErr
+	}
+
+	return evalImageAge(creationTime, delay, clog)
+}
+
+// shouldCheckCooldown returns the effective cooldown delay and whether the
+// check can be skipped (delay <= 0, no-pull, or monitor-only).
+//
+// Parameters:
+//   - sourceContainer: Container to evaluate.
+//   - policy: Update policy with the global cooldown, no-pull and monitor-only settings.
+//
+// Returns:
+//   - time.Duration: The effective cooldown delay (0 if skipped).
+//   - bool: True if the cooldown check should be skipped entirely.
+func shouldCheckCooldown(sourceContainer *container.Container, policy updateConfig.Policy) (time.Duration, bool) {
+	delay := sourceContainer.CooldownDelay(policy)
+	if delay <= 0 || sourceContainer.IsNoPull(policy) || sourceContainer.IsMonitorOnly(policy) {
+		return 0, true
+	}
+
+	return delay, false
+}
+
+// fetchImageCreationTime resolves pull options and retrieves the image
+// creation time from the registry. It returns a CooldownError on any failure.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts.
+//   - sourceContainer: Container whose image creation time to fetch.
+//   - delay: Cooldown delay for error formatting.
+//   - settings: Registry request settings.
+//   - rateLimiter: Rate limiter shared by registry requests.
+//   - clog: Logger entry with container/image fields.
+//
+// Returns:
+//   - time.Time: The image creation time.
+//   - error: Non-nil CooldownError on failure.
+func fetchImageCreationTime(
+	ctx context.Context,
+	sourceContainer *container.Container,
+	delay time.Duration,
+	settings registryConfig.Registry,
+	rateLimiter *ratelimit.Limiter,
+	clog *zerolog.Logger,
+) (time.Time, error) {
+	pullOpts, err := registry.GetPullOptions(clog, sourceContainer.ImageName())
+	if err != nil {
+		clog.Info().
+			Err(err).
+			Msg("Failed to get pull options for cooldown check - update check unavailable")
+
+		return time.Time{}, &CooldownError{
+			Delay: units.FormatDuration(delay),
+			Cause: fmt.Errorf(
+				"could not get pull options for %s (cooldown: %s): %w",
+				sourceContainer.ImageName(),
+				units.FormatDuration(delay),
+				err,
+			),
+		}
+	}
+
+	creationTime, err := digest.FetchImageCreationTime(clog,
+		ctx,
+		sourceContainer,
+		pullOpts.RegistryAuth,
+		settings,
+		rateLimiter,
+	)
+	if err != nil {
+		clog.Info().
+			Err(err).
+			Msg(logging.CooldownUnavailable)
+
+		return time.Time{}, &CooldownError{
+			Delay: units.FormatDuration(delay),
+			Cause: fmt.Errorf(
+				"could not determine image age (cooldown: %s): %w",
+				units.FormatDuration(delay),
+				err,
+			),
+		}
+	}
+
+	return creationTime, nil
+}
+
+// evalImageAge compares image age against the cooldown delay, logging the
+// result and returning (true, nil) when safe to pull or (false, CooldownError)
+// when deferred.
+//
+// A creation time in the future gives no age, so the image counts as new and
+// becomes eligible a cooldown delay after its creation time.
+//
+// Parameters:
+//   - creationTime: The image creation timestamp.
+//   - delay: The cooldown delay to compare against.
+//   - clog: Logger entry with container/image fields.
+//
+// Returns:
+//   - bool: True if the image age exceeds the cooldown window.
+//   - error: Non-nil CooldownError when the image is within the cooldown window.
+func evalImageAge(creationTime time.Time, delay time.Duration, clog *zerolog.Logger) (bool, error) {
+	imageAge := time.Since(creationTime)
+
+	if imageAge < 0 {
+		logClockSkew(imageAge, delay, clog)
+	}
+
+	if imageAge <= delay {
+		remaining := delay - imageAge
+		ageStr := units.FormatDuration(imageAge)
+		cooldownStr := units.FormatDuration(delay)
+		remainingStr := units.FormatDuration(remaining)
+		eligibleAt := time.Now().Add(remaining)
+
+		clog.Info().
+			Str("image_age", ageStr).
+			Str("cooldown", cooldownStr).
+			Str("eligible_in", remainingStr).
+			Str("eligible_at", eligibleAt.Format(time.RFC3339)).
+			Msg(logging.WithinCooldown)
+
+		return false, buildCooldownError(imageAge, delay, eligibleAt)
+	}
+
+	logCooldownExceeded(imageAge, delay, clog)
+
+	return true, nil
+}
+
+// buildCooldownError constructs a CooldownError with age, delay, and
+// remaining fields populated from the image age and cooldown delay.
+//
+// Parameters:
+//   - imageAge: Elapsed time since the image was created.
+//   - delay: The configured cooldown delay.
+//   - eligibleAt: Precomputed time when the container becomes eligible.
+//
+// Returns:
+//   - *CooldownError: Populated with formatted age, delay, and remaining strings.
+func buildCooldownError(imageAge, delay time.Duration, eligibleAt time.Time) *CooldownError {
+	remaining := delay - imageAge
+
+	return &CooldownError{
+		Age:        units.FormatDuration(imageAge),
+		Delay:      units.FormatDuration(delay),
+		Remaining:  units.FormatDuration(remaining),
+		EligibleAt: eligibleAt,
+	}
+}
+
+// logClockSkew logs a warning when the image creation time is in the future,
+// indicating possible clock skew between the host and registry.
+func logClockSkew(imageAge, delay time.Duration, clog *zerolog.Logger) {
+	clog.Warn().
+		Str("image_age", units.FormatDuration(imageAge)).
+		Str("cooldown", units.FormatDuration(delay)).
+		Msg("Image creation time is in the future (possible clock skew) - treating the image as new")
+}
+
+// CheckLocalImageCooldown applies cooldown-delay using the local image Created time.
+//
+// Unlike the registry path, this does not contact a registry. Missing image
+// info skips the check so a session is not failed.
+//
+// Parameters:
+//   - c: Container whose local image age is evaluated.
+//   - policy: Update policy (global cooldown and label override).
+//
+// Returns:
+//   - error: Non-nil CooldownError when the image is inside the cooldown window.
+func CheckLocalImageCooldown(c *container.Container, policy updateConfig.Policy) error {
+	delay, skip := shouldCheckCooldown(c, policy)
+	if skip {
+		return nil
+	}
+
+	created, ok := localImageCreated(c)
+	if !ok {
+		return nil
+	}
+
+	_, err := evalImageAge(created, delay, cooldownLogger(c.Logger(), c))
+
+	return err
+}
+
+func localImageCreated(c *container.Container) (time.Time, bool) {
+	if c == nil || !c.HasImageInfo() {
+		return time.Time{}, false
+	}
+
+	info := c.ImageInfo()
+	if info == nil || info.Created == "" {
+		return time.Time{}, false
+	}
+
+	created, err := time.Parse(time.RFC3339Nano, info.Created)
+	if err != nil {
+		created, err = time.Parse(time.RFC3339, info.Created)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+
+	return created, true
+}
+
+// cooldownLogger returns base with the container's name and image added, so
+// every cooldown line names the container it is about.
+//
+// Parameters:
+//   - base: The logger to extend.
+//   - c: The container whose image the cooldown check evaluates.
+//
+// Returns:
+//   - *zerolog.Logger: The logger with the container and image fields.
+func cooldownLogger(base *zerolog.Logger, c *container.Container) *zerolog.Logger {
+	log := base.With().
+		Str("container", c.Name()).
+		Str("image", c.ImageName()).
+		Logger()
+
+	return &log
+}
+
+// logCooldownExceeded logs an info message when the image age exceeds the
+// cooldown window and the pull can proceed.
+func logCooldownExceeded(imageAge, delay time.Duration, clog *zerolog.Logger) {
+	clog.Info().
+		Str("image_age", units.FormatDuration(imageAge)).
+		Str("cooldown", units.FormatDuration(delay)).
+		Msg(logging.CooldownElapsed)
+}

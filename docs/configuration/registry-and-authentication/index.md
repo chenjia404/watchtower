@@ -33,7 +33,7 @@ Environment Variable: REPO_PASS
 
     Can be a password or a personal access token for registries requiring 2FA (e.g., Docker Hub).
 
-    Use Docker secrets (e.g., `WATCHTOWER_PASS=/run/secrets/repo_pass`) or environment files to avoid exposing sensitive data in command lines.
+    `REPO_PASS` holds the password itself and cannot point to a file, so a Docker secret path is sent as the password. To keep the password out of command lines, set it in an environment file, or mount a Docker `config.json` and set [`DOCKER_CONFIG`](#docker_config).
 
 ### DOCKER_CONFIG
 
@@ -55,7 +55,7 @@ Environment Variable: DOCKER_CONFIG
 
     See [Usage](../../getting-started/usage/index.md) and [Private Registries](../../advanced-features/private-registries/index.md).
 
-    Public `lscr.io` images are hosted on GitHub Container Registry. Watchtower remaps them to `ghcr.io` for digest checks. To leave the shared anonymous GHCR org bucket, authenticate to **`ghcr.io`** in this config (not only `lscr.io`). That also restores parallel GHCR checks.
+    Public `lscr.io` images are hosted on GitHub Container Registry. Watchtower remaps them to `ghcr.io` for digest checks. Authenticate to **`ghcr.io`** in this config (not only `lscr.io`) to separate your checks from anonymous throttling and restore parallel GHCR checks. Pulls of a public org can still share that org's bucket, which is empty for the first minute or two of each hour.
 
 ### Skip Registry TLS Verification
 
@@ -79,12 +79,12 @@ Sets the minimum TLS version for registry connections, overriding the default (T
 ```text
             Argument: --registry-tls-min-version
 Environment Variable: WATCHTOWER_REGISTRY_TLS_MIN_VERSION
-     Possible Values: TLS1.0, TLS1.1, TLS1.2, TLS1.3
+     Possible Values: TLS1.2, TLS1.3
              Default: TLS1.2
 ```
 
-!!! Warning
-    Using older versions of TLS not recommended for security reasons.
+!!! Note
+    Older versions such as TLS1.0 and TLS1.1 are not accepted. Any other value logs a warning, and Watchtower uses TLS 1.2.
 
 ### Proxy Configuration
 
@@ -117,7 +117,7 @@ Environment Variable: NO_PROXY / no_proxy
 
 !!! Note
     Proxies may require authentication.
-    Include it in the URL (e.g., `http://user:pass@proxy.example.com:3128`), but avoid exposing credentials in the command line by using Docker secrets or environment files instead.
+    Include it in the URL, such as `http://USERNAME:PASSWORD@proxy.example.com:3128` with your proxy user name and password, but avoid exposing credentials in the command line by using Docker secrets or environment files instead.
 
     If your proxy uses a self-signed certificate, combine with `--registry-tls-skip` to disable TLS verification (use cautiously).
 
@@ -126,7 +126,10 @@ For details on how Go handles these variables, see the [net/http.ProxyFromEnviro
 ### Warn on HEAD Failure
 
 Controls warnings for failed HEAD requests to registries.
-`Auto` warns for registries known to support HEAD requests (e.g., docker.io) that may rate-limit.
+When a HEAD request fails, Watchtower falls back to a full pull, which counts against the registry's pull rate limit.
+`Auto` warns for registries known to support HEAD requests and rate-limit pulls (docker.io and ghcr.io).
+
+The warning is written to the log only and is not sent as a notification, because the fallback pull decides the outcome and reports its own failures.
 
 ```text
             Argument: --warn-on-head-failure

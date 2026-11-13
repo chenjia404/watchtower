@@ -14,255 +14,64 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/gofiber/fiber/v3"
-	"github.com/moby/moby/api/types/image"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	goGit "github.com/go-git/go-git/v5"
-	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
-	dockerContainer "github.com/moby/moby/api/types/container"
 
+	mockCheck "github.com/nicholas-fedor/watchtower/internal/api/handlers/check/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
 	"github.com/nicholas-fedor/watchtower/internal/git"
-	"github.com/nicholas-fedor/watchtower/internal/logging"
-	wtcontainer "github.com/nicholas-fedor/watchtower/pkg/container"
-	gitPkg "github.com/nicholas-fedor/watchtower/pkg/container/git"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
-	"github.com/nicholas-fedor/watchtower/pkg/container/oci"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
-	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/git/semver"
+	gitConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/git"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/containerfixture"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/modelfixture"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
 )
 
-// testLogger returns a silent logger for the whole test package.
-func testLogger() *zerolog.Logger { return logging.NopLogger() }
+// newTestLogger returns a logger that writes each event to the test's log, so a
+// failing test shows what it logged.
+//
+// Parameters:
+//   - t: Test that receives the log lines.
+//
+// Returns:
+//   - *zerolog.Logger: Logger writing to t.
+func newTestLogger(t *testing.T) *zerolog.Logger {
+	t.Helper()
 
-func TestCheckForUpdates(t *testing.T) {
-	tests := []struct {
-		name      string
-		client    func(t *testing.T) *mockContainer.MockClient
-		filter    types.Filter
-		wantErr   bool
-		errMsg    string
-		wantLen   int
-		wantStale []bool
-		wantNames []string
-	}{
-		{
-			name: "single container with update available",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				container := mockTypes.NewMockContainer(t)
-				container.EXPECT().Name().Return("my-app")
-				container.EXPECT().ImageName().Return("nginx:1.25")
-				container.EXPECT().ImageID().Return(types.ImageID("sha256:abc"))
-				container.EXPECT().ImageInfo().Return(nil)
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container}, nil)
-				c.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-					Return(true, types.ImageID("sha256:def"), "", nil)
+	// Frame 4 skips zerolog's write path, so each line names the log call.
+	w := zerolog.TestWriter{T: t, Frame: 4}
 
-				return c
-			},
-			wantLen:   1,
-			wantStale: []bool{true},
-		},
-		{
-			name: "single container no update available",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				container := mockTypes.NewMockContainer(t)
-				container.EXPECT().Name().Return("my-app")
-				container.EXPECT().ImageName().Return("nginx:1.25")
-				container.EXPECT().ImageID().Return(types.ImageID("sha256:abc"))
-				container.EXPECT().ImageInfo().Return(nil)
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container}, nil)
-				c.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-					Return(false, types.ImageID("sha256:abc"), "", nil)
-
-				return c
-			},
-			wantLen:   1,
-			wantStale: []bool{false},
-		},
-		{
-			name: "filter by image name excludes non-matching",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				container1 := mockTypes.NewMockContainer(t)
-				container1.EXPECT().Name().Return("app1").Maybe()
-				container1.EXPECT().ImageName().Return("nginx:latest").Maybe()
-				container1.EXPECT().ImageID().Return(types.ImageID("sha256:abc")).Maybe()
-				container1.EXPECT().ImageInfo().Return(nil).Maybe()
-
-				container2 := mockTypes.NewMockContainer(t)
-				container2.EXPECT().Name().Return("app2").Maybe()
-				container2.EXPECT().ImageName().Return("redis:latest").Maybe()
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container1, container2}, nil)
-				c.EXPECT().CheckContainerUpdate(mock.Anything, container1, mock.Anything).
-					Return(false, types.ImageID("sha256:abc"), "", nil)
-
-				return c
-			},
-			filter: func(c types.FilterableContainer) bool {
-				return c.ImageName() == "nginx:latest"
-			},
-			wantLen:   1,
-			wantNames: []string{"app1"},
-		},
-		{
-			name: "filter by container name excludes non-matching",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				container1 := mockTypes.NewMockContainer(t)
-				container1.EXPECT().Name().Return("app1").Maybe()
-				container1.EXPECT().ImageName().Return("nginx:latest").Maybe()
-				container1.EXPECT().ImageID().Return(types.ImageID("sha256:abc")).Maybe()
-				container1.EXPECT().ImageInfo().Return(nil).Maybe()
-
-				container2 := mockTypes.NewMockContainer(t)
-				container2.EXPECT().Name().Return("app2").Maybe()
-				container2.EXPECT().ImageName().Return("redis:latest").Maybe()
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container1, container2}, nil)
-				c.EXPECT().CheckContainerUpdate(mock.Anything, container1, mock.Anything).
-					Return(false, types.ImageID("sha256:abc"), "", nil)
-
-				return c
-			},
-			filter: func(c types.FilterableContainer) bool {
-				return c.Name() == "app1"
-			},
-			wantLen:   1,
-			wantNames: []string{"app1"},
-		},
-		{
-			name: "both filters ANDed require both to match",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				container1 := mockTypes.NewMockContainer(t)
-				container1.EXPECT().Name().Return("app1").Maybe()
-				container1.EXPECT().ImageName().Return("nginx:latest").Maybe()
-				container1.EXPECT().ImageID().Return(types.ImageID("sha256:abc")).Maybe()
-				container1.EXPECT().ImageInfo().Return(nil).Maybe()
-
-				container2 := mockTypes.NewMockContainer(t)
-				container2.EXPECT().Name().Return("app2").Maybe()
-				container2.EXPECT().ImageName().Return("nginx:latest").Maybe()
-				container2.EXPECT().ImageID().Return(types.ImageID("sha256:abc")).Maybe()
-				container2.EXPECT().ImageInfo().Return(nil).Maybe()
-
-				container3 := mockTypes.NewMockContainer(t)
-				container3.EXPECT().Name().Return("app3").Maybe()
-				container3.EXPECT().ImageName().Return("redis:latest").Maybe()
-				container3.EXPECT().ImageID().Return(types.ImageID("sha256:abc")).Maybe()
-				container3.EXPECT().ImageInfo().Return(nil).Maybe()
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container1, container2, container3}, nil)
-				c.EXPECT().CheckContainerUpdate(mock.Anything, container1, mock.Anything).
-					Return(false, types.ImageID("sha256:abc"), "", nil)
-
-				return c
-			},
-			filter: func(c types.FilterableContainer) bool {
-				return c.ImageName() == "nginx:latest" && c.Name() == "app1"
-			},
-			wantLen:   1,
-			wantNames: []string{"app1"},
-		},
-		{
-			name: "empty container list",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{}, nil)
-
-				return c
-			},
-			wantLen: 0,
-		},
-		{
-			name: "list error returns wrapped error",
-			client: func(t *testing.T) *mockContainer.MockClient {
-				t.Helper()
-				c := mockContainer.NewMockClient(t)
-				c.EXPECT().ListContainers(mock.Anything, mock.Anything).Return(nil, errors.New("connection refused"))
-
-				return c
-			},
-			wantErr: true,
-			errMsg:  "failed to list containers",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := tt.client(t)
-			results, err := CheckForUpdates(testLogger(), t.Context(), client, tt.filter, types.UpdateParams{}, nil)
-
-			if tt.wantErr {
-				require.Error(t, err)
-
-				if tt.errMsg != "" {
-					assert.Contains(t, err.Error(), tt.errMsg)
-				}
-			} else {
-				require.NoError(t, err)
-				assert.Len(t, results, tt.wantLen)
-
-				if tt.wantStale != nil {
-					for i, wantStale := range tt.wantStale {
-						if i < len(results) {
-							assert.Equal(t, wantStale, results[i].UpdateAvailable)
-						}
-					}
-				}
-
-				if tt.wantNames != nil {
-					for i, wantName := range tt.wantNames {
-						if i < len(results) {
-							assert.Equal(t, wantName, results[i].Name)
-						}
-					}
-				}
-			}
-		})
-	}
+	return new(zerolog.New(w))
 }
 
 func TestCheckForUpdates_DigestExtraction(t *testing.T) {
-	client := mockContainer.NewMockClient(t)
-	container := mockTypes.NewMockContainer(t)
-	container.EXPECT().Name().Return("my-app")
-	container.EXPECT().ImageName().Return("nginx:latest")
-	container.EXPECT().ImageID().Return(types.ImageID("sha256:abc"))
-
-	info := &image.InspectResponse{RepoDigests: []string{"nginx@sha256:digest123"}}
-	container.EXPECT().ImageInfo().Return(info)
-	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container}, nil)
+	client := mockCheck.NewMockUpdateChecker(t)
+	running := imageContainer("my-app", "nginx:latest", "sha256:abc", "nginx@sha256:digest123")
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{running}, nil)
 	client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-		Return(false, types.ImageID("sha256:abc"), "", nil)
+		Return(false, container.ImageID("sha256:abc"), "", nil)
 
-	results, err := CheckForUpdates(testLogger(), t.Context(), client, nil, types.UpdateParams{}, nil)
+	results, err := CheckForUpdates(newTestLogger(t), t.Context(), client, nil, updateParams.Params{}, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "sha256:digest123", results[0].Digest)
 }
 
 func TestCheckForUpdates_CheckContainerUpdateError(t *testing.T) {
-	client := mockContainer.NewMockClient(t)
-	container := mockTypes.NewMockContainer(t)
-	container.EXPECT().Name().Return("my-app")
-	container.EXPECT().ImageName().Return("nginx:latest")
-	container.EXPECT().ImageID().Return(types.ImageID("sha256:abc"))
-	container.EXPECT().ImageInfo().Return(nil)
-	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container}, nil)
+	client := mockCheck.NewMockUpdateChecker(t)
+	running := imageContainer("my-app", "nginx:latest", "sha256:abc")
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{running}, nil)
 	client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-		Return(false, types.ImageID(""), "", errors.New("registry unavailable"))
+		Return(false, container.ImageID(""), "", errors.New("registry unavailable"))
 
-	results, err := CheckForUpdates(testLogger(), t.Context(), client, nil, types.UpdateParams{}, nil)
+	results, err := CheckForUpdates(newTestLogger(t), t.Context(), client, nil, updateParams.Params{}, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "registry unavailable", results[0].Error)
@@ -270,24 +79,21 @@ func TestCheckForUpdates_CheckContainerUpdateError(t *testing.T) {
 }
 
 func TestCheckForUpdates_ParamsPropagation(t *testing.T) {
-	client := mockContainer.NewMockClient(t)
-	container := mockTypes.NewMockContainer(t)
-	container.EXPECT().Name().Return("my-app")
-	container.EXPECT().ImageName().Return("nginx:latest")
-	container.EXPECT().ImageID().Return(types.ImageID("sha256:abc"))
-	container.EXPECT().ImageInfo().Return(nil)
-	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container}, nil)
-	client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.MatchedBy(func(p types.UpdateParams) bool {
-		return p.MonitorOnly && p.NoPull && p.LabelPrecedence && p.CooldownDelay == 5*time.Minute
-	})).Return(true, types.ImageID("sha256:new"), "sha256:newdigest", nil)
+	client := mockCheck.NewMockUpdateChecker(t)
+	running := imageContainer("my-app", "nginx:latest", "sha256:abc")
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{running}, nil)
+	client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.MatchedBy(func(p updateConfig.Policy) bool {
+		return p.MonitorOnly && p.NoPull && p.EnableChangelog && p.LabelPrecedence && p.CooldownDelay == 5*time.Minute
+	})).Return(true, container.ImageID("sha256:new"), "sha256:newdigest", nil)
 
-	params := types.UpdateParams{
+	params := updateParams.Params{
 		MonitorOnly:     true,
 		NoPull:          true,
+		EnableChangelog: true,
 		LabelPrecedence: true,
 		CooldownDelay:   5 * time.Minute,
 	}
-	results, err := CheckForUpdates(testLogger(), t.Context(), client, nil, params, nil)
+	results, err := CheckForUpdates(newTestLogger(t), t.Context(), client, nil, params, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.True(t, results[0].UpdateAvailable)
@@ -296,26 +102,17 @@ func TestCheckForUpdates_ParamsPropagation(t *testing.T) {
 }
 
 func TestCheckForUpdates_MixedStaleResults(t *testing.T) {
-	client := mockContainer.NewMockClient(t)
-	container1 := mockTypes.NewMockContainer(t)
-	container1.EXPECT().Name().Return("app1")
-	container1.EXPECT().ImageName().Return("nginx:latest")
-	container1.EXPECT().ImageID().Return(types.ImageID("sha256:abc"))
-	container1.EXPECT().ImageInfo().Return(nil)
+	client := mockCheck.NewMockUpdateChecker(t)
+	container1 := imageContainer("app1", "nginx:latest", "sha256:abc")
+	container2 := imageContainer("app2", "redis:latest", "sha256:def")
 
-	container2 := mockTypes.NewMockContainer(t)
-	container2.EXPECT().Name().Return("app2")
-	container2.EXPECT().ImageName().Return("redis:latest")
-	container2.EXPECT().ImageID().Return(types.ImageID("sha256:def"))
-	container2.EXPECT().ImageInfo().Return(nil)
-
-	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{container1, container2}, nil)
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{container1, container2}, nil)
 	client.EXPECT().CheckContainerUpdate(mock.Anything, container1, mock.Anything).
-		Return(true, types.ImageID("sha256:new1"), "sha256:digest1", nil)
+		Return(true, container.ImageID("sha256:new1"), "sha256:digest1", nil)
 	client.EXPECT().CheckContainerUpdate(mock.Anything, container2, mock.Anything).
-		Return(false, types.ImageID("sha256:def"), "", nil)
+		Return(false, container.ImageID("sha256:def"), "", nil)
 
-	results, err := CheckForUpdates(testLogger(), t.Context(), client, nil, types.UpdateParams{}, nil)
+	results, err := CheckForUpdates(newTestLogger(t), t.Context(), client, nil, updateParams.Params{}, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	assert.True(t, results[0].UpdateAvailable)
@@ -327,23 +124,22 @@ func TestCheckForUpdates_MixedStaleResults(t *testing.T) {
 }
 
 func TestCheckForUpdates_GitNoPullSkipsCheck(t *testing.T) {
-	client := mockContainer.NewMockClient(t)
-	watched := wtcontainer.NewContainer(testLogger(), &dockerContainer.InspectResponse{
-		ID:   "app-id",
-		Name: "/app",
-		Config: &dockerContainer.Config{
-			Image: "app:latest",
-			Labels: map[string]string{
-				gitPkg.RepoLabel: "https://git.example.com/org/app.git",
-			},
-		},
-	}, nil)
-	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{watched}, nil)
+	client := mockCheck.NewMockUpdateChecker(t)
+	watched := modelfixture.ContainerWithoutImageInfo(
+		containerfixture.WithName("/app"),
+		containerfixture.WithImageName("app:latest"),
+		containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: "https://git.example.com/org/app.git",
+		}),
+	)
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{watched}, nil)
 
-	gitClient := git.New(testLogger(), git.Options{Timeout: time.Millisecond})
-	results, err := CheckForUpdates(testLogger(), t.Context(), client, nil, types.UpdateParams{
-		EnableGitMonitoring: true,
-		NoPull:              true,
+	gitClient := git.New(newTestLogger(t), git.Options{Timeout: time.Millisecond})
+	results, err := CheckForUpdates(newTestLogger(t), t.Context(), client, nil, updateParams.Params{
+		NoPull: true,
+		Git: gitConfig.Defaults{
+			Enable: true,
+		},
 	}, gitClient)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -356,24 +152,23 @@ func TestCheckForUpdates_GitNoPullSkipsCheck(t *testing.T) {
 // TestCheckForUpdates_GitCommitField verifies that Git results expose the commit separately from the local image ID.
 func TestCheckForUpdates_GitCommitField(t *testing.T) {
 	repoDir, branch, commit := initCheckGitRepo(t)
-	watched := wtcontainer.NewContainer(testLogger(), &dockerContainer.InspectResponse{
-		ID:   "app-id",
-		Name: "/app",
-		Config: &dockerContainer.Config{
-			Image: "app:latest",
-			Labels: map[string]string{
-				gitPkg.RepoLabel: repoDir,
-				gitPkg.RefLabel:  branch,
-			},
+	watched := modelfixture.ContainerWithoutImageInfo(
+		containerfixture.WithName("/app"),
+		containerfixture.WithImageName("app:latest"),
+		containerfixture.WithLabels(map[string]string{
+			labels.GitRepo: repoDir,
+			labels.GitRef:  branch,
+		}),
+	)
+
+	client := mockCheck.NewMockUpdateChecker(t)
+	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]*container.Container{watched}, nil)
+
+	results, err := CheckForUpdates(newTestLogger(t), t.Context(), client, nil, updateParams.Params{
+		Git: gitConfig.Defaults{
+			Enable: true,
 		},
-	}, nil)
-
-	client := mockContainer.NewMockClient(t)
-	client.EXPECT().ListContainers(mock.Anything, mock.Anything).Return([]types.Container{watched}, nil)
-
-	results, err := CheckForUpdates(testLogger(), t.Context(), client, nil, types.UpdateParams{
-		EnableGitMonitoring: true,
-	}, git.New(testLogger(), git.Options{Timeout: time.Second}))
+	}, git.New(newTestLogger(t), git.Options{Timeout: time.Second}))
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "git", results[0].UpdateSource)
@@ -494,56 +289,55 @@ func TestExtractFilterParams(t *testing.T) {
 	}
 }
 
-// stubContainer returns a mock container reporting a fixed identity.
-func stubContainer(t *testing.T, info *image.InspectResponse) *mockTypes.MockContainer {
-	t.Helper()
-
-	c := mockTypes.NewMockContainer(t)
-	c.EXPECT().Name().Return("/app").Maybe()
-	c.EXPECT().ImageName().Return("app:latest").Maybe()
-	c.EXPECT().ImageID().Return(types.ImageID("sha256:abc")).Maybe()
-	c.EXPECT().ImageInfo().Return(info).Maybe()
-
-	return c
+// imageContainer returns a running container with the given name and image,
+// whose image has the given ID and repository digests.
+func imageContainer(name, imageName, imageID string, repoDigests ...string) *container.Container {
+	return modelfixture.Container(
+		containerfixture.WithName(name),
+		containerfixture.WithImageName(imageName),
+		containerfixture.WithImageID(imageID),
+		containerfixture.WithRepoDigests(repoDigests),
+	)
 }
 
-// gitContainer returns a concrete container associated with a Git repository.
-func gitContainer(t *testing.T, repo string, imageLabels map[string]string) *wtcontainer.Container {
-	t.Helper()
-
-	imageConfig := &dockerspec.DockerOCIImageConfig{}
-	imageConfig.Labels = imageLabels
-
-	return wtcontainer.NewContainer(testLogger(), &dockerContainer.InspectResponse{
-		ID:   "app-id",
-		Name: "/app",
-		Config: &dockerContainer.Config{
-			Image: "app:latest",
-			Labels: map[string]string{
-				gitPkg.RepoLabel: repo,
-			},
-		},
-	}, &image.InspectResponse{
-		ID:     "sha256:image",
-		Config: imageConfig,
-	})
+// gitContainer returns a running container of app:latest associated with the
+// given Git repository, whose image carries the given labels.
+func gitContainer(repo string, imageLabels map[string]string) *container.Container {
+	return modelfixture.Container(
+		containerfixture.WithName("/app"),
+		containerfixture.WithImageName("app:latest"),
+		containerfixture.WithImageID("sha256:image"),
+		containerfixture.WithLabels(map[string]string{labels.GitRepo: repo}),
+		containerfixture.WithImageLabels(imageLabels),
+	)
 }
 
+// TestNewContainerCheck verifies that a result carries the container's
+// identity and the digest of its own image repository, leaving the source and
+// availability to the check helpers.
 func TestNewContainerCheck(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
-	c := stubContainer(t, nil)
+	// The image has digests in two repositories, so only the container's own
+	// image name picks the expected one.
+	c := imageContainer(
+		"/app",
+		"ghcr.io/org/app:latest",
+		"sha256:abc",
+		"docker.io/org/app@sha256:hub",
+		"ghcr.io/org/app@sha256:ghcr",
+	)
 
 	got := newContainerCheck(c, now)
 
-	assert.Equal(t, "/app", got.Name)
-	assert.Equal(t, "app:latest", got.Image)
+	assert.Equal(t, "app", got.Name)
+	assert.Equal(t, "ghcr.io/org/app:latest", got.Image)
 	assert.Equal(t, "sha256:abc", got.ImageID)
+	assert.Equal(t, "sha256:ghcr", got.Digest)
 	assert.Equal(t, now, got.Timestamp)
 	// Source and availability belong to the check helpers, not the identity.
 	assert.Empty(t, got.UpdateSource)
-	assert.Empty(t, got.Digest)
 	assert.False(t, got.UpdateAvailable)
 }
 
@@ -553,14 +347,14 @@ func TestApplyReportMetadata(t *testing.T) {
 	t.Run("concrete container resolves labels and OCI annotations", func(t *testing.T) {
 		t.Parallel()
 
-		c := gitContainer(t, "https://github.com/org/app.git", map[string]string{
+		c := gitContainer("https://github.com/org/app.git", map[string]string{
 			oci.SourceLabel:   "https://github.com/org/app.git",
 			oci.VersionLabel:  "1.2.2",
 			oci.RevisionLabel: "abc123",
 		})
 
 		var result ContainerCheck
-		applyReportMetadata(c, types.UpdateParams{}, &result)
+		applyReportMetadata(c, updateParams.Params{}, &result)
 
 		assert.Equal(t, "https://github.com/org/app.git", result.GitRepo)
 		assert.Equal(t, "https://github.com/org/app/releases", result.Changelog)
@@ -571,105 +365,38 @@ func TestApplyReportMetadata(t *testing.T) {
 		assert.Empty(t, result.LatestImageVersion)
 		assert.Empty(t, result.LatestImageRevision)
 	})
-
-	t.Run("a stubbed container exposes no metadata", func(t *testing.T) {
-		t.Parallel()
-
-		c := stubContainer(t, nil)
-
-		result := ContainerCheck{}
-		applyReportMetadata(c, types.UpdateParams{}, &result)
-
-		assert.Empty(t, result.GitRepo)
-		assert.Empty(t, result.GitRef)
-		assert.Empty(t, result.Changelog)
-		assert.Empty(t, result.OCISource)
-		assert.Empty(t, result.ImageURL)
-		assert.Empty(t, result.Documentation)
-		assert.Empty(t, result.CurrentImageVersion)
-		assert.Empty(t, result.CurrentImageRevision)
-	})
-}
-
-// The digest selection rules, including the fallback to an unrelated repo
-// digest, belong to ExtractImageDigest's own suite. This covers only the
-// wrapper's nil guard and its pass-through wiring.
-func TestApplyLocalDigest(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil image info leaves the digest empty", func(t *testing.T) {
-		t.Parallel()
-
-		c := stubContainer(t, nil)
-
-		var result ContainerCheck
-		applyLocalDigest(c, &result)
-
-		assert.Empty(t, result.Digest)
-	})
-
-	t.Run("matching repo digest is extracted", func(t *testing.T) {
-		t.Parallel()
-
-		c := stubContainer(t, &image.InspectResponse{
-			RepoDigests: []string{"app@sha256:1111111111111111111111111111111111111111111111111111111111111111"},
-		})
-
-		var result ContainerCheck
-		applyLocalDigest(c, &result)
-
-		assert.Equal(t, "sha256:1111111111111111111111111111111111111111111111111111111111111111", result.Digest)
-	})
-
-	t.Run("an existing digest is not cleared by a nil image info", func(t *testing.T) {
-		t.Parallel()
-
-		c := stubContainer(t, nil)
-
-		result := ContainerCheck{Digest: "sha256:preexisting"}
-		applyLocalDigest(c, &result)
-
-		assert.Equal(t, "sha256:preexisting", result.Digest)
-	})
 }
 
 func TestIsGitWatched(t *testing.T) {
 	t.Parallel()
 
-	gitClient := git.New(testLogger(), git.Options{Timeout: time.Second})
+	gitClient := git.New(newTestLogger(t), git.Options{Timeout: time.Second})
 
 	tests := []struct {
 		name      string
-		container types.Container
-		params    types.UpdateParams
+		container *container.Container
+		params    updateParams.Params
 		gitClient *git.Client
 		want      bool
 	}{
 		{
 			name:      "no git client falls back to the registry",
-			container: gitContainer(t, "https://github.com/org/app.git", nil),
-			params:    types.UpdateParams{EnableGitMonitoring: true},
+			container: gitContainer("https://github.com/org/app.git", nil),
+			params:    updateParams.Params{Git: gitConfig.Defaults{Enable: true}},
 			gitClient: nil,
 			want:      false,
 		},
 		{
-			name:      "stubbed container has no labels to watch",
-			container: stubContainer(t, nil),
-			params:    types.UpdateParams{EnableGitMonitoring: true},
-			gitClient: gitClient,
-			want:      false,
-		},
-		{
 			name:      "git monitoring disabled",
-			container: gitContainer(t, "https://github.com/org/app.git", nil),
-			params:    types.UpdateParams{},
+			container: gitContainer("https://github.com/org/app.git", nil),
+			params:    updateParams.Params{},
 			gitClient: gitClient,
 			want:      false,
 		},
 		{
 			name:      "associated container with monitoring enabled",
-			container: gitContainer(t, "https://github.com/org/app.git", nil),
-			params:    types.UpdateParams{EnableGitMonitoring: true},
+			container: gitContainer("https://github.com/org/app.git", nil),
+			params:    updateParams.Params{Git: gitConfig.Defaults{Enable: true}},
 			gitClient: gitClient,
 			want:      true,
 		},
@@ -679,7 +406,7 @@ func TestIsGitWatched(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tt.want, isGitWatched(testLogger(), tt.container, tt.params, tt.gitClient))
+			assert.Equal(t, tt.want, isGitWatched(newTestLogger(t), tt.container, tt.params, tt.gitClient))
 		})
 	}
 }
@@ -691,26 +418,23 @@ func TestCheckGitSource(t *testing.T) {
 		t.Parallel()
 
 		repoDir, branch, _ := initCheckGitRepo(t)
-		c := wtcontainer.NewContainer(testLogger(), &dockerContainer.InspectResponse{
-			ID:   "app-id",
-			Name: "/app",
-			Config: &dockerContainer.Config{
-				Image: "app:latest",
-				Labels: map[string]string{
-					gitPkg.RepoLabel: repoDir,
-					gitPkg.RefLabel:  branch,
-				},
-			},
-		}, nil)
+		c := modelfixture.ContainerWithoutImageInfo(
+			containerfixture.WithName("/app"),
+			containerfixture.WithImageName("app:latest"),
+			containerfixture.WithLabels(map[string]string{
+				labels.GitRepo: repoDir,
+				labels.GitRef:  branch,
+			}),
+		)
 
 		var result ContainerCheck
 
 		checkGitSource(
 			t.Context(),
-			testLogger(),
+			newTestLogger(t),
 			c,
-			types.UpdateParams{EnableGitMonitoring: true, NoPull: true},
-			git.New(testLogger(), git.Options{Timeout: time.Second}),
+			updateParams.Params{NoPull: true, Git: gitConfig.Defaults{Enable: true}},
+			git.New(newTestLogger(t), git.Options{Timeout: time.Second}),
 			&result,
 		)
 
@@ -724,16 +448,16 @@ func TestCheckGitSource(t *testing.T) {
 		t.Parallel()
 
 		missing := filepath.Join(t.TempDir(), "absent")
-		c := gitContainer(t, missing, nil)
+		c := gitContainer(missing, nil)
 
 		var result ContainerCheck
 
 		checkGitSource(
 			t.Context(),
-			testLogger(),
+			newTestLogger(t),
 			c,
-			types.UpdateParams{EnableGitMonitoring: true},
-			git.New(testLogger(), git.Options{Timeout: time.Second}),
+			updateParams.Params{Git: gitConfig.Defaults{Enable: true}},
+			git.New(newTestLogger(t), git.Options{Timeout: time.Second}),
 			&result,
 		)
 
@@ -747,17 +471,17 @@ func TestCheckGitSource(t *testing.T) {
 		t.Parallel()
 
 		repoDir, branch, commit := initCheckGitRepo(t)
-		c := gitContainer(t, repoDir, nil)
-		c.SetLabel(gitPkg.RefLabel, branch)
+		c := gitContainer(repoDir, nil)
+		c.SetLabel(labels.GitRef, branch)
 
 		var result ContainerCheck
 
 		checkGitSource(
 			t.Context(),
-			testLogger(),
+			newTestLogger(t),
 			c,
-			types.UpdateParams{EnableGitMonitoring: true},
-			git.New(testLogger(), git.Options{Timeout: time.Second}),
+			updateParams.Params{Git: gitConfig.Defaults{Enable: true}},
+			git.New(newTestLogger(t), git.Options{Timeout: time.Second}),
 			&result,
 		)
 
@@ -769,22 +493,22 @@ func TestCheckGitSource(t *testing.T) {
 		t.Parallel()
 
 		repoDir, branch, commit := initCheckGitRepoWithTag(t, "v1.2.3")
-		c := gitContainer(t, repoDir, nil)
-		c.SetLabel(gitPkg.RefLabel, branch)
+		c := gitContainer(repoDir, nil)
+		c.SetLabel(labels.GitRef, branch)
 		// A semver policy is what makes the check resolve a tag at all.
-		c.SetLabel(gitPkg.SemverPolicyLabel, string(types.GitPolicyPatch))
+		c.SetLabel(labels.GitSemverPolicy, string(semver.PolicyPatch))
 		// A template makes the tag substitution observable, because a local
 		// repository path has no known host to derive a releases URL from.
-		c.SetLabel(gitPkg.ChangelogURLLabel, "https://example.com/notes/{tag}")
+		c.SetLabel(labels.ChangelogURL, "https://example.com/notes/{tag}")
 
 		var result ContainerCheck
 
 		checkGitSource(
 			t.Context(),
-			testLogger(),
+			newTestLogger(t),
 			c,
-			types.UpdateParams{EnableGitMonitoring: true},
-			git.New(testLogger(), git.Options{Timeout: time.Second}),
+			updateParams.Params{Git: gitConfig.Defaults{Enable: true}},
+			git.New(newTestLogger(t), git.Options{Timeout: time.Second}),
 			&result,
 		)
 
@@ -800,14 +524,14 @@ func TestCheckRegistrySource(t *testing.T) {
 	t.Run("an error is reported without update fields", func(t *testing.T) {
 		t.Parallel()
 
-		client := mockContainer.NewMockClient(t)
+		client := mockCheck.NewMockUpdateChecker(t)
 		client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-			Return(false, types.ImageID(""), "", errors.New("registry unreachable"))
+			Return(false, container.ImageID(""), "", errors.New("registry unreachable"))
 
-		c := stubContainer(t, nil)
+		c := imageContainer("/app", "app:latest", "sha256:abc")
 
 		var result ContainerCheck
-		checkRegistrySource(t.Context(), testLogger(), client, c, types.UpdateParams{}, &result)
+		checkRegistrySource(t.Context(), newTestLogger(t), client, c, updateParams.Params{}, &result)
 
 		assert.Equal(t, "registry", result.UpdateSource)
 		assert.Equal(t, "registry unreachable", result.Error)
@@ -819,14 +543,14 @@ func TestCheckRegistrySource(t *testing.T) {
 	t.Run("a newer image populates the update fields", func(t *testing.T) {
 		t.Parallel()
 
-		client := mockContainer.NewMockClient(t)
+		client := mockCheck.NewMockUpdateChecker(t)
 		client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-			Return(true, types.ImageID("sha256:def"), "sha256:def", nil)
+			Return(true, container.ImageID("sha256:def"), "sha256:def", nil)
 
-		c := stubContainer(t, nil)
+		c := imageContainer("/app", "app:latest", "sha256:abc")
 
 		var result ContainerCheck
-		checkRegistrySource(t.Context(), testLogger(), client, c, types.UpdateParams{}, &result)
+		checkRegistrySource(t.Context(), newTestLogger(t), client, c, updateParams.Params{}, &result)
 
 		assert.Equal(t, "registry", result.UpdateSource)
 		assert.True(t, result.UpdateAvailable)
@@ -838,14 +562,14 @@ func TestCheckRegistrySource(t *testing.T) {
 	t.Run("empty digest and image id are left unset", func(t *testing.T) {
 		t.Parallel()
 
-		client := mockContainer.NewMockClient(t)
+		client := mockCheck.NewMockUpdateChecker(t)
 		client.EXPECT().CheckContainerUpdate(mock.Anything, mock.Anything, mock.Anything).
-			Return(false, types.ImageID(""), "", nil)
+			Return(false, container.ImageID(""), "", nil)
 
-		c := stubContainer(t, nil)
+		c := imageContainer("/app", "app:latest", "sha256:abc")
 
 		var result ContainerCheck
-		checkRegistrySource(t.Context(), testLogger(), client, c, types.UpdateParams{}, &result)
+		checkRegistrySource(t.Context(), newTestLogger(t), client, c, updateParams.Params{}, &result)
 
 		assert.Equal(t, "registry", result.UpdateSource)
 		assert.False(t, result.UpdateAvailable)
@@ -859,7 +583,7 @@ func TestCheckRegistrySource(t *testing.T) {
 func TestLogCheckFailure(t *testing.T) {
 	t.Parallel()
 
-	c := stubContainer(t, nil)
+	c := imageContainer("/app", "app:latest", "sha256:abc")
 
 	var buf bytes.Buffer
 
@@ -872,7 +596,7 @@ func TestLogCheckFailure(t *testing.T) {
 
 	assert.Equal(t, "debug", entry["level"])
 	assert.Equal(t, "no", entry["notify"], "the entry must not raise a notification")
-	assert.Equal(t, "/app", entry["container"])
+	assert.Equal(t, "app", entry["container"])
 	assert.Equal(t, "app:latest", entry["image"])
 	assert.Equal(t, "Failed to check container for updates", entry["message"])
 	assert.Equal(t, "boom", entry["error"])

@@ -7,12 +7,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
-	"github.com/nicholas-fedor/watchtower/internal/api/handlers/events"
-	"github.com/nicholas-fedor/watchtower/internal/logging"
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	mockRoutes "github.com/nicholas-fedor/watchtower/internal/api/routes/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/observability/events"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+	"github.com/nicholas-fedor/watchtower/internal/update/schedule"
 )
 
 func TestRegisterCheckRoute(t *testing.T) {
@@ -20,7 +21,7 @@ func TestRegisterCheckRoute(t *testing.T) {
 		app := testApp()
 		auth := testAuthMiddleware()
 
-		opts := config.Options{
+		opts := Options{
 			EnableCheckAPI: true,
 			Client:         nil,
 		}
@@ -38,12 +39,12 @@ func TestRegisterCheckRoute(t *testing.T) {
 	t.Run("with client registers route", func(t *testing.T) {
 		app := testApp()
 		auth := testAuthMiddleware()
-		mockClient := mockContainer.NewMockClient(t)
+		mockClient := mockRoutes.NewMockClient(t)
 
-		opts := config.Options{
+		opts := Options{
 			EnableCheckAPI:   true,
 			Client:           mockClient,
-			FilterByImage:    func(_ []string, f types.Filter) types.Filter { return f },
+			FilterByImage:    func(_ []string, f filters.Filter) filters.Filter { return f },
 			EventBroadcaster: events.NewBroadcaster(),
 		}
 
@@ -67,7 +68,7 @@ func TestRegisterCheckRoute(t *testing.T) {
 func TestRegisterEventsRoute(t *testing.T) {
 	app := testApp()
 
-	opts := config.Options{
+	opts := Options{
 		EnableEventsAPI:    true,
 		EventsToken:        "events-token",
 		CORSAllowedOrigins: []string{"https://example.com"},
@@ -94,15 +95,16 @@ func TestRegisterUpdateRoute_WriteStartupMessage(t *testing.T) {
 	app := testApp()
 	auth := testAuthMiddleware()
 
-	opts := config.Options{
+	opts := Options{
 		EnableUpdateAPI: true,
+		UpdateLock:      schedule.NewUpdateLock(),
 		UnblockHTTPAPI:  false,
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
-		WriteStartupMessage: func(_ logging.StartupParams) {
+		WriteStartupMessage: func(context.Context, logging.StartupParams) {
 		},
 	}
 

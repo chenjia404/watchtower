@@ -1,6 +1,10 @@
 package preview
 
-import "github.com/nicholas-fedor/tplprev/internal/report"
+import (
+	"time"
+
+	"github.com/nicholas-fedor/tplprev/internal/report"
+)
 
 var _ report.ContainerReport = (*containerStatus)(nil)
 
@@ -15,12 +19,20 @@ type containerStatus struct {
 	state                State
 	monitorOnly          bool
 	newContainerID       report.ContainerID
+	gitRepo              string
 	gitRef               string
 	changelog            string
+	source               string
+	imageURL             string
+	documentation        string
 	currentImageVersion  string
 	latestImageVersion   string
 	currentImageRevision string
 	latestImageRevision  string
+	cooldownAge          string
+	cooldownDelay        string
+	cooldownRemaining    string
+	cooldownEligibleAt   time.Time
 }
 
 func (u *containerStatus) ID() report.ContainerID {
@@ -52,7 +64,7 @@ func (u *containerStatus) Error() string {
 }
 
 func (u *containerStatus) State() string {
-	return string(u.state)
+	return u.state.displayName()
 }
 
 func (u *containerStatus) IsMonitorOnly() bool {
@@ -63,12 +75,28 @@ func (u *containerStatus) NewContainerID() report.ContainerID {
 	return u.newContainerID
 }
 
+func (u *containerStatus) GitRepo() string {
+	return u.gitRepo
+}
+
 func (u *containerStatus) GitRef() string {
 	return u.gitRef
 }
 
 func (u *containerStatus) Changelog() string {
 	return u.changelog
+}
+
+func (u *containerStatus) Source() string {
+	return u.source
+}
+
+func (u *containerStatus) ImageURL() string {
+	return u.imageURL
+}
+
+func (u *containerStatus) Documentation() string {
+	return u.documentation
 }
 
 func (u *containerStatus) CurrentImageVersion() string {
@@ -85,4 +113,20 @@ func (u *containerStatus) CurrentImageRevision() string {
 
 func (u *containerStatus) LatestImageRevision() string {
 	return u.latestImageRevision
+}
+
+func (u *containerStatus) CooldownAge() string {
+	return u.cooldownAge
+}
+
+func (u *containerStatus) CooldownDelay() string {
+	return u.cooldownDelay
+}
+
+func (u *containerStatus) CooldownRemaining() string {
+	return u.cooldownRemaining
+}
+
+func (u *containerStatus) CooldownEligibleAt() time.Time {
+	return u.cooldownEligibleAt
 }

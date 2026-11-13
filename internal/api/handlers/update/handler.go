@@ -9,23 +9,23 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/rs/zerolog"
 
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	"github.com/nicholas-fedor/watchtower/internal/update/schedule"
 )
 
 // Handler triggers container update scans via HTTP.
 type Handler struct {
+	ctx context.Context //nolint:containedctx // application-lifetime context owned by Handler
 	log *zerolog.Logger
 
 	fn         func(ctx context.Context, images, containers []string) *metrics.Metric
+	lock       *schedule.UpdateLock
 	Path       string
-	lock       chan bool
-	ctx        context.Context //nolint:containedctx // application-lifetime context owned by Handler
 	maxTimeout time.Duration
 }
 
 // lockResult holds the outcome of an acquireLock attempt.
 type lockResult struct {
-	Token      bool
 	Acquired   bool
 	RequestErr bool
 }
@@ -35,63 +35,28 @@ const (
 	retryAfterSeconds = "30"
 )
 
-// New creates a new Handler.
+// New creates a new Handler with a maximum per-request timeout.
 //
 // Parameters:
 //   - updateFn: Function that executes container updates, accepting a context,
 //     image names, container name patterns, and returning metrics.
-//   - updateLock: Optional lock channel for synchronizing updates. If nil, a
-//     new channel is created.
-//   - ctx: Optional application-lifetime context for background work.
-//     If nil, context.Background is used.
-func New(log *zerolog.Logger, updateFn func(ctx context.Context, images, containers []string) *metrics.Metric, updateLock chan bool, ctx ...context.Context) *Handler {
-	if log == nil {
-		nop := zerolog.Nop()
-		log = &nop
-	}
-
-	return NewWithTimeout(log, updateFn, updateLock, 0, ctx...)
-}
-
-// NewWithTimeout creates a new Handler with a maximum per-request timeout.
-//
-// Parameters:
-//   - updateFn: Function that executes container updates, accepting a context,
-//     image names, container name patterns, and returning metrics.
-//   - updateLock: Optional lock channel for synchronizing updates. If nil, a
-//     new channel is created.
+//   - updateLock: Update lock shared with every other caller that starts
+//     updates, such as the scheduler. Must be non-nil.
 //   - maxTimeout: Maximum allowed per-request timeout, used to bound the
 //     ?timeout= query parameter for both sync and async updates. If zero,
 //     no per-request timeout override is applied.
 //   - ctx: Optional application-lifetime context for background work.
 //     If nil, context.Background is used.
-func NewWithTimeout(
+func New(
 	log *zerolog.Logger,
 	updateFn func(ctx context.Context, images, containers []string) *metrics.Metric,
-	updateLock chan bool,
+	updateLock *schedule.UpdateLock,
 	maxTimeout time.Duration,
 	ctx ...context.Context,
 ) *Handler {
 	if log == nil {
 		nop := zerolog.Nop()
 		log = &nop
-	}
-
-	var hLock chan bool
-	if updateLock != nil {
-		hLock = updateLock
-
-		log.Debug().
-			Str("source", "provided").
-			Str("notify", "no").
-			Msg("Initialized update lock from provided channel")
-	} else {
-		hLock = make(chan bool, 1)
-		hLock <- true
-
-		log.Debug().
-			Str("notify", "no").
-			Msg("Initialized new update lock channel")
 	}
 
 	var bgCtx context.Context
@@ -105,7 +70,7 @@ func NewWithTimeout(
 		log:        log,
 		fn:         updateFn,
 		Path:       "/v1/update",
-		lock:       hLock,
+		lock:       updateLock,
 		ctx:        bgCtx,
 		maxTimeout: maxTimeout,
 	}
@@ -155,10 +120,10 @@ func (h *Handler) Handle(c fiber.Ctx) error {
 	}
 
 	if c.Query("async") == "true" {
-		return h.handleAsync(c, images, containers, result.Token, updateCtx)
+		return h.handleAsync(c, images, containers, updateCtx)
 	}
 
-	return h.handleSync(c, images, containers, result.Token, updateCtx)
+	return h.handleSync(c, images, containers, updateCtx)
 }
 
 // extractImages parses the "image" query parameters into a slice of image
@@ -240,30 +205,23 @@ func (h *Handler) acquireLock(c fiber.Ctx, images, containers []string) lockResu
 		Msg("Handler: trying to acquire lock")
 
 	if len(images) > 0 || len(containers) > 0 {
-		select {
-		case token := <-h.lock:
-			h.log.Debug().
-				Str("notify", "no").
-				Msg("Handler: acquired lock for targeted update")
-
-			return lockResult{Token: token, Acquired: true}
-		case <-c.Context().Done():
+		err := h.lock.Lock(c.Context())
+		if err != nil {
 			h.log.Debug().
 				Str("notify", "no").
 				Msg("Handler: request cancelled while waiting for lock")
 
 			return lockResult{RequestErr: true}
 		}
-	}
 
-	select {
-	case token := <-h.lock:
 		h.log.Debug().
 			Str("notify", "no").
-			Msg("Handler: acquired lock for full update")
+			Msg("Handler: acquired lock for targeted update")
 
-		return lockResult{Token: token, Acquired: true}
-	default:
+		return lockResult{Acquired: true}
+	}
+
+	if !h.lock.TryLock() {
 		h.log.Debug().
 			Str("notify", "no").
 			Msg("Skipped update, another update already in progress")
@@ -271,6 +229,12 @@ func (h *Handler) acquireLock(c fiber.Ctx, images, containers []string) lockResu
 
 		return lockResult{}
 	}
+
+	h.log.Debug().
+		Str("notify", "no").
+		Msg("Handler: acquired lock for full update")
+
+	return lockResult{Acquired: true}
 }
 
 // send429Response writes a JSON error response indicating an update is
@@ -293,10 +257,11 @@ func (h *Handler) send429Response(c fiber.Ctx) {
 
 // applyTimeout returns a context derived from the request context, optionally
 // wrapped with a per-request timeout from the ?timeout= query parameter.
-// The timeout is clamped to h.maxTimeout.
+// The timeout is clamped to h.maxTimeout. A zero h.maxTimeout ignores the
+// parameter.
 func (h *Handler) applyTimeout(c fiber.Ctx) context.Context {
 	ctx := c.Context()
-	if timeoutStr := c.Query("timeout"); timeoutStr != "" {
+	if timeoutStr := c.Query("timeout"); timeoutStr != "" && h.maxTimeout > 0 {
 		parsed, err := time.ParseDuration(timeoutStr)
 		if err == nil && parsed > 0 {
 			if parsed > h.maxTimeout {
@@ -321,12 +286,12 @@ func (h *Handler) applyTimeout(c fiber.Ctx) context.Context {
 // updateCtx is used only for deadline projection inside executeUpdateAsync.
 // The goroutine does not run under the request context, which is canceled
 // when this handler returns.
-func (h *Handler) handleAsync(c fiber.Ctx, images, containers []string, lockToken bool, updateCtx context.Context) error {
+func (h *Handler) handleAsync(c fiber.Ctx, images, containers []string, updateCtx context.Context) error {
 	h.log.Info().
 		Str("notify", "no").
 		Msg("Handling async update request - spawning async update")
 
-	go h.executeUpdateAsync(updateCtx, images, containers, lockToken)
+	go h.executeUpdateAsync(updateCtx, images, containers)
 
 	err := c.SendStatus(fiber.StatusAccepted)
 	if err != nil {
@@ -338,22 +303,29 @@ func (h *Handler) handleAsync(c fiber.Ctx, images, containers []string, lockToke
 
 // handleSync processes a synchronous update request, returning the update
 // results as JSON.
-func (h *Handler) handleSync(c fiber.Ctx, images, containers []string, lockToken bool, updateCtx context.Context) error {
-	defer h.releaseLock(lockToken)
+func (h *Handler) handleSync(c fiber.Ctx, images, containers []string, updateCtx context.Context) error {
+	defer h.releaseLock()
 
 	metric, duration := h.executeUpdate(updateCtx, images, containers)
 	if metric == nil {
 		return fiber.ErrInternalServerError
 	}
 
+	summary := fiber.Map{
+		"scanned":   metric.Scanned,
+		"updated":   metric.Updated,
+		"failed":    metric.Failed,
+		"restarted": metric.Restarted,
+		"skipped":   metric.Skipped,
+	}
+
+	// Report a failed scan, and leave the field out otherwise.
+	if metric.ScanFailed {
+		summary["scan_failed"] = true
+	}
+
 	err := c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"summary": fiber.Map{
-			"scanned":   metric.Scanned,
-			"updated":   metric.Updated,
-			"failed":    metric.Failed,
-			"restarted": metric.Restarted,
-			"skipped":   metric.Skipped,
-		},
+		"summary": summary,
 		"timing": fiber.Map{
 			"duration_ms": duration.Milliseconds(),
 			"duration":    duration.String(),
@@ -375,7 +347,7 @@ func (h *Handler) handleSync(c fiber.Ctx, images, containers []string, lockToken
 // context so the update survives request completion and Fiber timeout-middleware
 // cancellation. Any deadline on updateCtx (route timeout middleware and optional
 // ?timeout=) is projected onto that context without inheriting request cancellation.
-func (h *Handler) executeUpdateAsync(updateCtx context.Context, images, containers []string, lockToken bool) {
+func (h *Handler) executeUpdateAsync(updateCtx context.Context, images, containers []string) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			h.log.Error().
@@ -384,7 +356,7 @@ func (h *Handler) executeUpdateAsync(updateCtx context.Context, images, containe
 				Msg("Update goroutine panicked")
 		}
 
-		h.releaseLock(lockToken)
+		h.releaseLock()
 	}()
 
 	ctx, cancel := h.contextForAsync(updateCtx)
@@ -439,12 +411,11 @@ func (h *Handler) executeUpdate(ctx context.Context, images, containers []string
 	return metric, duration
 }
 
-// releaseLock returns the lock token to the channel, allowing another update
-// to proceed.
-func (h *Handler) releaseLock(token bool) {
+// releaseLock releases the update lock, allowing another update to proceed.
+func (h *Handler) releaseLock() {
 	h.log.Debug().
 		Str("notify", "no").
 		Msg("Handler: releasing lock")
 
-	h.lock <- token
+	h.lock.Unlock()
 }

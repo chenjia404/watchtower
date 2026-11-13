@@ -19,13 +19,15 @@ This token can be provided in two formats:
 - **Header-based auth** — For programmatic clients using `curl`, `fetch`, etc.:
 
   ```bash
-  curl -N -H "Authorization: Bearer my-events-token" "http://localhost:8080/v1/events"
+  curl -N -H "Authorization: Bearer EVENTS_TOKEN" "http://localhost:8080/v1/events"
   ```
+
+  Replace *`EVENTS_TOKEN`* with your events token.
 
 - **Query-parameter auth** — For browser `EventSource` API, which cannot send custom headers:
 
   ```javascript
-  const eventSource = new EventSource('http://localhost:8080/v1/events?access_token=my-events-token');
+  const eventSource = new EventSource('http://localhost:8080/v1/events?access_token=' + encodeURIComponent('EVENTS_TOKEN'));
 
   eventSource.addEventListener('scan_started', (e) => {
       console.log('Scan started:', JSON.parse(e.data));
@@ -37,30 +39,24 @@ This token can be provided in two formats:
   ```
 
   ```bash
-  curl -N "http://localhost:8080/v1/events?access_token=my-events-token"
+  curl -N -G --data-urlencode "access_token=EVENTS_TOKEN" "http://localhost:8080/v1/events"
   ```
 
 The events endpoint uses a separate token from the main API token to limit blast radius, since query parameters may appear in access logs, browser history, and proxy logs.
 
 ## Supported Events
 
-### Scan Events
+Each event is sent under its type as the SSE event name:
 
-- Started
-- Completed
-- Failed
-
-!!! Note
-    Scan events are broadcasted only for updates (HTTP API or scheduled) or checks (HTTP API).
-
-### Update Events
-
-- Started
-- Completed
-- Failed
+| Event            | Sent                                                     | `data` fields                                                                                                                                                                                                                                    |
+|:-----------------|:---------------------------------------------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `scan_started`   | Before an update session or a check begins               | The update policy as booleans: `cleanup`, `no_restart`, `monitor_only`, `lifecycle_hooks`, `rolling_restart`, `label_precedence`, `no_pull`, `run_once`, `use_compose_depends_on`, `skip_self_update`, `ephemeral_self_update`, `revive_stopped` |
+| `scan_completed` | After an update session or a check ends without an error | `scanned`, `updated`, `failed`, `skipped`                                                                                                                                                                                                        |
+| `scan_failed`    | When an update session or a check ends with an error     | `error`                                                                                                                                                                                                                                          |
+| `image_cleanup`  | After an update session removes old images               | `images`, each with `image_id`, `image_name`, `container_id` and `container_name`                                                                                                                                                                |
 
 !!! Note
-    Update events are broadcasted only for HTTP API or scheduled updates.
+    Update sessions are scheduled runs and [`/v1/update`](../update/index.md) requests. Checks are [`/v1/check`](../check/index.md) requests. A check updates nothing, so it never sends `image_cleanup`, and its `scan_completed` reports `updated` as 0.
 
 ## Event Format
 
@@ -68,7 +64,7 @@ Each event is a Server-Sent Event with an event type and JSON data payload:
 
 ```text
 event: scan_completed
-data: {"type":"scan_completed","timestamp":"2025-01-20T11:30:45Z","data":{"scanned":8,"updated":0}}
+data: {"type":"scan_completed","timestamp":"2025-01-20T11:30:45Z","data":{"scanned":8,"updated":0,"failed":0,"skipped":0}}
 ```
 
 ## HTTP Status Codes

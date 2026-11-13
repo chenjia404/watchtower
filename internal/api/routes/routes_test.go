@@ -15,22 +15,24 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/keyauth"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/gofiber/fiber/v3/middleware/logger"
-	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
-	"github.com/nicholas-fedor/watchtower/internal/api/handlers/events"
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	fiberRecover "github.com/gofiber/fiber/v3/middleware/recover"
+
+	mockRoutes "github.com/nicholas-fedor/watchtower/internal/api/routes/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/observability/events"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+	"github.com/nicholas-fedor/watchtower/internal/update/schedule"
 )
 
 var testMetrics = metrics.Default()
 
-func makeFilter(_ *testing.T) types.Filter {
-	return func(_ types.FilterableContainer) bool { return true }
+func makeFilter(_ *testing.T) filters.Filter {
+	return func(_ filters.FilterableContainer) bool { return true }
 }
 
 // testApp creates a minimal Fiber app for route registration tests.
@@ -43,7 +45,7 @@ func testApp() *fiber.App {
 		CaseSensitive: true,
 	})
 	app.Use(
-		recover.New(),
+		fiberRecover.New(),
 		helmet.New(),
 		requestid.New(),
 		logger.New(logger.Config{
@@ -85,28 +87,29 @@ func testAuthMiddleware() fiber.Handler {
 }
 
 func TestValidateAndRegister(t *testing.T) {
-	baseOpts := func() config.Options {
-		return config.Options{
+	baseOpts := func() Options {
+		return Options{
 			EnableUpdateAPI: true,
+			UpdateLock:      schedule.NewUpdateLock(),
 			UnblockHTTPAPI:  true,
-			RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+			RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 				return &metrics.Metric{}
 			},
-			FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+			FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 			DefaultMetrics: func() *metrics.Metrics { return testMetrics },
 		}
 	}
 
 	tests := []struct {
 		name    string
-		opts    config.Options
+		opts    Options
 		wantErr bool
 		errMsg  string
 	}{
 		{name: "all valid", opts: baseOpts(), wantErr: false},
 		{
 			name: "missing RunUpdatesWithNotifications",
-			opts: func() config.Options {
+			opts: func() Options {
 				o := baseOpts()
 				o.RunUpdatesWithNotifications = nil
 
@@ -117,7 +120,7 @@ func TestValidateAndRegister(t *testing.T) {
 		},
 		{
 			name: "missing FilterByImage",
-			opts: func() config.Options {
+			opts: func() Options {
 				o := baseOpts()
 				o.FilterByImage = nil
 
@@ -128,7 +131,7 @@ func TestValidateAndRegister(t *testing.T) {
 		},
 		{
 			name: "missing DefaultMetrics for update",
-			opts: func() config.Options {
+			opts: func() Options {
 				o := baseOpts()
 				o.DefaultMetrics = nil
 
@@ -139,7 +142,7 @@ func TestValidateAndRegister(t *testing.T) {
 		},
 		{
 			name: "history without client is valid",
-			opts: config.Options{
+			opts: Options{
 				EnableHistoryAPI: true,
 				DefaultMetrics:   func() *metrics.Metrics { return testMetrics },
 			},
@@ -147,7 +150,7 @@ func TestValidateAndRegister(t *testing.T) {
 		},
 		{
 			name: "history without DefaultMetrics fails",
-			opts: config.Options{
+			opts: Options{
 				EnableHistoryAPI: true,
 				DefaultMetrics:   nil,
 			},
@@ -156,7 +159,7 @@ func TestValidateAndRegister(t *testing.T) {
 		},
 		{
 			name: "metrics without DefaultMetrics fails",
-			opts: config.Options{
+			opts: Options{
 				EnableMetricsAPI: true,
 				DefaultMetrics:   nil,
 			},
@@ -165,26 +168,26 @@ func TestValidateAndRegister(t *testing.T) {
 		},
 		{
 			name: "check without FilterByImage fails",
-			opts: config.Options{
+			opts: Options{
 				EnableCheckAPI: true,
 				FilterByImage:  nil,
-				Client:         mockContainer.NewMockClient(t),
+				Client:         mockRoutes.NewMockClient(t),
 			},
 			wantErr: true,
 			errMsg:  "FilterByImage must be provided",
 		},
 		{
 			name: "check with FilterByImage is valid",
-			opts: config.Options{
+			opts: Options{
 				EnableCheckAPI: true,
-				FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
-				Client:         mockContainer.NewMockClient(t),
+				FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
+				Client:         mockRoutes.NewMockClient(t),
 			},
 			wantErr: false,
 		},
 		{
 			name: "events without EventBroadcaster fails",
-			opts: config.Options{
+			opts: Options{
 				EnableEventsAPI:  true,
 				EventBroadcaster: nil,
 			},
@@ -251,18 +254,18 @@ func TestRegister(t *testing.T) {
 			app := testApp()
 			auth := testAuthMiddleware()
 
-			var updateFn func(ctx context.Context, f types.Filter, p types.UpdateParams) *metrics.Metric
+			var updateFn func(ctx context.Context, f filters.Filter, p updateParams.Params) *metrics.Metric
 			if tt.enableUpdateAPI {
-				updateFn = func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+				updateFn = func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 					return &metrics.Metric{}
 				}
 			}
 
-			opts := config.Options{
+			opts := Options{
 				EnableUpdateAPI:             tt.enableUpdateAPI,
 				UnblockHTTPAPI:              true,
 				RunUpdatesWithNotifications: updateFn,
-				FilterByImage:               func(_ []string, f types.Filter) types.Filter { return f },
+				FilterByImage:               func(_ []string, f filters.Filter) filters.Filter { return f },
 				DefaultMetrics:              func() *metrics.Metrics { return testMetrics },
 				EnableMetricsAPI:            tt.enableMetricsAPI,
 				EnableContainersAPI:         tt.enableContainersAPI,
@@ -270,14 +273,14 @@ func TestRegister(t *testing.T) {
 				EnableImagesAPI:             tt.enableImagesAPI,
 				EnableConfigAPI:             tt.enableConfigAPI,
 				EnableEventsAPI:             tt.enableEventsAPI,
-				Client:                      mockContainer.NewMockClient(t),
+				Client:                      mockRoutes.NewMockClient(t),
 				Filter:                      makeFilter(t),
 			}
 			if tt.enableEventsAPI {
 				opts.EventBroadcaster = events.NewBroadcaster()
 			}
 
-			Register(context.Background(), app, auth, opts)
+			registerRoutes(context.Background(), app, auth, opts)
 
 			routes := app.GetRoutes()
 			apiCount := 0

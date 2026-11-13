@@ -10,21 +10,19 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
-	"github.com/nicholas-fedor/watchtower/pkg/container"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
+	mockRoutes "github.com/nicholas-fedor/watchtower/internal/api/routes/mocks"
 )
 
 func TestRegisterHealthRoute(t *testing.T) {
 	tests := []struct {
 		name             string
-		clientSetup      func(t *testing.T) container.Client
+		clientSetup      func(t *testing.T) Client
 		checkReadiness   bool
 		readinessHealthy bool
 	}{
 		{
 			name: "nil client",
-			clientSetup: func(t *testing.T) container.Client {
+			clientSetup: func(t *testing.T) Client {
 				t.Helper()
 
 				return nil
@@ -32,10 +30,10 @@ func TestRegisterHealthRoute(t *testing.T) {
 		},
 		{
 			name: "working client",
-			clientSetup: func(t *testing.T) container.Client {
+			clientSetup: func(t *testing.T) Client {
 				t.Helper()
 
-				mc := mockContainer.NewMockClient(t)
+				mc := mockRoutes.NewMockClient(t)
 				mc.EXPECT().Ping(mock.Anything).Return(nil)
 
 				return mc
@@ -45,10 +43,10 @@ func TestRegisterHealthRoute(t *testing.T) {
 		},
 		{
 			name: "failing client",
-			clientSetup: func(t *testing.T) container.Client {
+			clientSetup: func(t *testing.T) Client {
 				t.Helper()
 
-				mc := mockContainer.NewMockClient(t)
+				mc := mockRoutes.NewMockClient(t)
 				mc.EXPECT().Ping(mock.Anything).Return(errors.New("fail"))
 
 				return mc
@@ -63,7 +61,7 @@ func TestRegisterHealthRoute(t *testing.T) {
 			app := testApp()
 			client := tt.clientSetup(t)
 
-			opts := config.Options{
+			opts := Options{
 				EnableHealthAPI: true,
 				Client:          client,
 			}

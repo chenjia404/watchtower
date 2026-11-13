@@ -3,27 +3,32 @@ package routes
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
-	"github.com/nicholas-fedor/watchtower/internal/logging"
-	"github.com/nicholas-fedor/watchtower/internal/metrics"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
+	"github.com/nicholas-fedor/watchtower/internal/observability/metrics"
+	updateParams "github.com/nicholas-fedor/watchtower/internal/update/params"
+	"github.com/nicholas-fedor/watchtower/internal/update/schedule"
 )
 
 func TestRegisterUpdateRoute(t *testing.T) {
 	app := testApp()
 	auth := testAuthMiddleware()
 
-	opts := config.Options{
+	opts := Options{
 		EnableUpdateAPI: true,
+		UpdateLock:      schedule.NewUpdateLock(),
 		UnblockHTTPAPI:  true,
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
 	}
 
@@ -47,12 +52,12 @@ func TestRegisterUpdateRoute_BuildsFullUpdateParams(t *testing.T) {
 	app := testApp()
 	auth := testAuthMiddleware()
 
-	var got types.UpdateParams
+	var got updateParams.Params
 
-	opts := config.Options{
+	opts := Options{
 		EnableUpdateAPI: true,
 		UnblockHTTPAPI:  true,
-		BaseParams: types.UpdateParams{
+		BaseParams: updateParams.Params{
 			Cleanup:             true,
 			ReviveStopped:       true,
 			UseComposeDependsOn: true,
@@ -63,22 +68,22 @@ func TestRegisterUpdateRoute_BuildsFullUpdateParams(t *testing.T) {
 			LabelPrecedence:     true,
 			SkipSelfUpdate:      true,
 		},
-		Filter: func(_ types.FilterableContainer) bool { return true },
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, params types.UpdateParams) *metrics.Metric {
+		Filter: func(_ filters.FilterableContainer) bool { return true },
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, params updateParams.Params) *metrics.Metric {
 			got = params
 
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
-		UpdateLock:     make(chan bool, 1),
+		UpdateLock:     schedule.NewUpdateLock(),
 	}
 
 	registerUpdateRoute(context.Background(), app, auth, opts)
 
 	// Invoke the update pipeline the same way the handler does (via the
 	// registered RunUpdatesWithNotifications closure setup).
-	params := config.BuildUpdateParams(opts)
+	params := BuildUpdateParams(opts)
 	opts.RunUpdatesWithNotifications(context.Background(), opts.Filter, params)
 
 	assert.True(t, got.ReviveStopped)
@@ -97,13 +102,14 @@ func TestRegisterUpdateRoute_NilWriteStartupMessage(t *testing.T) {
 	app := testApp()
 	auth := testAuthMiddleware()
 
-	opts := config.Options{
+	opts := Options{
 		EnableUpdateAPI: true,
+		UpdateLock:      schedule.NewUpdateLock(),
 		UnblockHTTPAPI:  false,
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		FilterByImage:       func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:       func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics:      func() *metrics.Metrics { return testMetrics },
 		WriteStartupMessage: nil,
 	}
@@ -113,24 +119,69 @@ func TestRegisterUpdateRoute_NilWriteStartupMessage(t *testing.T) {
 	})
 }
 
-func TestRegisterUpdateRoute_WriteStartupMessageCalledWhenBlocking(t *testing.T) {
+// TestRegisterUpdateRoute_DoesNotWriteStartupMessage verifies that registering
+// the update route does not write the startup message, which the server
+// writes once its socket is bound.
+func TestRegisterUpdateRoute_DoesNotWriteStartupMessage(t *testing.T) {
 	app := testApp()
 	auth := testAuthMiddleware()
 
 	called := false
-	opts := config.Options{
+	opts := Options{
 		EnableUpdateAPI: true,
+		UpdateLock:      schedule.NewUpdateLock(),
 		UnblockHTTPAPI:  false,
-		RunUpdatesWithNotifications: func(_ context.Context, _ types.Filter, _ types.UpdateParams) *metrics.Metric {
+		RunUpdatesWithNotifications: func(_ context.Context, _ filters.Filter, _ updateParams.Params) *metrics.Metric {
 			return &metrics.Metric{}
 		},
-		FilterByImage:  func(_ []string, f types.Filter) types.Filter { return f },
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
 		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
-		WriteStartupMessage: func(_ logging.StartupParams) {
+		WriteStartupMessage: func(context.Context, logging.StartupParams) {
 			called = true
 		},
 	}
 
 	registerUpdateRoute(context.Background(), app, auth, opts)
-	assert.True(t, called)
+	assert.False(t, called)
+}
+
+// TestRegisterUpdateRoute_TimeoutIsServiceUnavailable verifies that an update
+// that outlasts the update timeout gets 503 Service Unavailable, as the API
+// documents.
+func TestRegisterUpdateRoute_TimeoutIsServiceUnavailable(t *testing.T) {
+	app := testApp()
+	auth := testAuthMiddleware()
+
+	lock := schedule.NewUpdateLock()
+
+	// The update runs until the test ends, so only the timeout can answer.
+	release := make(chan struct{})
+
+	t.Cleanup(func() { close(release) })
+
+	opts := Options{
+		EnableUpdateAPI: true,
+		UnblockHTTPAPI:  true,
+		UpdateTimeout:   20 * time.Millisecond,
+		RunUpdatesWithNotifications: func(context.Context, filters.Filter, updateParams.Params) *metrics.Metric {
+			<-release
+
+			return &metrics.Metric{}
+		},
+		FilterByImage:  func(_ []string, f filters.Filter) filters.Filter { return f },
+		DefaultMetrics: func() *metrics.Metrics { return testMetrics },
+		UpdateLock:     lock,
+	}
+
+	registerUpdateRoute(t.Context(), app, auth, opts)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/update", nil)
+	req.Header.Set("Authorization", "Bearer test")
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }

@@ -42,19 +42,23 @@ Create a template file named `custom-template.txt` with your desired template co
                 WATCHTOWER_NOTIFICATION_TEMPLATE_FILE: "/custom-template.txt"
             volumes:
                 - /var/run/docker.sock:/var/run/docker.sock
-                - /path/to/custom-template.txt:/custom-template.txt
+                - TEMPLATE_FILE:/custom-template.txt
     ```
+
+    Replace *`TEMPLATE_FILE`* with the path of the template file on the Docker host. A relative path starts with `./` and is read from the Compose project directory, which is the directory of the first Compose file unless you set `--project-directory`.
 
 === "Docker CLI (Env Vars)"
 
     ```bash
     docker run -d \
-    --name watchtower \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /path/to/custom-template.txt:/custom-template.txt \
-    -e WATCHTOWER_NOTIFICATION_TEMPLATE_FILE="/custom-template.txt" \
-    nickfedor/watchtower:latest
+      --name watchtower \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "TEMPLATE_FILE:/custom-template.txt" \
+      -e WATCHTOWER_NOTIFICATION_TEMPLATE_FILE="/custom-template.txt" \
+      nickfedor/watchtower:latest
     ```
+
+    Replace *`TEMPLATE_FILE`* with the absolute path of the template file on the Docker host.
 
 ### Notification Report
 
@@ -67,13 +71,13 @@ Environment Variable: WATCHTOWER_NOTIFICATION_REPORT
              Default: false
 ```
 
-The template is a [Go template](https://golang.org/pkg/text/template/){target="_blank" rel="noopener noreferrer"} that processes either a list of log entries (`Message`, `Data`, `Level`, `Time`) captured from [zerolog](https://pkg.go.dev/github.com/rs/zerolog){target="_blank" rel="noopener noreferrer"} events or a `notifications.Data` struct, depending on the [`notification-report`](#notification_report) configuration option.
+The template is a [Go template](https://golang.org/pkg/text/template/){target="_blank" rel="noopener noreferrer"} that processes either a list of log entries (`Message`, `Data`, `Level`, `Time`) captured from [zerolog](https://pkg.go.dev/github.com/rs/zerolog){target="_blank" rel="noopener noreferrer"} events or a `format.Data` struct, depending on the [`notification-report`](#notification_report) configuration option.
 
 ## Simple Templates
 
 Simple templates are used when the [`notification-report`](#notification_report) configuration option is not set, formatting individual log entries as they occur.
 
-```go title="Default Simple Template"
+```text title="Default Simple Template"
 {{- range $i, $e := . -}}
 {{- if $i}}{{- println -}}{{- end -}}
 {{- $msg := $e.Message -}}
@@ -87,8 +91,6 @@ Simple templates are used when the [`notification-report`](#notification_report)
     Removed stale image: {{with $e.Data.image_id}}{{.}}{{else}}unknown{{end}}
 {{- else if eq $msg "Failed to list containers for image usage check, skipping removal" -}}
     Skipped image cleanup: {{with $e.Data.image_name}}{{.}}{{else}}unknown{{end}} ({{with $e.Data.image_id}}{{.}}{{else}}unknown{{end}}){{with $e.Data.error}}: {{.}}{{end}}
-{{- else if eq $msg "Detected multiple Watchtower instances - initiating cleanup" -}}
-    Detected {{$e.Data.count}} Watchtower instances - initiating cleanup
 {{- else if eq $msg "Docker image usage exceeds configured maximum" -}}
     Docker image usage exceeds configured maximum: {{if HasKey $e.Data "usage"}}{{FormatDiskSpace (index $e.Data "usage")}}{{else}}unknown{{end}} of {{if HasKey $e.Data "max"}}{{FormatDiskSpace (index $e.Data "max")}}{{else}}unknown{{end}} used ({{if HasKey $e.Data "reclaimable"}}{{FormatDiskSpace (index $e.Data "reclaimable")}}{{else}}unknown{{end}} reclaimable, {{if HasKey $e.Data "image_count"}}{{index $e.Data "image_count"}}{{else}}unknown{{end}} images)
 {{- else if eq $msg "Docker image usage exceeds configured warning threshold" -}}
@@ -113,12 +115,12 @@ Simple templates are used when the [`notification-report`](#notification_report)
 The [Template Preview Tool](../template-preview/index.md) uses the same template root as Watchtower:
 
 - Report toggle off (legacy mode): the root is the log entry slice. Range over `.`, the same as the default simple template above.
-- Report toggle on (report mode): the root is a `notifications.Data` value. Range over `.Entries` (and use `.Report` for session results).
+- Report toggle on (report mode): the root is a `format.Data` value. Range over `.Entries` (and use `.Report` for session results).
 
 !!! Note
     The example below is for report mode. With the report toggle off, use `range .` instead of `range .Entries`.
 
-```go title="Preview example (report mode)"
+```text title="Preview example (report mode)"
 {{- range $i, $e := .Entries -}}
 {{- if $i}}{{- println -}}{{- end -}}
 {{- $msg := $e.Message -}}
@@ -132,8 +134,6 @@ The [Template Preview Tool](../template-preview/index.md) uses the same template
     Removed stale image: {{with $e.Data.image_id}}{{.}}{{else}}unknown{{end}}
 {{- else if eq $msg "Failed to list containers for image usage check, skipping removal" -}}
     Skipped image cleanup: {{with $e.Data.image_name}}{{.}}{{else}}unknown{{end}} ({{with $e.Data.image_id}}{{.}}{{else}}unknown{{end}}){{with $e.Data.error}}: {{.}}{{end}}
-{{- else if eq $msg "Detected multiple Watchtower instances - initiating cleanup" -}}
-    Detected {{$e.Data.count}} Watchtower instances - initiating cleanup
 {{- else if eq $msg "Docker image usage exceeds configured maximum" -}}
     Docker image usage exceeds configured maximum: {{if HasKey $e.Data "usage"}}{{FormatDiskSpace (index $e.Data "usage")}}{{else}}unknown{{end}} of {{if HasKey $e.Data "max"}}{{FormatDiskSpace (index $e.Data "max")}}{{else}}unknown{{end}} used ({{if HasKey $e.Data "reclaimable"}}{{FormatDiskSpace (index $e.Data "reclaimable")}}{{else}}unknown{{end}} reclaimable, {{if HasKey $e.Data "image_count"}}{{index $e.Data "image_count"}}{{else}}unknown{{end}} images)
 {{- else if eq $msg "Docker image usage exceeds configured warning threshold" -}}
@@ -158,13 +158,13 @@ Found new image: repo/image:latest (abcdef123456)
 
 ## Report Templates
 
-When the [`notification-report`](#notification_report) configuration option is set, the template processes a `notifications.Data` struct containing a session report and log entries.
+When the [`notification-report`](#notification_report) configuration option is set, the template processes a `format.Data` struct containing a session report and log entries.
 
-```go title="Default Report Template"
+```text title="Example Report Template"
 {{- if .Report -}}
   {{- with .Report -}}
     {{len .Scanned}} Scanned, {{len .Updated}} Updated, {{len .Restarted}} Restarted, {{len .Failed}} Failed
-    {{- if ( or .Updated .Restarted .Failed ) -}}
+    {{- if ( or .Updated .Restarted .Failed .Skipped ) -}}
       {{- range .Updated}}
 - {{.Name}} ({{.ImageName}}): {{.CurrentImageID.ShortID}} updated to {{.LatestImageID.ShortID}}{{with .GitRef}} ref {{.}}{{end}}{{with .Changelog}} {{.}}{{end}}
       {{- end -}}
@@ -182,15 +182,22 @@ When the [`notification-report`](#notification_report) configuration option is s
       {{- end -}}
     {{- end -}}
   {{- end -}}
-{{- if .Entries -}}
-
-Logs:
 {{- end -}}
-{{range .Entries -}}{{.Time.Format "2006-01-02T15:04:05Z07:00"}} [{{.Level}}] {{.Message}}{{"\n"}}{{- end -}}
+{{- if .Entries -}}
+  {{- if .Report }}
+
+{{ end -}}
+Logs:
+  {{- range .Entries }}
+{{ .Time.Format "2006-01-02T15:04:05Z07:00" }} [{{ .Level }}] {{ .Message }}
+  {{- end -}}
 {{- end -}}
 ```
 
-- This template generates a summary of container statuses (scanned, updated, failed, etc.) followed by logs, used for notifications like email or Slack messages.
+- This example generates a summary of container statuses followed by logs, for notifications such as email or Slack messages.
+- Some notifications carry no report. Their `.Report` is nil. Examples are a check request's messages and the messages that none of a split session's container notifications carries. A report template shows them only if it lists `.Entries`, as this example does.
+- When the [`notification-split-by-container`](../general-settings/index.md#split_by_container) configuration option is enabled, `.Report.Focus` is the container the notification is about. It is nil for the report of a whole session, as in the [template preview](../template-preview/index.md). Read it inside `{{ with .Report }}`, because `.Report.Focus` fails the template when `.Report` is nil.
+- The built-in `default` report template lists each container by its status instead of the logs. A container with a newer image that Watchtower did not apply is listed as `Stale`. Examples are a monitor-only container and a skipped Watchtower self-update.
 
 ### Example Usage
 <!-- markdownlint-disable -->
@@ -205,37 +212,49 @@ Logs:
             environment:
                 WATCHTOWER_NOTIFICATION_REPORT: "true"
                 WATCHTOWER_NOTIFICATION_URL: >
-                    discord://token@channel
-                    slack://watchtower@token-a/token-b/token-c
+                    discord://DISCORD_WEBHOOK_TOKEN@DISCORD_WEBHOOK_ID
+                    slack://hook:SLACK_WORKSPACE_ID-SLACK_WEBHOOK_ID-SLACK_WEBHOOK_TOKEN@webhook?botname=watchtower
                 WATCHTOWER_NOTIFICATION_TEMPLATE: |
                     {{- if .Report -}}
-                    {{- with .Report -}}
-                    {{len .Scanned}} Scanned, {{len .Updated}} Updated, {{len .Restarted}} Restarted, {{len .Failed}} Failed
-                    {{- if ( or .Updated .Restarted .Failed ) -}}
-                        {{- range .Updated -}}
+                      {{- with .Report -}}
+                        {{len .Scanned}} Scanned, {{len .Updated}} Updated, {{len .Restarted}} Restarted, {{len .Failed}} Failed
+                        {{- if ( or .Updated .Restarted .Failed .Skipped ) -}}
+                          {{- range .Updated}}
                     - {{.Name}} ({{.ImageName}}): {{.CurrentImageID.ShortID}} updated to {{.LatestImageID.ShortID}}{{with .GitRef}} ref {{.}}{{end}}{{with .Changelog}} {{.}}{{end}}
-                        {{- end -}}
-                        {{- range .Fresh -}}
+                          {{- end -}}
+                          {{- range .Fresh}}
                     - {{.Name}} ({{.ImageName}}): {{.State}}
-                        {{- end -}}
-                        {{- range .Restarted -}}
+                          {{- end -}}
+                          {{- range .Restarted}}
                     - {{.Name}} ({{.ImageName}}): {{.State}}
-                        {{- end -}}
-                        {{- range .Skipped -}}
+                          {{- end -}}
+                          {{- range .Skipped}}
                     - {{.Name}} ({{.ImageName}}): {{.State}}: {{.Error}}
-                        {{- end -}}
-                        {{- range .Failed -}}
+                          {{- end -}}
+                          {{- range .Failed}}
                     - {{.Name}} ({{.ImageName}}): {{.State}}: {{.Error}}
+                          {{- end -}}
                         {{- end -}}
-                    {{- end -}}
+                      {{- end -}}
                     {{- end -}}
                     {{- if .Entries -}}
+                      {{- if .Report }}
 
+                    {{ end -}}
                     Logs:
-                    {{- end -}}
-                    {{- range .Entries -}}{{.Time.Format "2006-01-02T15:04:05Z07:00"}} [{{.Level}}] {{.Message}}{{"\n"}}{{- end -}}
+                      {{- range .Entries }}
+                    {{ .Time.Format "2006-01-02T15:04:05Z07:00" }} [{{ .Level }}] {{ .Message }}
+                      {{- end -}}
                     {{- end -}}
     ```
+
+    Replace the following:
+
+    - *`DISCORD_WEBHOOK_TOKEN`*: the token of your Discord webhook
+    - *`DISCORD_WEBHOOK_ID`*: the ID of your Discord webhook
+    - *`SLACK_WORKSPACE_ID`*: the workspace ID of your Slack webhook URL, which starts with `T`
+    - *`SLACK_WEBHOOK_ID`*: the webhook ID of your Slack webhook URL, which starts with `B`
+    - *`SLACK_WEBHOOK_TOKEN`*: the webhook token of your Slack webhook URL
 
 === "Docker CLI"
 
@@ -244,45 +263,55 @@ Logs:
       --name watchtower \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -e WATCHTOWER_NOTIFICATION_REPORT="true" \
+      -e WATCHTOWER_NOTIFICATION_URL="discord://DISCORD_WEBHOOK_TOKEN@DISCORD_WEBHOOK_ID" \
       -e WATCHTOWER_NOTIFICATION_TEMPLATE="\
     {{- if .Report -}}
       {{- with .Report -}}
-    {{len .Scanned}} Scanned, {{len .Updated}} Updated, {{len .Restarted}} Restarted, {{len .Failed}} Failed
-    {{- if ( or .Updated .Restarted .Failed ) -}}
-          {{- range .Updated -}}
+        {{len .Scanned}} Scanned, {{len .Updated}} Updated, {{len .Restarted}} Restarted, {{len .Failed}} Failed
+        {{- if ( or .Updated .Restarted .Failed .Skipped ) -}}
+          {{- range .Updated}}
     - {{.Name}} ({{.ImageName}}): {{.CurrentImageID.ShortID}} updated to {{.LatestImageID.ShortID}}{{with .GitRef}} ref {{.}}{{end}}{{with .Changelog}} {{.}}{{end}}
           {{- end -}}
-          {{- range .Fresh -}}
+          {{- range .Fresh}}
     - {{.Name}} ({{.ImageName}}): {{.State}}
           {{- end -}}
-          {{- range .Restarted -}}
+          {{- range .Restarted}}
     - {{.Name}} ({{.ImageName}}): {{.State}}
           {{- end -}}
-          {{- range .Skipped -}}
+          {{- range .Skipped}}
     - {{.Name}} ({{.ImageName}}): {{.State}}: {{.Error}}
           {{- end -}}
-          {{- range .Failed -}}
+          {{- range .Failed}}
     - {{.Name}} ({{.ImageName}}): {{.State}}: {{.Error}}
           {{- end -}}
-    {{- end -}}
+        {{- end -}}
       {{- end -}}
-    {{- if .Entries -}}
-
-    Logs:
     {{- end -}}
-    {{- range .Entries -}}{{.Time.Format \"2006-01-02T15:04:05Z07:00\"}} [{{.Level}}] {{.Message}}{{\"\n\"}}{{- end -}}
+    {{- if .Entries -}}
+      {{- if .Report }}
+
+    {{ end -}}
+    Logs:
+      {{- range .Entries }}
+    {{ .Time.Format \"2006-01-02T15:04:05Z07:00\" }} [{{ .Level }}] {{ .Message }}
+      {{- end -}}
     {{- end -}}
     " \
-      watchtower-image
+      nickfedor/watchtower:latest
     ```
+
+    Replace the following:
+
+    - *`DISCORD_WEBHOOK_TOKEN`*: the token of your Discord webhook
+    - *`DISCORD_WEBHOOK_ID`*: the ID of your Discord webhook
 
 <!-- markdownlint-restore -->
 Example output for a session with one updated container, one restarted container, and one error log:
 
 ```text
 5 Scanned, 1 Updated, 1 Restarted, 0 Failed
-- /container (repo/image:latest): abcdef12 updated to 34567890
-- /restarted-container (repo/image:latest): Restarted
+- container (repo/image:latest): abcdef123456 updated to 34567890abcd
+- restarted-container (repo/image:latest): Restarted
 
 Logs:
 2025-08-20T06:00:13-07:00 [error] Operation failed. Try again later.
@@ -290,7 +319,6 @@ Logs:
 
 ## Git and OCI report fields
 
-Default templates are unchanged.
 Custom report templates can use these fields on each container.
 They are populated even when Git monitoring is off.
 
@@ -316,23 +344,28 @@ Use `.CurrentImageVersion` or `.LatestImageVersion` instead.
 
 Because the two versions are separate fields, a template can print the transition:
 
-```go
-{{ range .Report.Updated }}{{ .Name }}: {{ .CurrentImageVersion }} → {{ .LatestImageVersion }}
-{{- with .Changelog }}
+```text
+{{- with .Report -}}
+  {{- range $i, $c := .Updated -}}
+    {{- if $i }}
+{{ end -}}
+    {{ $c.Name }}: {{ $c.CurrentImageVersion }} → {{ $c.LatestImageVersion }}
+    {{- with $c.Changelog }}
 {{ . }}
-{{- end }}
-{{ end }}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
 ```
 
 ```text
-/app: 1.2.2 → 1.2.3
+app: 1.2.2 → 1.2.3
 https://github.com/org/app/releases/tag/v1.2.3
 ```
 
-The built-in `default` report template is unchanged and still prints image IDs, the ref, and the changelog on an updated container when they are set:
+The built-in `default` report template prints image IDs, the ref, and the changelog on an updated container when they are set:
 
 ```text
-- /app (myapp:latest): abcdef12 updated to 34567890 ref v1.2.4 https://github.com/org/app/releases
+- app (myapp:latest): abcdef123456 updated to 34567890abcd ref v1.2.4 https://github.com/org/app/releases
 ```
 
 ### Changelog resolution
@@ -384,7 +417,6 @@ Results are cached per session, so sibling containers on the same image only pay
 When the option is enabled and a URL resolves, the `default-legacy` notification gains one line per updated container:
 
 ```text
-Updated container: /app (org/app:latest): abcdef12 updated to 34567890
 Changelog: https://github.com/org/app/releases/tag/v1.2.3
 ```
 
@@ -396,25 +428,71 @@ With [notification report](../../configuration/notifications/index.md#notificati
 
 | Message                                                                      | What the notification says                            |
 |:-----------------------------------------------------------------------------|:------------------------------------------------------|
-| `Found new Git revision`                                                     | `Found new Git revision: <host/path>@<tag or branch> (<12-char sha>)` |
-| `Built image from Git URL context`                                           | `Built image: <name:git-shortsha> (<short image id>)` |
-| `Built Compose project`                                                      | `Built Compose project: <project> (<services>)`, only when containers are not restarted |
+| `Found new Git revision`                                                     | `Found new Git revision: REVISION (SHORT_COMMIT)` |
+| `Built image from Git URL context`                                           | `Built image: IMAGE (IMAGE_ID)` |
+| `Built Compose project`                                                      | `Built Compose project: PROJECT (SERVICES)`, only when containers are not restarted |
 | `Git build failed. Leaving running container untouched`                      | Container and the error. The running container was left in place. |
 | `Compose apply failed. Docker Compose may have partially recreated services` | Container and a short failure line. |
-| `Compose project directory is not readable. Leaving the running container untouched` | `Skipped <container>: compose directory is not readable` |
-| `Skipped container with an invalid git semver policy`                        | `Skipped <container>: invalid git semver policy` |
-| `Skipped container with an invalid git-host`                                 | `Skipped <container>: invalid git-host` |
+| `Compose project directory is not readable. Leaving the running container untouched` | `Skipped CONTAINER: compose directory is not readable` |
+| `Skipped container with an invalid git semver policy`                        | `Skipped CONTAINER: invalid git semver policy` |
+| `Skipped container with an invalid git-host`                                 | `Skipped CONTAINER: invalid git-host` |
+
+These lines include the following values:
+
+- *`REVISION`*: the repository path and the tag or branch, such as `github.com/org/app@v1.2.3`
+- *`SHORT_COMMIT`*: the first 12 characters of the commit
+- *`IMAGE`*: the built image, such as `app:git-0123456789ab`
+- *`IMAGE_ID`*: the short ID of the built image
+- *`PROJECT`*: the Compose project
+- *`SERVICES`*: the Compose services that were built, separated by commas
+- *`CONTAINER`*: the container name
 
 The log fields are `container`, `image`, `repo`, `ref`, `commit`, `changelog`, `project`, `dir`, and `error`. A custom simple template reads them from `.Data`:
 
-```go
-{{ range . }}{{ if eq .Message "Built image from Git URL context" }}
-{{ .Data.container }} {{ .Data.commit }} {{ .Data.changelog }}
-{{ end }}{{ end }}
+```text
+{{- $sep := "" -}}
+{{- range . -}}
+  {{- if eq .Message "Built image from Git URL context" -}}
+    {{- $sep }}{{ .Data.container }} {{ .Data.commit }} {{ .Data.changelog }}
+    {{- $sep = "\n" -}}
+  {{- end -}}
+{{- end -}}
 ```
 
 The `json` notification report emits the same values under camelCase keys: `gitRepo`, `gitRef`, `changelog`, `ociSource`, `imageUrl`, `documentation`, `currentImageVersion`, `latestImageVersion`, `currentImageRevision`, and `latestImageRevision`.
 Porcelain JSON and `/v1/check` use snake_case instead: `git_repo`, `git_ref`, `changelog`, `oci_source`, `image_url`, `documentation`, `current_image_version`, `latest_image_version`, `current_revision`, and `latest_revision`.
+
+## Cooldown report fields
+
+A container that an [image cooldown](../../advanced-features/image-cooldown/index.md) holds back is listed under `.Report.Skipped`.
+Report templates can read the cooldown on it with these fields.
+They are empty, or the zero time, on a container that no cooldown holds back.
+
+| Field                 | Meaning                                                                                       |
+|:----------------------|:----------------------------------------------------------------------------------------------|
+| `.CooldownDelay`      | The configured cooldown, such as `1 day`                                                      |
+| `.CooldownAge`        | Age of the newer image, such as `18 hours`. Empty when its age is unavailable.                |
+| `.CooldownRemaining`  | Time until the image is old enough, such as `6 hours`. Empty when its age is unavailable.     |
+| `.CooldownEligibleAt` | Time the image is old enough, as a Go `time.Time`. The zero time when its age is unavailable. |
+
+```text
+{{- with .Report -}}
+  {{- $sep := "" -}}
+  {{- range .Skipped -}}
+    {{- if .CooldownDelay -}}
+      {{- $sep }}{{ .Name }}: cooldown {{ .CooldownDelay }}
+      {{- with .CooldownRemaining }}, eligible in {{ . }}{{ end -}}
+      {{- $sep = "\n" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+```
+
+```text
+app: cooldown 1 day, eligible in 6 hours
+```
+
+In the [template preview](../template-preview/index.md), the first skipped container is held back by a cooldown and carries these fields.
 
 ## Customizing Templates
 
@@ -428,4 +506,4 @@ Use the [Template Preview Tool](../template-preview/index.md) to test your templ
 ## Additional Resources
 
 - For detailed template syntax, refer to the [Go Template documentation](https://golang.org/pkg/text/template/){target="_blank" rel="noopener noreferrer"}.
-- For log entry fields, each entry exposes `Message`, `Data` (map of structured fields), `Level`, and `Time` (see `pkg/notifications` notification entries and [zerolog](https://pkg.go.dev/github.com/rs/zerolog){target="_blank" rel="noopener noreferrer"}).
+- For log entry fields, each entry exposes `Message`, `Data` (map of structured fields), `Level`, and `Time` (see the `Entry` type in `internal/observability/notify/format` and [zerolog](https://pkg.go.dev/github.com/rs/zerolog){target="_blank" rel="noopener noreferrer"}).

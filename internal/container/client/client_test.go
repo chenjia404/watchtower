@@ -1,0 +1,2605 @@
+package client
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"syscall"
+	"testing"
+	"testing/fstest"
+	"testing/synctest"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
+	cerrdefs "github.com/containerd/errdefs"
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
+	dockerContainer "github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	dockerSystem "github.com/moby/moby/api/types/system"
+	dockerClient "github.com/moby/moby/client"
+
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	containerImage "github.com/nicholas-fedor/watchtower/internal/container/image"
+	mockContainer "github.com/nicholas-fedor/watchtower/internal/container/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
+	"github.com/nicholas-fedor/watchtower/internal/registry/ratelimit"
+	registryConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/registry"
+	updateConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/update"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/containerfixture"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/httpstub"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/logcapture"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/modelfixture"
+)
+
+// mockContainerID is the ID of a container built by modelfixture.Container.
+const mockContainerID = "container_id"
+
+// execCase configures the mocked Docker calls of one ExecuteCommand run.
+type execCase struct {
+	// createErr fails the exec create.
+	createErr error
+	// attachErr fails the attach that starts the exec.
+	attachErr error
+	// inspectErr fails the exec inspect.
+	inspectErr error
+	// containerID is the container the command runs in.
+	containerID string
+	// execID is the ID of the created exec instance.
+	execID string
+	// cmd is the command to run.
+	cmd string
+	// user is the exec user the command is expected to run as.
+	user string
+	// output is what the command writes before it exits.
+	output string
+	// exitCode is the exit code the exec reports.
+	exitCode int
+}
+
+// startingDaemon is an [http.RoundTripper] for a Docker daemon that starts
+// serving its API at ready. Before then, a request fails with notReadyErr or
+// gets notReadyStatus when either is set. Otherwise it waits on its context,
+// as on a daemon that is restoring its containers. It is answered at ready if
+// its context is still live.
+type startingDaemon struct {
+	// ready is when the daemon starts serving its API.
+	ready time.Time
+	// notReadyErr is the error of every request before ready. Nil makes those
+	// requests wait instead.
+	notReadyErr error
+	// notReadyStatus answers every request before ready with this status
+	// code instead, as a socket proxy does while the daemon is down.
+	notReadyStatus int
+	// transportErr makes every request fail with it, as a client setting that
+	// can never connect does.
+	transportErr error
+	// status is the status code of every answer once ready. Zero means 200.
+	status int
+	// requests counts the requests the daemon received.
+	requests int
+}
+
+// expectExec expects the Docker calls of an ExecuteCommand run, stopping after a configured failure.
+//
+// The calls are, in order:
+//   - GetContainer's inspects of the container and its image
+//   - the exec create
+//   - the attach that starts the exec and streams its output
+//   - the exec inspect
+//
+// Any other exec call fails the test.
+//
+// Parameters:
+//   - t: Test the attach connection belongs to.
+//   - api: Mocked Docker API.
+//   - tc: The run to expect.
+func expectExec(t *testing.T, api *mockContainer.MockAPIClient, tc execCase) {
+	t.Helper()
+
+	const imageName = "test-image:latest"
+
+	api.EXPECT().ContainerInspect(mock.Anything, tc.containerID, dockerClient.ContainerInspectOptions{}).
+		Return(dockerClient.ContainerInspectResult{Container: dockerContainer.InspectResponse{
+			ID:         tc.containerID,
+			Name:       "/test-container",
+			Image:      imageName,
+			State:      &dockerContainer.State{Status: "running"},
+			HostConfig: &dockerContainer.HostConfig{},
+			Config: &dockerContainer.Config{
+				Image:  imageName,
+				Labels: map[string]string{},
+			},
+		}}, nil).Once()
+	api.EXPECT().ImageInspect(mock.Anything, imageName).
+		Return(dockerClient.ImageInspectResult{ID: "test-image-id"}, nil).Once()
+
+	metadata := fmt.Sprintf(
+		`WT_CONTAINER={"name":"test-container","id":"%s","image_name":"%s","stop_signal":"SIGTERM","labels":{}}`,
+		tc.containerID, imageName,
+	)
+
+	api.EXPECT().ExecCreate(mock.Anything, tc.containerID, dockerClient.ExecCreateOptions{
+		User:         tc.user,
+		TTY:          true,
+		Cmd:          []string{"sh", "-c", tc.cmd},
+		Env:          []string{metadata},
+		AttachStdout: true,
+		AttachStderr: true,
+	}).Return(dockerClient.ExecCreateResult{ID: tc.execID}, tc.createErr).Once()
+
+	if tc.createErr != nil {
+		return
+	}
+
+	attached := dockerClient.ExecAttachResult{}
+	if tc.attachErr == nil {
+		attached = newExecOutput(t, func(conn net.Conn) { _, _ = io.WriteString(conn, tc.output) })
+	}
+
+	api.EXPECT().ExecAttach(mock.Anything, tc.execID, dockerClient.ExecAttachOptions{TTY: true}).
+		Return(attached, tc.attachErr).Once()
+
+	if tc.attachErr != nil {
+		return
+	}
+
+	api.EXPECT().ExecInspect(mock.Anything, tc.execID, dockerClient.ExecInspectOptions{}).
+		Return(dockerClient.ExecInspectResult{ID: tc.execID, ContainerID: tc.containerID, ExitCode: tc.exitCode}, tc.inspectErr).Once()
+}
+
+// expectHealth expects one inspect of the mock container reporting the given
+// health status. An empty status reports a container without a health check.
+//
+// Parameters:
+//   - api: Mocked Docker API.
+//   - status: Health status the inspect reports.
+func expectHealth(api *mockContainer.MockAPIClient, status dockerContainer.HealthStatus) {
+	var health *dockerContainer.Health
+	if status != "" {
+		health = &dockerContainer.Health{Status: status}
+	}
+
+	expectHealthcheck(api, health, nil)
+}
+
+// expectHealthcheck expects one inspect of the mock container reporting the
+// given health object and health check configuration.
+//
+// Parameters:
+//   - api: Mocked Docker API.
+//   - health: Health object the inspect reports, or nil for none.
+//   - healthcheck: Health check configuration the inspect reports, or nil for none.
+func expectHealthcheck(
+	api *mockContainer.MockAPIClient,
+	health *dockerContainer.Health,
+	healthcheck *dockerContainer.HealthConfig,
+) {
+	api.EXPECT().ContainerInspect(mock.Anything, mockContainerID, dockerClient.ContainerInspectOptions{}).
+		Return(dockerClient.ContainerInspectResult{Container: dockerContainer.InspectResponse{
+			ID:     mockContainerID,
+			State:  &dockerContainer.State{Status: "running", Health: health},
+			Config: &dockerContainer.Config{Healthcheck: healthcheck},
+		}}, nil).Once()
+}
+
+// newExecOutput returns an exec attach result whose connection streams the
+// output written by write, and closes when the client closes the result.
+//
+// Parameters:
+//   - t: Test the connection belongs to.
+//   - write: Writes the command output, nil for a command that never writes.
+//
+// Returns:
+//   - dockerClient.ExecAttachResult: Result with the client end of the connection.
+func newExecOutput(t *testing.T, write func(conn net.Conn)) dockerClient.ExecAttachResult {
+	t.Helper()
+
+	client, server := net.Pipe()
+
+	t.Cleanup(func() { _ = server.Close() })
+
+	if write != nil {
+		go func() {
+			defer server.Close()
+
+			write(server)
+		}()
+	}
+
+	return dockerClient.ExecAttachResult{HijackedResponse: dockerClient.NewHijackedResponse(client, "")}
+}
+
+// newTLSStubClient returns a Docker client for a TLS stub server that answers
+// the API version ping.
+//
+// Parameters:
+//   - t: Test the server belongs to.
+//
+// Returns:
+//   - *httpstub.Server: Server the client talks to.
+//   - *dockerClient.Client: Client using the server's TLS configuration.
+func newTLSStubClient(t *testing.T) (*httpstub.Server, *dockerClient.Client) {
+	t.Helper()
+
+	server := httpstub.NewTLS(t)
+	server.RouteToHandler(http.MethodHead, httpstub.Path("/_ping"), httpstub.RespondWith(http.StatusOK, "", nil))
+
+	api, err := dockerClient.New(
+		dockerClient.WithHost(server.URL()),
+		dockerClient.WithHTTPClient(server.Client()),
+	)
+	require.NoError(t, err)
+
+	return server, api
+}
+
+// writeDockerCerts writes the ca.pem, cert.pem, and key.pem files the Docker
+// SDK reads from DOCKER_CERT_PATH. The CA is the stub server's certificate, so
+// the client trusts the server, and the client certificate is self-signed.
+//
+// Parameters:
+//   - t: Test the files belong to.
+//   - server: TLS stub server the client connects to.
+//
+// Returns:
+//   - string: Directory to set DOCKER_CERT_PATH to.
+func writeDockerCerts(t *testing.T, server *httpstub.Server) string {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "watchtower-test-client"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	files := map[string]*pem.Block{
+		"ca.pem":   {Type: "CERTIFICATE", Bytes: server.TestServer().Certificate().Raw},
+		"cert.pem": {Type: "CERTIFICATE", Bytes: certDER},
+		"key.pem":  {Type: "EC PRIVATE KEY", Bytes: keyDER},
+	}
+
+	for name, block := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), pem.EncodeToMemory(block), 0o600))
+	}
+
+	return dir
+}
+
+// respondToPing answers a ping with status, reporting apiVersion as the
+// daemon's API version.
+//
+// Parameters:
+//   - t: Test the handler belongs to.
+//   - method: Ping method, HEAD or GET.
+//   - status: Status to answer with.
+//   - apiVersion: API version the daemon reports, empty for none.
+//
+// Returns:
+//   - http.HandlerFunc: Handler verifying and answering the ping.
+func respondToPing(t *testing.T, method string, status int, apiVersion string) http.HandlerFunc {
+	t.Helper()
+
+	header := http.Header{}
+	if apiVersion != "" {
+		header.Set("Api-Version", apiVersion)
+	}
+
+	return httpstub.CombineHandlers(
+		httpstub.VerifyRequest(t, method, httpstub.Path("/_ping")),
+		httpstub.RespondWith(status, "", header),
+	)
+}
+
+// useDockerTLS points the Docker environment variables at a TLS connection to
+// server, with certificates the client trusts.
+//
+// Parameters:
+//   - t: Test whose environment is changed.
+//   - server: Server the client connects to.
+//   - certServer: TLS server whose certificate the client trusts.
+func useDockerTLS(t *testing.T, server, certServer *httpstub.Server) {
+	t.Helper()
+
+	t.Setenv("DOCKER_HOST", "tcp://"+server.Addr())
+	t.Setenv("DOCKER_TLS_VERIFY", "1")
+	t.Setenv("DOCKER_CERT_PATH", writeDockerCerts(t, certServer))
+	t.Setenv("DOCKER_API_VERSION", "")
+}
+
+// TestClient verifies the Docker client's container lifecycle, listing,
+// health, runtime detection, exec, and system calls against a mocked Docker
+// API.
+func TestClient(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removing a running container", func(t *testing.T) {
+		t.Parallel()
+
+		// running returns a running container.
+		running := func() *container.Container {
+			return modelfixture.Container(containerfixture.WithContainerState(dockerContainer.State{Running: true}))
+		}
+
+		t.Run("the container still exists after stopping", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should attempt to remove the container", func(t *testing.T) {
+				t.Parallel()
+
+				log, logOutput := logcapture.New(zerolog.DebugLevel)
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, nil)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, nil).Once()
+
+				err := (&Client{log: log, api: api}).StopAndRemoveContainer(t.Context(), running(), time.Second)
+				require.NoError(t, err)
+				assert.Contains(t, logOutput.String(), "Container removed successfully")
+			})
+		})
+
+		t.Run("the container does not exist after stopping", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should not cause an error", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, nil)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, notFoundError("No such container: "+mockContainerID)).Once()
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopAndRemoveContainer(t.Context(), running(), time.Second)
+				require.NoError(t, err)
+			})
+		})
+
+		t.Run("stopping fails with an unexpected error", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return an error", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, daemonError("server error"))
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopContainer(t.Context(), running(), time.Second)
+				require.ErrorContains(t, err, "failed to stop container: Error response from daemon: server error")
+			})
+		})
+
+		t.Run("stopping fails with an unexpected error in StopAndRemoveContainer", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return an error without attempting removal", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, daemonError("stop error"))
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopAndRemoveContainer(t.Context(), running(), time.Second)
+				require.ErrorContains(t, err, "failed to stop container: Error response from daemon: stop error")
+			})
+		})
+
+		t.Run("removal fails with an unexpected error", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return an error", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, nil)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, daemonError("server error")).Once()
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopAndRemoveContainer(t.Context(), running(), time.Second)
+				require.ErrorContains(t, err, "failed to remove container: Error response from daemon: server error")
+			})
+		})
+
+		t.Run("removing a stopped container", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should only call remove, not stop", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, nil).Once()
+
+				stopped := modelfixture.Container(containerfixture.WithContainerState(dockerContainer.State{Running: false}))
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopAndRemoveContainer(t.Context(), stopped, time.Second)
+				require.NoError(t, err)
+			})
+		})
+
+		t.Run("stopping a container with AutoRemove enabled", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should skip removal after stopping a running container", func(t *testing.T) {
+				t.Parallel()
+
+				// Docker removes an AutoRemove container after it stops, so
+				// only the stop is expected.
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, nil)
+
+				source := modelfixture.Container(
+					containerfixture.WithContainerState(dockerContainer.State{Running: true}),
+					containerfixture.WithAutoRemove(true),
+				)
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopAndRemoveContainer(t.Context(), source, time.Second)
+				require.NoError(t, err)
+			})
+
+			t.Run("should remove a non-running AutoRemove container explicitly", func(t *testing.T) {
+				t.Parallel()
+
+				// AutoRemove does not apply to a container that never started.
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, nil).Once()
+
+				source := modelfixture.Container(
+					containerfixture.WithContainerState(dockerContainer.State{Running: false, Status: "created"}),
+					containerfixture.WithAutoRemove(true),
+				)
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopAndRemoveContainer(t.Context(), source, time.Second)
+				require.NoError(t, err)
+			})
+		})
+	})
+
+	t.Run("stopping a container", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("the container is running", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should stop the container successfully", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectStop(api, mockContainerID, 1, nil)
+
+				source := modelfixture.Container(containerfixture.WithContainerState(dockerContainer.State{Running: true}))
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopContainer(t.Context(), source, time.Second)
+				require.NoError(t, err)
+			})
+		})
+
+		t.Run("the container is already stopped", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should not attempt to stop and return no error", func(t *testing.T) {
+				t.Parallel()
+
+				// The mock has no expectations, so any Docker call fails the test.
+				api := mockContainer.NewMockAPIClient(t)
+				source := modelfixture.Container(containerfixture.WithContainerState(dockerContainer.State{Running: false}))
+
+				err := (&Client{log: newTestLogger(t), api: api}).StopContainer(t.Context(), source, time.Second)
+				require.NoError(t, err)
+			})
+		})
+	})
+
+	t.Run("removing a container", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("the container exists", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should remove the container successfully", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, nil).Once()
+
+				err := (&Client{log: newTestLogger(t), api: api}).RemoveContainer(t.Context(), modelfixture.Container())
+				require.NoError(t, err)
+			})
+		})
+
+		t.Run("the container does not exist", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should not return an error", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, notFoundError("No such container: "+mockContainerID)).Once()
+
+				err := (&Client{log: newTestLogger(t), api: api}).RemoveContainer(t.Context(), modelfixture.Container())
+				require.NoError(t, err)
+			})
+		})
+
+		t.Run("removal fails with an unexpected error", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return an error", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerRemove(mock.Anything, mockContainerID, dockerClient.ContainerRemoveOptions{Force: true}).
+					Return(dockerClient.ContainerRemoveResult{}, daemonError("server error")).Once()
+
+				err := (&Client{log: newTestLogger(t), api: api}).RemoveContainer(t.Context(), modelfixture.Container())
+				require.ErrorContains(t, err, "failed to remove container")
+			})
+		})
+	})
+
+	t.Run("listing containers", func(t *testing.T) {
+		t.Parallel()
+
+		// newRunningAPI returns a mocked Docker API listing the running
+		// Watchtower and Portainer containers.
+		newRunningAPI := func(t *testing.T) *mockContainer.MockAPIClient {
+			t.Helper()
+
+			api := newDockerAPI(t)
+			expectContainerList(t, api, "running")
+			expectContainerFixtures(t, api, fixtureWatchtower, fixtureRunning)
+
+			return api
+		}
+
+		t.Run("no filter is provided", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return all available containers", func(t *testing.T) {
+				t.Parallel()
+
+				c := &Client{log: newTestLogger(t), api: newRunningAPI(t)}
+
+				containers, err := c.ListContainers(t.Context(), filters.NoFilter)
+				require.NoError(t, err)
+				assert.Len(t, containers, 2)
+			})
+		})
+
+		t.Run("a filter matching nothing", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return an empty array", func(t *testing.T) {
+				t.Parallel()
+
+				c := &Client{log: newTestLogger(t), api: newRunningAPI(t)}
+				filter := filters.FilterByNames(newTestLogger(t), []string{"lollercoaster"}, filters.NoFilter)
+
+				containers, err := c.ListContainers(t.Context(), filter)
+				require.NoError(t, err)
+				assert.Empty(t, containers)
+			})
+		})
+
+		t.Run("a watchtower filter is provided", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return only the watchtower container", func(t *testing.T) {
+				t.Parallel()
+
+				c := &Client{log: newTestLogger(t), api: newRunningAPI(t)}
+
+				containers, err := c.ListContainers(t.Context(), filters.WatchtowerContainersFilter)
+				require.NoError(t, err)
+				require.Len(t, containers, 1)
+				assert.Equal(t, "nickfedor/watchtower:latest", containers[0].ImageName())
+			})
+		})
+
+		t.Run(`include stopped is enabled`, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return both stopped and running containers", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectContainerList(t, api, "running", "exited", "created")
+				expectContainerFixtures(t, api, fixtureStopped, fixtureWatchtower, fixtureRunning)
+
+				c := &Client{log: newTestLogger(t), api: api, IncludeStopped: true}
+
+				containers, err := c.ListContainers(t.Context(), filters.NoFilter)
+				require.NoError(t, err)
+				assert.True(t, slices.ContainsFunc(containers, func(c *container.Container) bool {
+					return !c.ContainerInfo().State.Running
+				}), "a stopped container is listed")
+			})
+		})
+
+		t.Run(`include restarting is enabled`, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return both restarting and running containers", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectContainerList(t, api, "running", "restarting")
+				expectContainerFixtures(t, api, fixtureWatchtower, fixtureRunning, fixtureRestarting)
+
+				// A Docker marker resolves the runtime without an API call.
+				fsys := fstest.MapFS{".dockerenv": {}}
+
+				c := &Client{
+					log:               newTestLogger(t),
+					api:               api,
+					IncludeRestarting: true, Fs: fsys,
+				}
+
+				containers, err := c.ListContainers(t.Context(), filters.NoFilter)
+				require.NoError(t, err)
+				assert.True(t, slices.ContainsFunc(containers, func(c *container.Container) bool {
+					return c.ContainerInfo().State.Restarting
+				}), "a restarting container is listed")
+			})
+		})
+
+		t.Run(`include restarting is disabled`, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should not return restarting containers", func(t *testing.T) {
+				t.Parallel()
+
+				c := &Client{log: newTestLogger(t), api: newRunningAPI(t)}
+
+				containers, err := c.ListContainers(t.Context(), filters.NoFilter)
+				require.NoError(t, err)
+				assert.False(t, slices.ContainsFunc(containers, func(c *container.Container) bool {
+					return c.ContainerInfo().State.Restarting
+				}), "no restarting container is listed")
+			})
+		})
+
+		t.Run("multiple filters are provided", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should combine filters with logical AND", func(t *testing.T) {
+				t.Parallel()
+
+				c := &Client{log: newTestLogger(t), api: newRunningAPI(t)}
+				nameFilter := filters.FilterByNames(newTestLogger(t), []string{"portainer"}, filters.NoFilter)
+
+				containers, err := c.ListContainers(t.Context(), nameFilter, filters.NoFilter)
+				require.NoError(t, err)
+				require.Len(t, containers, 1)
+				assert.Equal(t, "portainer", containers[0].Name())
+			})
+
+			t.Run("should return empty when filters are mutually exclusive", func(t *testing.T) {
+				t.Parallel()
+
+				c := &Client{log: newTestLogger(t), api: newRunningAPI(t)}
+				portainerFilter := filters.FilterByNames(newTestLogger(t), []string{"portainer"}, filters.NoFilter)
+				watchtowerFilter := filters.FilterByNames(newTestLogger(t), []string{"watchtower-running"}, filters.NoFilter)
+
+				containers, err := c.ListContainers(t.Context(), portainerFilter, watchtowerFilter)
+				require.NoError(t, err)
+				assert.Empty(t, containers)
+			})
+		})
+
+		t.Run(`the image of a container cannot be inspected`, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should warn, naming the container and its image", func(t *testing.T) {
+				t.Parallel()
+
+				// GetContainer is only reached for containers already being
+				// acted upon, so missing image metadata is worth a warning here
+				// even though getSourceContainer logs it at debug level.
+				api := newDockerAPI(t)
+				expectMissingImage(api, testContainerID)
+
+				log, logOutput := logcapture.New(zerolog.WarnLevel)
+				c := &Client{log: log, api: api}
+
+				got, err := c.GetContainer(t.Context(), container.ContainerID(testContainerID))
+				require.NoError(t, err)
+				assert.False(t, got.HasImageInfo())
+
+				logged := logOutput.String()
+				assert.Contains(t, logged, "Failed to retrieve image info")
+				assert.Contains(t, logged, "test-container")
+				assert.Contains(t, logged, "test-image:latest")
+			})
+		})
+
+		t.Run(`a container uses container network mode`, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run(`the network container can be resolved`, func(t *testing.T) {
+				t.Parallel()
+
+				t.Run("should return the container name instead of the ID", func(t *testing.T) {
+					t.Parallel()
+
+					api := newDockerAPI(t)
+					expectContainerFixtures(t, api, fixtureNetConsumer)
+
+					c, err := (&Client{log: newTestLogger(t), api: api}).GetContainer(t.Context(), fixtureNetConsumer.id)
+					require.NoError(t, err)
+
+					networkMode := c.ContainerInfo().HostConfig.NetworkMode
+					assert.Equal(t, fixtureNetSupplierContainerName, networkMode.ConnectedContainer())
+				})
+			})
+
+			t.Run(`the network container cannot be resolved`, func(t *testing.T) {
+				t.Parallel()
+
+				t.Run("should still return the container ID", func(t *testing.T) {
+					t.Parallel()
+
+					api := newDockerAPI(t)
+					expectContainerFixtures(t, api, fixtureNetConsumerMissingSupplier)
+
+					c, err := (&Client{log: newTestLogger(t), api: api}).
+						GetContainer(t.Context(), fixtureNetConsumerMissingSupplier.id)
+					require.NoError(t, err)
+
+					networkMode := c.ContainerInfo().HostConfig.NetworkMode
+					assert.Equal(t, fixtureNetSupplierNotFoundID, networkMode.ConnectedContainer())
+				})
+			})
+		})
+	})
+
+	t.Run("WaitForContainerHealthy", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("container has no health check", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return immediately without error", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					api := newDockerAPI(t)
+					expectHealth(api, "")
+
+					err := (&Client{log: newTestLogger(t), api: api}).
+						WaitForContainerHealthy(t.Context(), mockContainerID, 5*time.Second)
+					require.NoError(t, err)
+				})
+			})
+		})
+
+		t.Run("container health check is disabled", func(t *testing.T) {
+			t.Parallel()
+
+			disabled := &dockerContainer.HealthConfig{Test: []string{"NONE"}}
+
+			// Podman reports a health object with an empty status for a
+			// disabled health check, and Docker reports none.
+			tests := []struct {
+				name   string
+				health *dockerContainer.Health
+			}{
+				{name: "should return immediately when Podman reports an empty status", health: &dockerContainer.Health{}},
+				{name: "should return immediately when Docker reports no health"},
+			}
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
+
+					synctest.Test(t, func(t *testing.T) {
+						api := newDockerAPI(t)
+						expectHealthcheck(api, tt.health, disabled)
+
+						err := (&Client{log: newTestLogger(t), api: api}).
+							WaitForContainerHealthy(t.Context(), mockContainerID, 5*time.Second)
+						require.NoError(t, err)
+					})
+				})
+			}
+		})
+
+		t.Run("configured health check has not reported yet", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should keep waiting through an empty status", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					configured := &dockerContainer.HealthConfig{Test: []string{"CMD", "/healthcheck"}}
+
+					api := newDockerAPI(t)
+					expectHealthcheck(api, &dockerContainer.Health{}, configured)
+					expectHealthcheck(api, &dockerContainer.Health{Status: dockerContainer.Healthy}, configured)
+
+					err := (&Client{log: newTestLogger(t), api: api}).
+						WaitForContainerHealthy(t.Context(), mockContainerID, 5*time.Second)
+					require.NoError(t, err)
+				})
+			})
+		})
+
+		t.Run("container becomes healthy", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return without error", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					api := newDockerAPI(t)
+					expectHealth(api, dockerContainer.Starting)
+					expectHealth(api, dockerContainer.Starting)
+					expectHealth(api, dockerContainer.Healthy)
+
+					err := (&Client{log: newTestLogger(t), api: api}).
+						WaitForContainerHealthy(t.Context(), mockContainerID, 5*time.Second)
+					require.NoError(t, err)
+				})
+			})
+		})
+
+		t.Run("container becomes unhealthy", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return an error", func(t *testing.T) {
+				t.Parallel()
+
+				synctest.Test(t, func(t *testing.T) {
+					api := newDockerAPI(t)
+					expectHealth(api, dockerContainer.Unhealthy)
+
+					err := (&Client{log: newTestLogger(t), api: api}).
+						WaitForContainerHealthy(t.Context(), mockContainerID, 5*time.Second)
+					require.ErrorContains(t, err, "health check failed")
+				})
+			})
+		})
+	})
+
+	t.Run("getRuntime", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("CPUCopyMode is auto", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should detect Podman via marker file", func(t *testing.T) {
+				t.Parallel()
+
+				memFs := fstest.MapFS{"run/.containerenv": {}}
+
+				testClient := &Client{
+					log:         newTestLogger(t),
+					api:         mockContainer.NewMockAPIClient(t),
+					CPUCopyMode: cpuCopyModeAuto, Fs: memFs,
+				}
+				assert.True(t, testClient.getRuntime(t.Context()))
+			})
+
+			t.Run("should detect Docker via marker file", func(t *testing.T) {
+				t.Parallel()
+
+				memFs := fstest.MapFS{".dockerenv": {}}
+
+				testClient := &Client{
+					log:         newTestLogger(t),
+					api:         mockContainer.NewMockAPIClient(t),
+					CPUCopyMode: cpuCopyModeAuto, Fs: memFs,
+				}
+				assert.False(t, testClient.getRuntime(t.Context()))
+			})
+		})
+	})
+
+	t.Run("ExecuteCommand", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("logging", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should include container id field", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectExec(t, api, execCase{containerID: "ex-cont-id", execID: "ex-exec-id", cmd: "exec-cmd"})
+
+				log, logOutput := logcapture.New(zerolog.DebugLevel)
+				c := &Client{log: log, api: api}
+
+				got, err := c.GetContainer(t.Context(), "ex-cont-id")
+				require.NoError(t, err)
+
+				_, err = c.ExecuteCommand(t.Context(), got, "exec-cmd", 1, 0, 0)
+				require.NoError(t, err)
+				assert.Contains(t, logOutput.String(), "container_id=ex-cont-id")
+			})
+
+			t.Run("should skip updates when command exits with code 75", func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				expectExec(t, api, execCase{containerID: "ex-cont-id", execID: "ex-exec-id", cmd: "exec-cmd", exitCode: 75})
+
+				log, logOutput := logcapture.New(zerolog.DebugLevel)
+				c := &Client{log: log, api: api}
+
+				got, err := c.GetContainer(t.Context(), "ex-cont-id")
+				require.NoError(t, err)
+
+				skipUpdate, err := c.ExecuteCommand(t.Context(), got, "exec-cmd", 1, 0, 0)
+				require.NoError(t, err)
+				assert.True(t, skipUpdate)
+				assert.Contains(t, logOutput.String(), "container_id=ex-cont-id")
+			})
+		})
+	})
+
+	t.Run("ExecuteCommand results", func(t *testing.T) {
+		t.Parallel()
+
+		// run gets the container and executes tc's command in it with the
+		// given user and group IDs.
+		run := func(t *testing.T, tc execCase, uid, gid int) (bool, error) {
+			t.Helper()
+
+			api := newDockerAPI(t)
+			expectExec(t, api, tc)
+
+			c := &Client{log: newTestLogger(t), api: api}
+
+			got, err := c.GetContainer(t.Context(), container.ContainerID(tc.containerID))
+			require.NoError(t, err)
+
+			return c.ExecuteCommand(t.Context(), got, tc.cmd, 1, uid, gid)
+		}
+
+		t.Run("command exits with code 0", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return false and nil error", func(t *testing.T) {
+				t.Parallel()
+
+				skipUpdate, err := run(t, execCase{containerID: "ex-cont-id", execID: "success-exec-id", cmd: "success-cmd"}, 0, 0)
+				require.NoError(t, err)
+				assert.False(t, skipUpdate)
+			})
+		})
+
+		t.Run("command exits with non-zero code", func(t *testing.T) {
+			t.Parallel()
+
+			// Output written inside the container is untrusted. Its text
+			// reaches the error without escape sequences or control characters.
+			t.Run("should end the error with the printable output", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					execID:      "failure-exec-id",
+					cmd:         "failure-cmd",
+					output:      "\x1b]0;owned\a\x1b[31mfailed\x1b[0m\r\nsee \u202elog\r\n",
+					exitCode:    1,
+				}, 0, 0)
+				require.EqualError(t, err, "command execution failed with exit code 1: failed | see log")
+			})
+
+			// Each notification entry is a line of its own. Output kept on one
+			// line cannot add a line that reads like a Watchtower message.
+			t.Run("should keep the output on one line", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					execID:      "failure-exec-id",
+					cmd:         "failure-cmd",
+					output:      "backup failed\n\nStarted new container: db (abc123)\n",
+					exitCode:    1,
+				}, 0, 0)
+				require.EqualError(t, err,
+					"command execution failed with exit code 1: backup failed | Started new container: db (abc123)")
+			})
+
+			t.Run("should replace URL credentials in the output", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					execID:      "failure-exec-id",
+					cmd:         "failure-cmd",
+					output:      "clone https://bot:ghp_abc@github.com/org/app.git failed\n",
+					exitCode:    1,
+				}, 0, 0)
+				require.EqualError(t, err,
+					"command execution failed with exit code 1: clone https://xxxxx:xxxxx@github.com/org/app.git failed")
+			})
+
+			// Empty output adds nothing to the error. Neither does output that
+			// cleaning empties.
+			t.Run("should end the error at the exit code when there is no output", func(t *testing.T) {
+				t.Parallel()
+
+				for _, output := range []string{"", "\x1b[0m\r\n"} {
+					_, err := run(t, execCase{
+						containerID: "ex-cont-id",
+						execID:      "failure-exec-id",
+						cmd:         "failure-cmd",
+						output:      output,
+						exitCode:    1,
+					}, 0, 0)
+					require.EqualError(t, err, "command execution failed with exit code 1")
+				}
+			})
+
+			t.Run("should report the command failure rather than an inspect failure", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{containerID: "ex-cont-id", execID: "failure-exec-id", cmd: "failure-cmd", exitCode: 1}, 0, 0)
+				require.ErrorIs(t, err, errCommandFailed)
+				require.NotErrorIs(t, err, errInspectExecFailed)
+				assert.True(t, strings.HasPrefix(err.Error(), "command execution failed with exit code 1"), err.Error())
+			})
+		})
+
+		t.Run("ExecInspect fails", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should report the inspect failure once", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					execID:      "inspect-fail-exec-id",
+					cmd:         "inspect-fail-cmd",
+					inspectErr:  daemonError("no such exec instance"),
+				}, 0, 0)
+				require.ErrorIs(t, err, errInspectExecFailed)
+				assert.Equal(t, 1, strings.Count(err.Error(), "failed to inspect exec instance"), err.Error())
+			})
+		})
+
+		t.Run("ExecCreate fails", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should return error containing 'failed to create exec'", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					cmd:         "create-fail-cmd",
+					createErr:   daemonError("exec create failed"),
+				}, 0, 0)
+				require.ErrorContains(t, err, "failed to create exec")
+			})
+		})
+
+		t.Run("exec cannot start", func(t *testing.T) {
+			t.Parallel()
+
+			// The attach starts the exec. A failed attach means the command never
+			// ran. That must not be taken for a command that exited with 0.
+			t.Run("should return error containing 'failed to start exec'", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					execID:      "start-fail-exec-id",
+					cmd:         "start-fail-cmd",
+					attachErr:   daemonError("exec start failed"),
+				}, 0, 0)
+				require.ErrorContains(t, err, "failed to start exec")
+			})
+		})
+
+		t.Run("uid and gid parameters are provided", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should pass UID:GID to User field in ExecOptions", func(t *testing.T) {
+				t.Parallel()
+
+				skipUpdate, err := run(t, execCase{
+					containerID: "ex-cont-id",
+					execID:      "uid-gid-exec-id",
+					cmd:         "uid-gid-cmd",
+					user:        "1000:1000",
+				}, 1000, 1000)
+				require.NoError(t, err)
+				assert.False(t, skipUpdate)
+			})
+		})
+	})
+
+	t.Run("readExecOutput", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should handle context cancellation", func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			// The output never arrives. Only the cancellation ends the read.
+			_, err := readExecOutput(ctx, newExecOutput(t, nil))
+			require.ErrorIs(t, err, context.Canceled)
+		})
+
+		// Cancelling while a command still writes ends the read and closes the
+		// stream. The writer's next write then fails instead of blocking.
+		t.Run("should stop reading when cancelled mid-stream", func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			writerDone := make(chan struct{})
+
+			output := newExecOutput(t, func(conn net.Conn) {
+				defer close(writerDone)
+
+				chunk := []byte(strings.Repeat("x", 512))
+
+				_, err := conn.Write(chunk)
+				if err != nil {
+					return
+				}
+
+				cancel()
+
+				for err == nil {
+					_, err = conn.Write(chunk)
+				}
+			})
+
+			_, err := readExecOutput(ctx, output)
+			require.ErrorIs(t, err, context.Canceled)
+
+			select {
+			case <-writerDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the writer stayed blocked after the read ended")
+			}
+		})
+
+		// The command's whole write succeeds only if all of it is read. A
+		// stream closed at the limit would fail it.
+		t.Run("should read the whole output and keep its last 2 KiB", func(t *testing.T) {
+			t.Parallel()
+
+			writeErr := make(chan error, 1)
+			output := newExecOutput(t, func(conn net.Conn) {
+				_, err := io.WriteString(conn, strings.Repeat("x", 4*maxExecOutput)+"the end")
+				writeErr <- err
+			})
+
+			out, err := readExecOutput(t.Context(), output)
+			require.NoError(t, err)
+			assert.Equal(t, droppedOutputMarker+strings.Repeat("x", maxExecOutput-len("the end"))+"the end", out)
+			require.NoError(t, <-writeErr)
+		})
+
+		t.Run("should not mark output that was kept whole", func(t *testing.T) {
+			t.Parallel()
+
+			out, err := readExecOutput(t.Context(), newExecOutput(t, func(conn net.Conn) {
+				_, _ = io.WriteString(conn, strings.Repeat("x", maxExecOutput))
+			}))
+			require.NoError(t, err)
+			assert.Equal(t, strings.Repeat("x", maxExecOutput), out)
+		})
+	})
+
+	t.Run("listing containers with 404 response", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should return empty list and log warning", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			api.EXPECT().ContainerList(mock.Anything, mock.Anything).
+				Return(dockerClient.ContainerListResult{}, notFoundError("page not found")).Once()
+
+			log, logOutput := logcapture.New(zerolog.WarnLevel)
+
+			containers, err := (&Client{log: log, api: api}).ListContainers(t.Context(), filters.NoFilter)
+			require.NoError(t, err)
+			assert.Empty(t, containers)
+			assert.Contains(t, logOutput.String(), "Docker API returned 404 for container list")
+		})
+	})
+
+	t.Run("listing containers with 500 server error", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should return error", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			api.EXPECT().ContainerList(mock.Anything, mock.Anything).
+				Return(dockerClient.ContainerListResult{}, daemonError("server error")).Once()
+
+			containers, err := (&Client{log: newTestLogger(t), api: api}).ListContainers(t.Context(), filters.NoFilter)
+			require.Error(t, err)
+			assert.Nil(t, containers)
+		})
+	})
+
+	t.Run("listing containers with 401 unauthorized error", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should return error", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			api.EXPECT().ContainerList(mock.Anything, mock.Anything).
+				Return(dockerClient.ContainerListResult{}, fmt.Errorf("unauthorized: %w", cerrdefs.ErrUnauthenticated)).Once()
+
+			containers, err := (&Client{log: newTestLogger(t), api: api}).ListContainers(t.Context(), filters.NoFilter)
+			require.Error(t, err)
+			assert.Nil(t, containers)
+		})
+	})
+
+	t.Run("listing containers with container inspect 500 error", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should return error", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			api.EXPECT().ContainerList(mock.Anything, mock.Anything).
+				Return(dockerClient.ContainerListResult{Items: []dockerContainer.Summary{
+					{ID: "container1", Names: []string{"/test1"}},
+				}}, nil).Once()
+			api.EXPECT().ContainerInspect(mock.Anything, "container1", dockerClient.ContainerInspectOptions{}).
+				Return(dockerClient.ContainerInspectResult{}, daemonError("inspect error")).Once()
+
+			containers, err := (&Client{log: newTestLogger(t), api: api}).ListContainers(t.Context(), filters.NoFilter)
+			require.Error(t, err)
+			assert.Nil(t, containers)
+		})
+	})
+
+	t.Run("ListContainers", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("containers disappear during enumeration", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("should gracefully handle ghost containers and continue processing", func(t *testing.T) {
+				t.Parallel()
+
+				const (
+					valid1ID = "valid-container-1-id"
+					valid2ID = "valid-container-2-id"
+					ghostID  = "ghost-container-id"
+				)
+
+				// expectValid expects the inspects of a valid container and of
+				// its image.
+				expectValid := func(api *mockContainer.MockAPIClient, id, name, image string) {
+					api.EXPECT().ContainerInspect(mock.Anything, id, dockerClient.ContainerInspectOptions{}).
+						Return(dockerClient.ContainerInspectResult{Container: dockerContainer.InspectResponse{
+							ID:         id,
+							Name:       name,
+							Image:      image,
+							State:      &dockerContainer.State{Status: "running"},
+							HostConfig: &dockerContainer.HostConfig{},
+							Config:     &dockerContainer.Config{Image: image},
+						}}, nil).Once()
+					api.EXPECT().ImageInspect(mock.Anything, image).
+						Return(dockerClient.ImageInspectResult{ID: "id-" + image}, nil).Once()
+				}
+
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerList(mock.Anything, mock.Anything).
+					Return(dockerClient.ContainerListResult{Items: []dockerContainer.Summary{
+						{ID: valid1ID, Names: []string{"/valid-container-1"}},
+						{ID: ghostID, Names: []string{"/ghost-container"}},
+						{ID: valid2ID, Names: []string{"/valid-container-2"}},
+					}}, nil).Once()
+				expectValid(api, valid1ID, "/valid-container-1", "test-image-1:latest")
+				api.EXPECT().ContainerInspect(mock.Anything, ghostID, dockerClient.ContainerInspectOptions{}).
+					Return(dockerClient.ContainerInspectResult{}, notFoundError("No such container: "+ghostID)).Once()
+				expectValid(api, valid2ID, "/valid-container-2", "test-image-2:latest")
+
+				log, logOutput := logcapture.New(zerolog.DebugLevel)
+
+				containers, err := (&Client{log: log, api: api}).ListContainers(t.Context())
+				require.NoError(t, err)
+				require.Len(t, containers, 2)
+
+				containerIDs := []container.ContainerID{containers[0].ID(), containers[1].ID()}
+				assert.ElementsMatch(t, []container.ContainerID{valid1ID, valid2ID}, containerIDs)
+				assert.Contains(t, logOutput.String(), ghostID)
+			})
+		})
+	})
+
+	t.Run("GetImageDiskUsage", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("maps image usage from /system/df", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			api.EXPECT().DiskUsage(mock.Anything, dockerClient.DiskUsageOptions{Images: true}).
+				Return(dockerClient.DiskUsageResult{Images: dockerClient.ImagesDiskUsage{
+					TotalSize:   4096,
+					Reclaimable: 1024,
+					TotalCount:  2,
+					ActiveCount: 1,
+				}}, nil).Once()
+
+			usage, err := (&Client{log: newTestLogger(t), api: api}).GetImageDiskUsage(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, int64(4096), usage.TotalSize)
+			assert.Equal(t, int64(1024), usage.Reclaimable)
+			assert.Equal(t, int64(2), usage.TotalCount)
+			assert.Equal(t, int64(1), usage.ActiveCount)
+		})
+
+		t.Run("wraps daemon errors", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			api.EXPECT().DiskUsage(mock.Anything, dockerClient.DiskUsageOptions{Images: true}).
+				Return(dockerClient.DiskUsageResult{}, daemonError("df failed")).Once()
+
+			_, err := (&Client{log: newTestLogger(t), api: api}).GetImageDiskUsage(t.Context())
+			require.ErrorContains(t, err, "failed to get image disk usage")
+		})
+	})
+
+	t.Run("TLS client methods", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("GetVersion returns correct API version with TLS client", func(t *testing.T) {
+			t.Parallel()
+
+			_, api := newTLSStubClient(t)
+
+			version := (&Client{log: newTestLogger(t), api: api}).GetVersion()
+			assert.Regexp(t, `^\d+\.\d+$`, version)
+		})
+
+		t.Run("Ping reaches the daemon over TLS", func(t *testing.T) {
+			t.Parallel()
+
+			server, api := newTLSStubClient(t)
+
+			require.NoError(t, (&Client{log: newTestLogger(t), api: api}).Ping(t.Context()))
+			assert.NotEmpty(t, server.ReceivedRequests())
+		})
+	})
+}
+
+// TestClientEnvironment verifies the client behavior that depends on
+// environment variables: runtime detection by the container variables, and
+// client construction from the DOCKER_* variables.
+//
+// The test sets environment variables, so it does not run in parallel.
+func TestClientEnvironment(t *testing.T) {
+	t.Run("getRuntime", func(t *testing.T) {
+		t.Run("CPUCopyMode is auto", func(t *testing.T) {
+			// newAutoClient returns a client in auto CPU copy mode with no
+			// runtime marker files.
+			newAutoClient := func(t *testing.T, api dockerClient.APIClient) *Client {
+				t.Helper()
+
+				return &Client{
+					log:         newTestLogger(t),
+					api:         api,
+					CPUCopyMode: cpuCopyModeAuto, Fs: fstest.MapFS{},
+				}
+			}
+
+			t.Run("should detect Podman via CONTAINER environment variable", func(t *testing.T) {
+				t.Setenv("CONTAINER", "podman")
+
+				assert.True(t, newAutoClient(t, mockContainer.NewMockAPIClient(t)).getRuntime(t.Context()))
+			})
+
+			t.Run("should detect Podman via API Name field", func(t *testing.T) {
+				// Podman sets the lowercase variable, so clear both forms.
+				t.Setenv("container", "")
+				t.Setenv("CONTAINER", "")
+
+				api := newDockerAPI(t)
+				expectInfo(api, dockerSystem.Info{Name: "podman"})
+
+				assert.True(t, newAutoClient(t, api).getRuntime(t.Context()))
+			})
+
+			t.Run("should detect Podman via API ServerVersion field", func(t *testing.T) {
+				t.Setenv("container", "")
+				t.Setenv("CONTAINER", "")
+
+				api := newDockerAPI(t)
+				expectInfo(api, dockerSystem.Info{ServerVersion: "podman/4.0.0"})
+
+				assert.True(t, newAutoClient(t, api).getRuntime(t.Context()))
+			})
+
+			t.Run("should fall back to Docker when detection fails", func(t *testing.T) {
+				t.Setenv("container", "")
+				t.Setenv("CONTAINER", "")
+
+				api := newDockerAPI(t)
+				api.EXPECT().Info(mock.Anything, dockerClient.InfoOptions{}).
+					Return(dockerClient.SystemInfoResult{}, daemonError("server error")).Once()
+
+				log, logOutput := logcapture.New(zerolog.DebugLevel)
+				testClient := newAutoClient(t, api)
+				testClient.log = log
+
+				assert.False(t, testClient.getRuntime(t.Context()))
+				assert.Contains(t, logOutput.String(), "Failed to detect container runtime, falling back to Docker")
+			})
+		})
+	})
+
+	t.Run("TLS client methods", func(t *testing.T) {
+		t.Run("Ping handles TLS connection failures gracefully", func(t *testing.T) {
+			// The client requires TLS, but the server speaks plain HTTP, so
+			// no request reaches a handler.
+			server := httpstub.New(t)
+			useDockerTLS(t, server, httpstub.NewTLS(t))
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.NoError(t, err)
+
+			err = client.Ping(t.Context())
+			require.ErrorContains(t, err, "ping failed")
+			assert.Empty(t, server.ReceivedRequests())
+		})
+	})
+
+	t.Run("NewClient", func(t *testing.T) {
+		t.Run("should return an error when DOCKER_HOST cannot be parsed", func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", "tcp://[::1")
+			t.Setenv("DOCKER_TLS_VERIFY", "")
+			t.Setenv("DOCKER_API_VERSION", "")
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.ErrorContains(t, err, "create Docker client")
+			assert.Nil(t, client)
+		})
+
+		t.Run("should successfully connect with TLS when DOCKER_TLS_VERIFY=1 and DOCKER_HOST points to TLS server", func(t *testing.T) {
+			server := httpstub.NewTLS(t)
+			server.AppendHandlers(respondToPing(t, http.MethodHead, http.StatusOK, "1.45"))
+			useDockerTLS(t, server, server)
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, client)
+
+			requests := server.ReceivedRequests()
+			require.Len(t, requests, 1)
+			assert.NotNil(t, requests[0].TLS, "the ping is sent over TLS")
+		})
+
+		t.Run("should fail when TLS is required but server is HTTP-only", func(t *testing.T) {
+			server := httpstub.New(t)
+			useDockerTLS(t, server, httpstub.NewTLS(t))
+
+			assert.NotPanics(t, func() { _, _ = NewClient(t.Context(), newTestLogger(t), ClientOptions{}) })
+			assert.Empty(t, server.ReceivedRequests(), "no plain HTTP request is sent")
+		})
+
+		t.Run("should negotiate API version with TLS", func(t *testing.T) {
+			server := httpstub.NewTLS(t)
+			server.AppendHandlers(respondToPing(t, http.MethodHead, http.StatusOK, "1.45"))
+			useDockerTLS(t, server, server)
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, "1.45", client.GetVersion())
+		})
+
+		t.Run("should use forced API version with TLS", func(t *testing.T) {
+			// A forced version skips negotiation, so the daemon's newer
+			// version is not adopted.
+			server := httpstub.NewTLS(t)
+			server.AppendHandlers(respondToPing(t, http.MethodHead, http.StatusOK, "1.47"))
+			useDockerTLS(t, server, server)
+			t.Setenv("DOCKER_API_VERSION", "1.44")
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, "1.44", client.GetVersion())
+		})
+
+		t.Run("should fall back to negotiation when the forced API version is newer than the daemon's", func(t *testing.T) {
+			// The daemon answers the unversioned ping, so only the API
+			// version it reports shows the forced version is unsupported.
+			server := httpstub.NewTLS(t)
+			server.AppendHandlers(
+				respondToPing(t, http.MethodHead, http.StatusOK, "1.45"),
+				respondToPing(t, http.MethodHead, http.StatusOK, "1.45"),
+			)
+			useDockerTLS(t, server, server)
+			t.Setenv("DOCKER_API_VERSION", "1.47")
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, "1.45", client.GetVersion())
+			assert.Len(t, server.ReceivedRequests(), 2)
+		})
+
+		t.Run("should handle invalid API version with TLS and fall back to negotiation", func(t *testing.T) {
+			// The pings at the forced version fail with 404, HEAD and then
+			// GET, so the client is recreated and negotiates.
+			server := httpstub.NewTLS(t)
+			server.AppendHandlers(
+				respondToPing(t, http.MethodHead, http.StatusNotFound, ""),
+				respondToPing(t, http.MethodGet, http.StatusNotFound, ""),
+				respondToPing(t, http.MethodHead, http.StatusOK, "1.45"),
+			)
+			useDockerTLS(t, server, server)
+			t.Setenv("DOCKER_API_VERSION", "1.99")
+
+			client, err := NewClient(t.Context(), newTestLogger(t), ClientOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, "1.45", client.GetVersion())
+			assert.Len(t, server.ReceivedRequests(), 3)
+		})
+	})
+}
+
+// Test_isDaemonConnectionError verifies which errors count as a lost
+// connection to the Docker daemon, including wrapped ones.
+func Test_isDaemonConnectionError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "nil error returns false", err: nil, expected: false},
+		{
+			name:     "Docker daemon connection error returns true",
+			err:      errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"),
+			expected: true,
+		},
+		{
+			name:     "connection refused error returns true",
+			err:      errors.New("dial unix /var/run/docker.sock: connect: connection refused"),
+			expected: true,
+		},
+		{name: "EOF error returns true", err: fmt.Errorf("failed to execute request: %w", io.EOF), expected: true},
+		{
+			name:     "unexpected EOF error returns true",
+			err:      fmt.Errorf("failed to execute request: %w", io.ErrUnexpectedEOF),
+			expected: true,
+		},
+		{name: "permission denied error returns false", err: errors.New("permission denied"), expected: false},
+		{name: "container not found error returns false", err: errors.New("Error: No such container: abc123"), expected: false},
+		{name: "generic error returns false", err: errors.New("some random error"), expected: false},
+		{
+			name: "wrapped Docker daemon error returns true",
+			err: fmt.Errorf("failed to list containers: %w",
+				errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.expected, isDaemonConnectionError(tt.err))
+		})
+	}
+}
+
+// TestClientSetRestartPolicy verifies the restart policy the client sends to
+// Docker, including the normalization of an empty policy to "no", and that a
+// failed update is returned.
+func TestClientSetRestartPolicy(t *testing.T) {
+	t.Parallel()
+
+	const cid = "watchtower-container-id"
+
+	// expectUpdate expects one restart policy update of cid to policy and
+	// answers it with err.
+	expectUpdate := func(api *mockContainer.MockAPIClient, policy dockerContainer.RestartPolicy, err error) {
+		api.EXPECT().ContainerUpdate(mock.Anything, cid, dockerClient.ContainerUpdateOptions{RestartPolicy: &policy}).
+			Return(dockerClient.ContainerUpdateResult{}, err).Once()
+	}
+
+	t.Run("the container ID is empty", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should short-circuit without calling ContainerUpdate", func(t *testing.T) {
+			t.Parallel()
+
+			// The mock has no expectations, so any Docker call fails the test.
+			c := &Client{log: newTestLogger(t), api: mockContainer.NewMockAPIClient(t)}
+			require.NoError(t, c.SetRestartPolicy(t.Context(), "", dockerContainer.RestartPolicy{}))
+		})
+	})
+
+	t.Run("the policy name is empty", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should send restart policy Name=no to the Docker API", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			expectUpdate(api, dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyDisabled}, nil)
+
+			err := (&Client{log: newTestLogger(t), api: api}).
+				SetRestartPolicy(t.Context(), cid, dockerContainer.RestartPolicy{})
+			require.NoError(t, err)
+		})
+
+		t.Run("should clear MaximumRetryCount when normalizing an empty name", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			expectUpdate(api, dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyDisabled}, nil)
+
+			err := (&Client{log: newTestLogger(t), api: api}).
+				SetRestartPolicy(t.Context(), cid, dockerContainer.RestartPolicy{MaximumRetryCount: 5})
+			require.NoError(t, err)
+		})
+	})
+
+	t.Run("the policy is always", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should send restart policy Name=always to the Docker API", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			expectUpdate(api, dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyAlways}, nil)
+
+			err := (&Client{log: newTestLogger(t), api: api}).SetRestartPolicy(
+				t.Context(), cid, dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyAlways},
+			)
+			require.NoError(t, err)
+		})
+	})
+
+	t.Run("the container update fails", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("should return the failure", func(t *testing.T) {
+			t.Parallel()
+
+			api := newDockerAPI(t)
+			expectUpdate(api, dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyDisabled}, daemonError("update failed"))
+
+			err := (&Client{log: newTestLogger(t), api: api}).SetRestartPolicy(
+				t.Context(), cid, dockerContainer.RestartPolicy{Name: dockerContainer.RestartPolicyDisabled},
+			)
+			require.ErrorIs(t, err, errSetRestartPolicyFailed)
+			assert.ErrorContains(t, err, "update failed")
+		})
+	})
+}
+
+// TestListContainers_RestartingFilterFollowsRuntime verifies that with
+// restarting containers included, the list request asks for the restarting
+// status on Docker and leaves it out on Podman, which has no such status, in
+// every CPU copy mode.
+func TestListContainers_RestartingFilterFollowsRuntime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		marker string
+		// statuses are the statuses the list request filters by.
+		statuses []string
+	}{
+		{name: "Docker", marker: ".dockerenv", statuses: []string{"running", "restarting"}},
+		{name: "Podman", marker: "run/.containerenv", statuses: []string{"running"}},
+	}
+
+	for _, tt := range tests {
+		for _, mode := range []string{cpuCopyModeAuto, "full", "none"} {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				t.Parallel()
+
+				api := newDockerAPI(t)
+				api.EXPECT().ContainerList(mock.Anything, dockerClient.ContainerListOptions{Filters: statusFilters(tt.statuses...)}).
+					Return(dockerClient.ContainerListResult{}, nil).Once()
+
+				fsys := fstest.MapFS{tt.marker: {}}
+
+				c := &Client{
+					log:               newTestLogger(t),
+					api:               api,
+					CPUCopyMode:       mode,
+					IncludeRestarting: true,
+					Fs:                fsys,
+				}
+
+				_, err := c.ListContainers(t.Context(), filters.NoFilter)
+				require.NoError(t, err)
+			})
+		}
+	}
+}
+
+// TestGetRuntime_RetriesFailedDetection verifies that a failed detection is
+// not cached, so a later call detects the runtime, and that a successful
+// detection is cached. It sets environment variables, so it runs sequentially.
+func TestGetRuntime_RetriesFailedDetection(t *testing.T) {
+	t.Setenv("container", "")
+	t.Setenv("CONTAINER", "")
+
+	// The first info request fails and the second identifies Podman. A
+	// third request would fail the test, so the detection must be cached.
+	api := newDockerAPI(t)
+	api.EXPECT().Info(mock.Anything, dockerClient.InfoOptions{}).
+		Return(dockerClient.SystemInfoResult{}, daemonError("server error")).Once()
+	expectInfo(api, dockerSystem.Info{Name: "podman"})
+
+	c := &Client{
+		log:         newTestLogger(t),
+		api:         api,
+		CPUCopyMode: cpuCopyModeAuto, Fs: fstest.MapFS{},
+	}
+
+	assert.False(t, c.getRuntime(t.Context()), "a failed detection falls back to Docker")
+	assert.True(t, c.getRuntime(t.Context()), "the next call detects Podman")
+	assert.True(t, c.getRuntime(t.Context()), "the detection is cached")
+}
+
+// TestGetRuntime_NoFilesystem verifies that a client built without a
+// filesystem detects the runtime from the host's filesystem instead of
+// panicking. The host's marker files decide the result, so only the absence of
+// a panic is checked. It sets environment variables, so it runs sequentially.
+func TestGetRuntime_NoFilesystem(t *testing.T) {
+	t.Setenv("CONTAINER", "")
+	t.Setenv("container", "")
+
+	// The daemon is asked only when the host has no marker file.
+	api := newDockerAPI(t)
+	api.EXPECT().Info(mock.Anything, dockerClient.InfoOptions{}).
+		Return(dockerClient.SystemInfoResult{Info: dockerSystem.Info{Name: "docker"}}, nil).Maybe()
+	api.EXPECT().ServerVersion(mock.Anything, dockerClient.ServerVersionOptions{}).
+		Return(dockerClient.ServerVersionResult{}, nil).Maybe()
+
+	c := &Client{log: newTestLogger(t), api: api, CPUCopyMode: cpuCopyModeAuto}
+
+	assert.NotPanics(t, func() { c.getRuntime(t.Context()) })
+}
+
+// TestStartContainer_StartsCreatedContainer verifies that StartContainer starts
+// the container it created, by the ID the create returned, and returns that ID.
+func TestStartContainer_StartsCreatedContainer(t *testing.T) {
+	t.Parallel()
+
+	const createdID = "created-container-id"
+
+	source := modelfixture.Container(
+		containerfixture.WithNetworkMode("bridge"),
+		containerfixture.WithContainerState(dockerContainer.State{Running: true, Status: "running"}),
+	)
+
+	api := newDockerAPI(t)
+	api.EXPECT().ContainerCreate(mock.Anything, mock.Anything).
+		Return(dockerClient.ContainerCreateResult{ID: createdID}, nil).Once()
+	api.EXPECT().ContainerRename(mock.Anything, createdID, dockerClient.ContainerRenameOptions{NewName: source.Name()}).
+		Return(dockerClient.ContainerRenameResult{}, nil).Once()
+	api.EXPECT().ContainerStart(mock.Anything, createdID, dockerClient.ContainerStartOptions{}).
+		Return(dockerClient.ContainerStartResult{}, nil).Once()
+
+	newID, err := (&Client{log: newTestLogger(t), api: api}).StartContainer(t.Context(), source)
+	require.NoError(t, err)
+	assert.Equal(t, container.ContainerID(createdID), newID)
+}
+
+// TestClientIsContainerStale_NamesEngine verifies that a pull the engine
+// fails names the engine the client detects, Docker or Podman, so a
+// notification can say which one failed.
+//
+// Pulls share package-level slots per registry host, so the test does not run
+// in parallel.
+func TestClientIsContainerStale_NamesEngine(t *testing.T) {
+	tests := []struct {
+		engine string
+		marker string
+	}{
+		{engine: "Docker", marker: ".dockerenv"},
+		{engine: "Podman", marker: "run/.containerenv"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.engine, func(t *testing.T) {
+			// A registry that answers nothing, so the digest check falls back
+			// to a pull.
+			registry := httpstub.New(t)
+			registry.AllowUnhandledRequests()
+
+			image := registry.Addr() + "/app:latest"
+
+			api := newImageAPI(t)
+			api.EXPECT().ImagePull(mock.Anything, image, mock.Anything).
+				Return(nil, daemonError("pull refused")).Once()
+
+			client := &Client{
+				log:         newTestLogger(t),
+				api:         api,
+				Fs:          fstest.MapFS{tt.marker: {}},
+				Registry:    registryConfig.Registry{TLSSkip: true},
+				RateLimiter: ratelimit.New(),
+			}
+
+			c := modelfixture.Container(
+				containerfixture.WithImageName(image),
+				containerfixture.WithRepoDigests([]string{image + "@sha256:" + containerfixture.RandomID()}),
+			)
+
+			_, _, _, err := client.IsContainerStale(t.Context(), c, updateConfig.Policy{})
+			require.EqualError(t, err, tt.engine+" could not pull "+image+": Error response from daemon: pull refused")
+		})
+	}
+}
+
+// TestClientWrappers verifies that the client methods delegating to the image
+// client, the target container helpers, and the Docker API pass their
+// arguments through and report the failures they wrap.
+func TestClientWrappers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("IsContainerStale reports a newer local image", func(t *testing.T) {
+		t.Parallel()
+
+		currentImageID := "sha256:" + containerfixture.RandomID()
+		newImageID := "sha256:" + containerfixture.RandomID()
+
+		api := newImageAPI(t)
+		api.EXPECT().ImageInspect(mock.Anything, "test-image:latest").Return(inspected(newImageID), nil).Once()
+
+		stale, latestID, _, err := (&Client{log: newTestLogger(t), api: api}).IsContainerStale(
+			t.Context(), runningImage(currentImageID), updateConfig.Policy{NoPull: true},
+		)
+		require.NoError(t, err)
+		assert.True(t, stale)
+		assert.Equal(t, container.ImageID(newImageID), latestID)
+	})
+
+	// The image client's error names the failure. The update session's warning
+	// says what was being checked. The client adds no prefix of its own.
+	t.Run("IsContainerStale reports a failed check", func(t *testing.T) {
+		t.Parallel()
+
+		api := newImageAPI(t)
+		api.EXPECT().ImageInspect(mock.Anything, "test-image:latest").
+			Return(dockerClient.ImageInspectResult{}, daemonError("inspect failed")).Once()
+
+		_, _, _, err := (&Client{log: newTestLogger(t), api: api}).IsContainerStale(
+			t.Context(), runningImage("sha256:"+containerfixture.RandomID()), updateConfig.Policy{NoPull: true},
+		)
+		require.EqualError(t, err, "failed to inspect image: test-image:latest: Error response from daemon: inspect failed")
+	})
+
+	t.Run("CheckContainerUpdate checks the local image with no-pull", func(t *testing.T) {
+		t.Parallel()
+
+		currentImageID := "sha256:" + containerfixture.RandomID()
+
+		api := newImageAPI(t)
+		api.EXPECT().ImageInspect(mock.Anything, "test-image:latest").Return(inspected(currentImageID), nil).Once()
+
+		available, latestID, _, err := (&Client{log: newTestLogger(t), api: api}).CheckContainerUpdate(
+			t.Context(), runningImage(currentImageID), updateConfig.Policy{NoPull: true},
+		)
+		require.NoError(t, err)
+		assert.False(t, available)
+		assert.Equal(t, container.ImageID(currentImageID), latestID)
+	})
+
+	t.Run("CheckContainerUpdate reports a failed check", func(t *testing.T) {
+		t.Parallel()
+
+		api := newImageAPI(t)
+		api.EXPECT().ImageInspect(mock.Anything, "test-image:latest").
+			Return(dockerClient.ImageInspectResult{}, daemonError("inspect failed")).Once()
+
+		_, _, _, err := (&Client{log: newTestLogger(t), api: api}).CheckContainerUpdate(
+			t.Context(), runningImage("sha256:"+containerfixture.RandomID()), updateConfig.Policy{NoPull: true},
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("RemoveImageByID removes an unused image", func(t *testing.T) {
+		t.Parallel()
+
+		imageID := container.ImageID("sha256:" + containerfixture.RandomID())
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerList(mock.Anything, dockerClient.ContainerListOptions{All: true}).
+			Return(dockerClient.ContainerListResult{}, nil).Once()
+		api.EXPECT().ImageRemove(mock.Anything, string(imageID), dockerClient.ImageRemoveOptions{Force: true, PruneChildren: true}).
+			Return(dockerClient.ImageRemoveResult{Items: []dockerImage.DeleteResponse{{Deleted: string(imageID)}}}, nil).Once()
+
+		err := (&Client{log: newTestLogger(t), api: api}).RemoveImageByID(t.Context(), imageID, "test-image:latest")
+		require.NoError(t, err)
+	})
+
+	t.Run("RemoveImageByID reports an image still in use", func(t *testing.T) {
+		t.Parallel()
+
+		imageID := container.ImageID("sha256:" + containerfixture.RandomID())
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerList(mock.Anything, dockerClient.ContainerListOptions{All: true}).
+			Return(dockerClient.ContainerListResult{Items: []dockerContainer.Summary{
+				{ID: "user", ImageID: string(imageID), State: dockerContainer.StateRunning},
+			}}, nil).Once()
+
+		err := (&Client{log: newTestLogger(t), api: api}).RemoveImageByID(t.Context(), imageID, "test-image:latest")
+		require.ErrorIs(t, err, containerImage.ErrImageInUse)
+	})
+
+	t.Run("StartContainerByID starts the container", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerStart(mock.Anything, mockContainerID, dockerClient.ContainerStartOptions{}).
+			Return(dockerClient.ContainerStartResult{}, nil).Once()
+
+		require.NoError(t, (&Client{log: newTestLogger(t), api: api}).StartContainerByID(t.Context(), mockContainerID))
+	})
+
+	t.Run("StartContainerByID reports a failed start", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerStart(mock.Anything, mockContainerID, dockerClient.ContainerStartOptions{}).
+			Return(dockerClient.ContainerStartResult{}, daemonError("start failed")).Once()
+
+		err := (&Client{log: newTestLogger(t), api: api}).StartContainerByID(t.Context(), mockContainerID)
+		require.ErrorContains(t, err, "start failed")
+	})
+
+	t.Run("RenameContainer renames the container", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerRename(mock.Anything, mockContainerID, dockerClient.ContainerRenameOptions{NewName: "new-name"}).
+			Return(dockerClient.ContainerRenameResult{}, nil).Once()
+
+		require.NoError(t, (&Client{log: newTestLogger(t), api: api}).RenameContainer(t.Context(), modelfixture.Container(), "new-name"))
+	})
+
+	t.Run("RenameContainer names a failed rename once", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerRename(mock.Anything, mockContainerID, dockerClient.ContainerRenameOptions{NewName: "new-name"}).
+			Return(dockerClient.ContainerRenameResult{}, daemonError("rename failed")).Once()
+
+		err := (&Client{log: newTestLogger(t), api: api}).RenameContainer(t.Context(), modelfixture.Container(), "new-name")
+		require.EqualError(t, err, "failed to rename container: Error response from daemon: rename failed")
+	})
+
+	t.Run("Ping pings the daemon without negotiating the API version", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().Ping(mock.Anything, dockerClient.PingOptions{NegotiateAPIVersion: false}).
+			Return(dockerClient.PingResult{}, nil).Once()
+
+		require.NoError(t, (&Client{log: newTestLogger(t), api: api}).Ping(t.Context()))
+	})
+
+	t.Run("Ping reports an unreachable daemon", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().Ping(mock.Anything, dockerClient.PingOptions{NegotiateAPIVersion: false}).
+			Return(dockerClient.PingResult{}, errors.New("connection refused")).Once()
+
+		err := (&Client{log: newTestLogger(t), api: api}).Ping(t.Context())
+		require.ErrorContains(t, err, "ping failed")
+	})
+
+	t.Run("GetCurrentWatchtowerContainer returns the container without image info", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		expectInspect(api, testContainerID, sourceInspect("/watchtower", true, &dockerContainer.HostConfig{}), nil)
+
+		c, err := (&Client{log: newTestLogger(t), api: api}).GetCurrentWatchtowerContainer(t.Context(), testContainerID)
+		require.NoError(t, err)
+		assert.Equal(t, container.ContainerID(testContainerID), c.ID())
+		assert.False(t, c.HasImageInfo())
+	})
+
+	t.Run("GetCurrentWatchtowerContainer reports a failed inspect", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		expectInspect(api, testContainerID, dockerContainer.InspectResponse{}, notFoundError("No such container"))
+
+		_, err := (&Client{log: newTestLogger(t), api: api}).GetCurrentWatchtowerContainer(t.Context(), testContainerID)
+		require.ErrorContains(t, err, "failed to inspect container")
+	})
+
+	t.Run("CreateEphemeralOrchestrator creates and starts the orchestrator", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerCreate(mock.Anything, mock.MatchedBy(func(options dockerClient.ContainerCreateOptions) bool {
+			return options.Config != nil && options.Config.Image == "watchtower:v2"
+		})).Return(dockerClient.ContainerCreateResult{ID: "orchestrator-id"}, nil).Once()
+		api.EXPECT().ContainerStart(mock.Anything, "orchestrator-id", dockerClient.ContainerStartOptions{}).
+			Return(dockerClient.ContainerStartResult{}, nil).Once()
+
+		source := modelfixture.Container(containerfixture.WithID("source123"), containerfixture.WithName("watchtower-source"), containerfixture.WithImageName("watchtower:latest"))
+
+		id, err := (&Client{log: newTestLogger(t), api: api}).
+			CreateEphemeralOrchestrator(t.Context(), source, "watchtower:v2", "chain1", false)
+		require.NoError(t, err)
+		assert.Equal(t, container.ContainerID("orchestrator-id"), id)
+	})
+
+	t.Run("CreateEphemeralOrchestrator says which step failed", func(t *testing.T) {
+		t.Parallel()
+
+		api := newDockerAPI(t)
+		api.EXPECT().ContainerCreate(mock.Anything, mock.Anything).
+			Return(dockerClient.ContainerCreateResult{}, daemonError("no such image")).Once()
+
+		source := modelfixture.Container(containerfixture.WithID("source123"), containerfixture.WithName("watchtower-source"), containerfixture.WithImageName("watchtower:latest"))
+
+		id, err := (&Client{log: newTestLogger(t), api: api}).
+			CreateEphemeralOrchestrator(t.Context(), source, "watchtower:v2", "chain1", false)
+		require.EqualError(t, err, "failed to create ephemeral orchestrator container: Error response from daemon: no such image")
+		assert.Empty(t, id)
+	})
+}
+
+// TestClientThroughDockerSDK runs the client through the real Docker SDK
+// against a stub daemon, so the behavior the mocked tests assume holds for the
+// SDK itself: list filters reach the daemon, a 404 is reported as not found,
+// and a daemon error keeps its message.
+func TestClientThroughDockerSDK(t *testing.T) {
+	t.Parallel()
+
+	// newSDKClient returns a client using a real SDK client for server, with
+	// the API version fixed so no negotiation ping is sent.
+	newSDKClient := func(t *testing.T, server *httpstub.Server) *Client {
+		t.Helper()
+
+		api, err := dockerClient.New(
+			dockerClient.WithHost(server.URL()),
+			dockerClient.WithHTTPClient(server.Client()),
+			dockerClient.WithAPIVersion("1.47"),
+		)
+		require.NoError(t, err)
+
+		return &Client{log: newTestLogger(t), api: api}
+	}
+
+	// respondWithFixture answers with the testdata file name.
+	respondWithFixture := func(t *testing.T, name string) http.HandlerFunc {
+		t.Helper()
+
+		data, err := os.ReadFile(filepath.Join("testdata", name))
+		require.NoError(t, err)
+
+		return httpstub.RespondWith(http.StatusOK, string(data), http.Header{"Content-Type": []string{"application/json"}})
+	}
+
+	t.Run("lists and inspects containers", func(t *testing.T) {
+		t.Parallel()
+
+		running := []dockerContainer.Summary{}
+
+		for _, summary := range readFixture[[]dockerContainer.Summary](t, "containers.json") {
+			if summary.State == dockerContainer.StateRunning {
+				running = append(running, summary)
+			}
+		}
+
+		server := httpstub.New(t)
+		server.AppendHandlers(
+			httpstub.CombineHandlers(
+				httpstub.VerifyRequest(t, http.MethodGet, httpstub.Path("/v1.47/containers/json")),
+				httpstub.VerifyQuery(t, `filters={"status":{"running":true}}`),
+				httpstub.RespondWithJSONEncoded(t, http.StatusOK, running, nil),
+			),
+			httpstub.CombineHandlers(
+				httpstub.VerifyRequest(t, http.MethodGet, httpstub.Path("/v1.47/containers/"+string(fixtureWatchtower.id)+"/json")),
+				respondWithFixture(t, "container_watchtower.json"),
+			),
+			httpstub.CombineHandlers(
+				httpstub.VerifyRequest(t, http.MethodGet, httpstub.Path("/v1.47/images/"+string(fixtureDefaultImage.id)+"/json")),
+				respondWithFixture(t, "image_default.json"),
+			),
+			httpstub.CombineHandlers(
+				httpstub.VerifyRequest(t, http.MethodGet, httpstub.Path("/v1.47/containers/"+string(fixtureRunning.id)+"/json")),
+				respondWithFixture(t, "container_running.json"),
+			),
+			httpstub.CombineHandlers(
+				httpstub.VerifyRequest(t, http.MethodGet, httpstub.Path("/v1.47/images/"+string(fixtureRunning.image.id)+"/json")),
+				respondWithFixture(t, "image_running.json"),
+			),
+		)
+
+		containers, err := newSDKClient(t, server).ListContainers(t.Context(), filters.NoFilter)
+		require.NoError(t, err)
+		require.Len(t, containers, 2)
+		assert.ElementsMatch(t, []container.ContainerID{fixtureWatchtower.id, fixtureRunning.id},
+			[]container.ContainerID{containers[0].ID(), containers[1].ID()})
+		assert.True(t, containers[0].HasImageInfo())
+	})
+
+	t.Run("treats a 404 on removal as an already removed container", func(t *testing.T) {
+		t.Parallel()
+
+		server := httpstub.New(t)
+		server.AppendHandlers(httpstub.CombineHandlers(
+			httpstub.VerifyRequest(t, http.MethodDelete, httpstub.Path("/v1.47/containers/"+mockContainerID)),
+			httpstub.VerifyQuery(t, "force=1"),
+			httpstub.RespondWithJSONEncoded(t, http.StatusNotFound, map[string]string{"message": "No such container: " + mockContainerID}, nil),
+		))
+
+		require.NoError(t, newSDKClient(t, server).RemoveContainer(t.Context(), modelfixture.Container()))
+	})
+
+	t.Run("reports a daemon error with its message", func(t *testing.T) {
+		t.Parallel()
+
+		server := httpstub.New(t)
+		server.AppendHandlers(httpstub.CombineHandlers(
+			httpstub.VerifyRequest(t, http.MethodPost, httpstub.Path("/v1.47/containers/"+mockContainerID+"/stop")),
+			httpstub.RespondWithJSONEncoded(t, http.StatusInternalServerError, map[string]string{"message": "server error"}, nil),
+		))
+
+		source := modelfixture.Container(containerfixture.WithContainerState(dockerContainer.State{Running: true}))
+
+		err := newSDKClient(t, server).StopContainer(t.Context(), source, time.Second)
+		require.ErrorContains(t, err, "failed to stop container: Error response from daemon: server error")
+	})
+}
+
+// TestClientLogger verifies that the client logs through its configured logger,
+// and through a discarding logger when it has none or is nil, so methods can log
+// on a client built without one.
+func TestClientLogger(t *testing.T) {
+	t.Parallel()
+
+	log := newTestLogger(t)
+	assert.Same(t, log, (&Client{log: log}).logger())
+
+	assert.NotNil(t, (&Client{}).logger())
+
+	var nilClient *Client
+	assert.NotNil(t, nilClient.logger())
+}
+
+// TestClientImageAnnotationsDelegates verifies that the client-level delegate
+// reaches the same result as the image client.
+func TestClientImageAnnotationsDelegates(t *testing.T) {
+	t.Parallel()
+
+	api := mockContainer.NewMockAPIClient(t)
+	api.EXPECT().ImageInspect(mock.Anything, "app:latest").
+		Return(dockerClient.ImageInspectResult{Config: &dockerspec.DockerOCIImageConfig{
+			Labels: map[string]string{oci.VersionLabel: "1.2.3"},
+		}}, nil).Once()
+
+	got := (&Client{api: api, log: newTestLogger(t)}).
+		GetImageAnnotations(t.Context(), "app:latest")
+
+	assert.Equal(t, "1.2.3", got.Version)
+}
+
+// RoundTrip answers a request as the daemon would at the current time.
+func (d *startingDaemon) RoundTrip(req *http.Request) (*http.Response, error) {
+	d.requests++
+
+	if d.transportErr != nil {
+		return nil, d.transportErr
+	}
+
+	status := d.status
+
+	if wait := time.Until(d.ready); wait > 0 {
+		switch {
+		case d.notReadyErr != nil:
+			return nil, d.notReadyErr
+		case d.notReadyStatus != 0:
+			status = d.notReadyStatus
+		default:
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(wait):
+			}
+		}
+	}
+
+	if status == 0 {
+		status = http.StatusOK
+	}
+
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Api-Version": []string{"1.45"}},
+		Body:       http.NoBody,
+		Request:    req,
+	}, nil
+}
+
+// newStartingDaemonClient returns a Docker client that sends its requests to
+// daemon.
+func newStartingDaemonClient(t *testing.T, daemon *startingDaemon) *dockerClient.Client {
+	t.Helper()
+
+	cli, err := dockerClient.New(
+		dockerClient.WithHost("unix:///var/run/docker.sock"),
+		dockerClient.WithHTTPClient(&http.Client{Transport: daemon}),
+	)
+	require.NoError(t, err)
+
+	return cli
+}
+
+// TestPingUntilServing verifies how client initialization waits for a daemon
+// that is not serving its API yet. A queued ping is answered once the daemon
+// serves. A ping that fails without an answer is sent again after a doubling
+// delay. The wait ends early on an error that waiting cannot fix, and gives up
+// after three minutes. Each case runs in a synctest bubble, so the waits take
+// no real time.
+func TestPingUntilServing(t *testing.T) {
+	t.Parallel()
+
+	// refused is the dial error of a socket that nothing listens on.
+	refused := &net.OpError{Op: "dial", Net: "unix", Err: syscall.ECONNREFUSED}
+
+	tests := []struct {
+		name string
+		// ready is how long after the start the daemon serves its API.
+		ready          time.Duration
+		notReadyErr    error
+		notReadyStatus int
+		transportErr   error
+		status         int
+		// callerTimeout bounds the caller's context. Zero leaves it unbounded.
+		callerTimeout time.Duration
+		// wantWait is how long the wait takes, and wantRequests how many
+		// requests it sends. A ping that gets no answer sends a HEAD and
+		// then a GET.
+		wantWait     time.Duration
+		wantRequests int
+		wantErr      bool
+		wantLog      string
+	}{
+		{
+			name:         "daemon already serving",
+			wantRequests: 1,
+		},
+		{
+			name:         "restoring daemon answers the queued ping",
+			ready:        75 * time.Second,
+			wantWait:     75 * time.Second,
+			wantRequests: 1,
+			wantLog:      "Docker daemon is not answering yet. Waiting for it",
+		},
+		{
+			name:        "refused connection is retried with a doubling delay",
+			ready:       20 * time.Second,
+			notReadyErr: refused,
+			// Pings at 0, 1, 3, 7, and 15 seconds are refused. The delay
+			// caps at 10 seconds before the ping at 25 seconds.
+			wantWait:     25 * time.Second,
+			wantRequests: 11,
+			wantLog:      "Docker daemon is still not answering",
+		},
+		{
+			name:         "missing socket is retried",
+			ready:        20 * time.Second,
+			notReadyErr:  &net.OpError{Op: "dial", Net: "unix", Err: syscall.ENOENT},
+			wantWait:     25 * time.Second,
+			wantRequests: 11,
+		},
+		{
+			name:  "proxy name that does not resolve yet is retried",
+			ready: 20 * time.Second,
+			notReadyErr: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: &net.DNSError{Err: "no such host", Name: "dockerproxy", IsNotFound: true},
+			},
+			wantWait:     25 * time.Second,
+			wantRequests: 11,
+		},
+		{
+			name:         "dropped connection is retried",
+			ready:        20 * time.Second,
+			notReadyErr:  io.EOF,
+			wantWait:     25 * time.Second,
+			wantRequests: 11,
+		},
+		{
+			name:           "proxy that answers 503 is retried",
+			ready:          20 * time.Second,
+			notReadyStatus: http.StatusServiceUnavailable,
+			wantWait:       25 * time.Second,
+			wantRequests:   11,
+		},
+		{
+			name:         "daemon that never serves ends the wait at the timeout",
+			ready:        time.Hour,
+			wantWait:     daemonStartupTimeout,
+			wantRequests: 2,
+			wantErr:      true,
+		},
+		{
+			name:          "caller's deadline ends the wait early",
+			ready:         time.Hour,
+			callerTimeout: 5 * time.Second,
+			wantWait:      5 * time.Second,
+			wantRequests:  2,
+			wantErr:       true,
+		},
+		{
+			// Pings at 0, 1, and 3 seconds are refused. The next would come
+			// after the caller's deadline.
+			name:          "caller's deadline ends the retries early",
+			ready:         time.Hour,
+			notReadyErr:   refused,
+			callerTimeout: 5 * time.Second,
+			wantWait:      5 * time.Second,
+			wantRequests:  6,
+			wantErr:       true,
+			wantLog:       "timeout=5s",
+		},
+		{
+			name:         "daemon that rejects the ping ends the wait at once",
+			status:       http.StatusForbidden,
+			wantRequests: 2,
+			wantErr:      true,
+		},
+		{
+			name:         "TLS client against a plain HTTP daemon ends the wait at once",
+			transportErr: http.ErrSchemeMismatch,
+			wantRequests: 2,
+			wantErr:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				daemon := &startingDaemon{
+					ready:          start.Add(tt.ready),
+					notReadyErr:    tt.notReadyErr,
+					notReadyStatus: tt.notReadyStatus,
+					transportErr:   tt.transportErr,
+					status:         tt.status,
+				}
+				log, logOutput := logcapture.New(zerolog.DebugLevel)
+
+				ctx := t.Context()
+
+				if tt.callerTimeout != 0 {
+					var cancel context.CancelFunc
+
+					ctx, cancel = context.WithTimeout(ctx, tt.callerTimeout)
+					defer cancel()
+				}
+
+				result, err := pingUntilServing(ctx, log, newStartingDaemonClient(t, daemon))
+
+				assert.Equal(t, tt.wantWait, time.Since(start))
+				assert.Equal(t, tt.wantRequests, daemon.requests)
+				assert.Contains(t, logOutput.String(), tt.wantLog)
+
+				if tt.wantErr {
+					require.Error(t, err)
+
+					return
+				}
+
+				require.NoError(t, err)
+				assert.Equal(t, "1.45", result.APIVersion)
+			})
+		})
+	}
+}
+
+// TestNegotiateDockerAPI_WaitsForDaemon verifies that client initialization
+// negotiates the API version with a daemon that starts serving only after one
+// ping has timed out, as on a host that is still restoring its containers.
+func TestNegotiateDockerAPI_WaitsForDaemon(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		daemon := &startingDaemon{ready: time.Now().Add(75 * time.Second)}
+
+		cli, result, err := negotiateDockerAPI(t.Context(), newTestLogger(t), newStartingDaemonClient(t, daemon))
+		require.NoError(t, err)
+		assert.Equal(t, "1.45", result.APIVersion)
+		assert.Equal(t, "1.45", cli.ClientVersion())
+	})
+}
+
+// TestGetCurrentWatchtowerContainer_Retries verifies how the inspect of the
+// running Watchtower container retries. A transient error is tried again
+// after 2 seconds, up to three attempts or until the caller's context ends.
+// Other errors and a container that does not exist end the lookup at once. A
+// caller's context that has already ended allows one attempt and no wait.
+// Each case runs in a synctest bubble, so the delays take no real time.
+func TestGetCurrentWatchtowerContainer_Retries(t *testing.T) {
+	t.Parallel()
+
+	transient := fmt.Errorf("inspect: %w", cerrdefs.ErrUnavailable)
+
+	tests := []struct {
+		name string
+		// deadline bounds the caller's context. Zero leaves it unbounded.
+		deadline time.Duration
+		// ended is how the caller's context has already ended when the lookup
+		// starts, context.Canceled or context.DeadlineExceeded. The inspect then
+		// fails with its context's error, as the Docker client does. Nil leaves
+		// the context running.
+		ended error
+		// results are the inspect results in order. A nil error answers with
+		// the container.
+		results      []error
+		wantErr      error
+		wantAttempts int
+		wantWait     time.Duration
+	}{
+		{
+			name:         "found at once",
+			results:      []error{nil},
+			wantAttempts: 1,
+		},
+		{
+			name:         "found after a transient error",
+			results:      []error{transient, nil},
+			wantAttempts: 2,
+			wantWait:     currentContainerInspectRetryDelay,
+		},
+		{
+			name:         "transient error on every attempt",
+			results:      []error{transient, transient, transient},
+			wantErr:      cerrdefs.ErrUnavailable,
+			wantAttempts: currentContainerInspectAttempts,
+			wantWait:     (currentContainerInspectAttempts - 1) * currentContainerInspectRetryDelay,
+		},
+		{
+			// The deadline passes during the wait before the third attempt.
+			name:         "caller deadline ends the retries",
+			deadline:     currentContainerInspectRetryDelay + time.Second,
+			results:      []error{transient, transient},
+			wantErr:      cerrdefs.ErrUnavailable,
+			wantAttempts: 2,
+			wantWait:     currentContainerInspectRetryDelay + time.Second,
+		},
+		{
+			name:         "caller context already canceled",
+			ended:        context.Canceled,
+			wantErr:      context.Canceled,
+			wantAttempts: 1,
+		},
+		{
+			name:         "caller deadline already passed",
+			ended:        context.DeadlineExceeded,
+			wantErr:      context.DeadlineExceeded,
+			wantAttempts: 1,
+		},
+		{
+			name:         "container that does not exist is not tried again",
+			results:      []error{notFoundError("No such container")},
+			wantErr:      cerrdefs.ErrNotFound,
+			wantAttempts: 1,
+		},
+		{
+			name:         "error that waiting cannot fix is not tried again",
+			results:      []error{fmt.Errorf("inspect: %w", cerrdefs.ErrPermissionDenied)},
+			wantErr:      cerrdefs.ErrPermissionDenied,
+			wantAttempts: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				api := newDockerAPI(t)
+
+				for _, result := range tt.results {
+					var inspect dockerClient.ContainerInspectResult
+					if result == nil {
+						inspect.Container = sourceInspect("/watchtower", true, &dockerContainer.HostConfig{})
+					}
+
+					api.EXPECT().ContainerInspect(mock.Anything, testContainerID, dockerClient.ContainerInspectOptions{}).
+						Return(inspect, result).Once()
+				}
+
+				if tt.ended != nil {
+					api.EXPECT().ContainerInspect(mock.Anything, testContainerID, dockerClient.ContainerInspectOptions{}).
+						RunAndReturn(func(ctx context.Context, _ string, _ dockerClient.ContainerInspectOptions) (dockerClient.ContainerInspectResult, error) {
+							return dockerClient.ContainerInspectResult{}, ctx.Err()
+						}).Once()
+				}
+
+				ctx := t.Context()
+
+				var cancel context.CancelFunc
+
+				switch {
+				case tt.deadline > 0:
+					ctx, cancel = context.WithTimeout(ctx, tt.deadline)
+					defer cancel()
+				case errors.Is(tt.ended, context.Canceled):
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				case errors.Is(tt.ended, context.DeadlineExceeded):
+					ctx, cancel = context.WithDeadline(ctx, time.Now())
+					defer cancel()
+				default:
+				}
+
+				start := time.Now()
+
+				current, err := (&Client{log: newTestLogger(t), api: api}).GetCurrentWatchtowerContainer(ctx, testContainerID)
+
+				assert.Equal(t, tt.wantWait, time.Since(start))
+				assert.Len(t, api.Calls, tt.wantAttempts)
+
+				if tt.wantErr != nil {
+					require.ErrorIs(t, err, tt.wantErr)
+					assert.Nil(t, current)
+
+					return
+				}
+
+				require.NoError(t, err)
+				assert.Equal(t, container.ContainerID(testContainerID), current.ID())
+			})
+		})
+	}
+}

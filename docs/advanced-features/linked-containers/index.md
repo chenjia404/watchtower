@@ -20,11 +20,21 @@ This ensures that dependent services are stopped before their dependencies are u
 
 ### Dependency Detection
 
-Watchtower detects container dependencies through multiple mechanisms, checked in the following priority order:
+Watchtower detects container dependencies from labels and from each container's Docker configuration.
+
+Labels are checked in the following priority order, and only the first one present is used:
 
 1. **Watchtower depends-on label** (`com.centurylinklabs.watchtower.depends-on`)
 2. **Docker Compose depends_on label** (`com.docker.compose.depends_on`)
-3. **Docker links and network mode** (legacy Docker linking and `network_mode: service:container`)
+
+An empty Watchtower depends-on label counts as absent, so the Docker Compose depends_on label is used instead when Compose detection is enabled.
+
+The Docker configuration always counts as well, whichever label is present:
+
+- **Docker links and network mode** (legacy Docker linking, `network_mode: service:SERVICE` for a Compose service, and `network_mode: container:CONTAINER` for a container name or ID)
+- **Volumes from another container** (`volumes_from` in Compose, `--volumes-from` in the Docker CLI)
+
+A container named by both a label and the Docker configuration is a single dependency.
 
 #### Watchtower Depends-On Label
 
@@ -37,9 +47,16 @@ LABEL com.centurylinklabs.watchtower.depends-on="database,redis"
 This label accepts a comma-separated list of container names that must be available before this container starts.
 This supports referencing containers from other Docker Compose projects or stacks, enabling cross-project dependency management.
 
+An entry may also name a Docker Compose service, such as `db` or `my-database`, or a project-qualified service, such as `myproject-db`.
+A service name resolves to every replica of that service.
+
+A service name used in more than one Compose project, such as `db`, resolves to the service in the labeled container's own project when that project has one.
+Otherwise it resolves to the service in every project that has it, so the container restarts when any of them is updated.
+When the service in its own project is unmonitored, the entry is left alone instead (see [Dependencies on Unmonitored Containers](#dependencies_on_unmonitored_containers)).
+Use the container name or a project-qualified service name, such as `myproject-db`, to depend on only one of them.
+
 !!! Warning
-    Use unique, non-ambiguous source container names both in the Docker Compose configuration and when specifying dependencies in the `com.centurylinklabs.watchtower.depends-on` label to ensure correct dependency resolution and behavior across Docker Compose projects/stacks.
-    Ambiguous names can lead to warnings and skipped updates to prevent non-deterministic behavior.
+    An entry that names no container is ignored and logged as a warning.
 
 #### Docker Compose Depends-On Label
 
@@ -75,27 +92,32 @@ The `com.docker.compose.depends_on` label is automatically set by Docker Compose
 
 #### Docker Links and Network Mode
 
-For legacy Docker setups using links or `network_mode: service:container`, Watchtower treats these as implicit dependencies:
+For legacy Docker links, and for containers that use another container's network (`network_mode: service:SERVICE` or `network_mode: container:CONTAINER` in Compose, `--network container:CONTAINER` in the Docker CLI), Watchtower treats these as implicit dependencies:
 
 ```dockerfile title="Legacy Docker linking"
 # Container with explicit link
 docker run --link database:db nginx
 
-# Container using service network mode
-docker run --network container:database nginx
+# Container using another container's network
+docker run --network container:CONTAINER nginx
 ```
+
+Replace *`CONTAINER`* with the name or ID of the container whose network to use.
+
+These count as dependencies even when a depends-on or Compose `depends_on` label names other containers, because the container cannot run without the container whose network it uses.
+The same applies to `volumes_from` (`--volumes-from`): the container is always ordered after the container whose volumes it uses.
 
 ### Topological Sorting
 
 Watchtower uses topological sorting to determine the correct update order. This algorithm:
 
 - Builds a dependency graph from all detected relationships
-- Detects cycles (failing with a circular dependency error)
+- Detects cycles and sets aside every container in one
 - Produces a linear ordering where dependencies precede dependents
 
 !!! Warning
-    Circular dependencies between containers will cause the update process to fail with an error.
-    Ensure your dependency graph is acyclic.
+    Containers in a circular dependency are skipped and reported as skipped, while the rest of the update continues.
+    Ensure your dependency graph is acyclic so those containers are updated.
 
 ### Update Order
 
@@ -112,6 +134,24 @@ This ensures that:
 - Dependent services are stopped before their dependencies change
 - Dependencies are fully restarted before dependents attempt to connect
 
+### Restarting Dependent Containers
+
+When a container is updated, Watchtower also restarts the containers that depend on it, directly or through other restarted containers, without updating their images.
+Dependents are found with the same dependency graph that orders the update, so the containers restarted and the update order always agree.
+
+- A Watchtower container restarts when a container it depends on restarts, such as a VPN container it shares a network with.
+- A container that names a Watchtower container exactly, by container name or ID, restarts when that Watchtower container is updated. The name without its replica number (such as `infra-watchtower` for `infra-watchtower-1`) also works when exactly one Watchtower container has it, so it names nothing when the service runs several replicas.
+- Containers in a circular dependency are neither updated nor restarted.
+
+### Dependencies on Unmonitored Containers
+
+A container that Watchtower does not monitor is left alone, including when a monitored container depends on it.
+Containers are excluded from monitoring by the [container selection](../../configuration/container-selection/index.md) options, such as the enable label, the disable lists, image filters, and scopes.
+
+- A dependency on an unmonitored container is ignored when ordering updates and restarting dependents.
+- A dependency that names an unmonitored container exactly never resolves to a different, monitored container with a similar name.
+- A service name whose service in the container's own Compose project is unmonitored never resolves to the same service in another project.
+
 ## Configuration
 
 ### Automatic Detection
@@ -120,7 +160,8 @@ In most cases, no additional configuration is required. Watchtower automatically
 
 - Docker Compose `depends_on` declarations
 - Existing Docker links
-- `network_mode: service:container` configurations
+- `network_mode: service:SERVICE` and `network_mode: container:CONTAINER` configurations
+- `volumes_from` configurations
 
 !!! Note "Docker Compose Considerations"
     When using Docker Compose, Watchtower leverages `depends_on` declarations for dependency detection. Dependencies are resolved using service names, not container names. Ensure your `depends_on` references service names correctly.
@@ -155,7 +196,8 @@ This disables parsing of the `com.docker.compose.depends_on` label while still h
 
 - Watchtower's explicit `com.centurylinklabs.watchtower.depends-on` label
 - Legacy Docker links
-- Network mode dependencies (`network_mode: service:container`)
+- Network mode dependencies (`network_mode: service:SERVICE` and `network_mode: container:CONTAINER`)
+- Volumes from another container (`volumes_from`)
 
 ### Explicit Dependencies
 
@@ -231,8 +273,11 @@ Consider a classic WordPress setup with MySQL database:
       mysql:
         image: mysql:8.0
         environment:
-          MYSQL_ROOT_PASSWORD: example
+          MYSQL_ROOT_PASSWORD: 'DB_ROOT_PASSWORD'
     ```
+
+    Replace *`DB_ROOT_PASSWORD`* with a root password for the database, inside the single quotes so that YAML reads every character as part of it. Inside the quotes, write each `'` as `''`. Write each `$` as `$$`, because Compose reads a `$` as the start of a variable even inside quotes.
+
 === "Update Process"
     When Watchtower detects a MySQL update:
 
@@ -304,7 +349,7 @@ For applications using traditional Docker linking:
 
 ### Network Mode Dependencies
 
-Containers using `network_mode: service:container`:
+Containers using `network_mode: service:SERVICE`:
 
 === "Docker Compose"
 
@@ -326,12 +371,28 @@ Containers using `network_mode: service:container`:
 
 ### Common Issues
 
-#### Updates Failing Due to Circular Dependencies
+Watchtower reports each of the following dependency problems once per container.
+The first scan that finds a problem logs and notifies it as a warning.
+Later scans log it at debug level.
+Every scan still skips a container that depends on itself or sits in a circular dependency, and lists it as skipped in the session report.
+A container depends on itself when one of its dependencies names it by its container name or by its own Compose service.
+A skipped container is not restarted when another of its dependencies is updated.
+A depends-on entry that names no container is only ignored, and its container is still checked and updated.
+A recreated container or a restart of Watchtower reports the problem again.
 
-!!! Error
-    If you see "circular reference detected" errors, check your dependency declarations for cycles.
+#### Containers Skipped Due to Circular Dependencies
+
+!!! Warning
+    If you see "Skipping container update (circular dependency)" warnings, check your dependency declarations for cycles.
 
 **Solution**: Review and remove circular dependencies. For example, if A depends on B and B depends on A, remove one of the dependencies or restructure your services.
+
+#### Ignored Depends-On Entries
+
+!!! Warning
+    If you see "Ignoring depends-on entry that names no container" warnings, the named `com.centurylinklabs.watchtower.depends-on` entry matched no container.
+
+**Solution**: Use the exact container name, a Compose service name, or a project-qualified service name such as `myproject-db`.
 
 #### Containers Not Updating in Expected Order
 
@@ -353,9 +414,7 @@ watchtower --debug
 
 Look for log messages like:
 
-- "Retrieved links from watchtower depends-on label"
-- "Retrieved links from compose depends-on label"
-- "Completed dependency sort"
+- "Found container dependencies", which lists each container's dependencies once per scan
 
 ### Debugging Commands
 

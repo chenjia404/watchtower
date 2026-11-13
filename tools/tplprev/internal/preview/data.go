@@ -25,11 +25,11 @@ type PreviewData struct {
 const (
 	idLength                = 32
 	maxTimeIncrementSeconds = 30
-	previewInstanceCount    = 2
 	previewRemovedInstances = 1
 	previewAPIPort          = "8080"
-	previewCooldown         = "24h"
-	previewEligibleIn       = "6h"
+	previewCooldown         = "1 day"
+	previewImageAge         = "18 hours"
+	previewEligibleIn       = "6 hours"
 	previewEligibleAfter    = 6 * time.Hour
 	previewDiskUsage        = int64(32_000_000_000)
 	previewDiskMax          = int64(40_000_000_000)
@@ -41,6 +41,7 @@ const (
 var (
 	errExecutionFailed = errors.New("execution failed")
 	errSkipped         = errors.New("container skipped")
+	errImageCooldown   = errors.New("image is within cooldown period")
 
 	// previewStartTime is the fixed session start so generated timestamps stay stable.
 	previewStartTime = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -73,14 +74,21 @@ func (p *PreviewData) AddFromState(state State) {
 	name := p.generateName()
 	image := p.generateImageName(name)
 
+	// The first skipped container waits out an image cooldown. Templates that
+	// read the cooldown fields then have one to render.
+	inCooldown := state == SkippedState && len(p.report.skipped) == 0
+
 	var err error
 
-	//nolint:exhaustive // Only failed and skipped states carry a simulated error.
-	switch state {
-	case FailedState:
+	switch {
+	case state == FailedState:
 		err = fmt.Errorf("%w: %s", errExecutionFailed, p.randomEntry(errorMessages))
-	case SkippedState:
+	case inCooldown:
+		err = errImageCooldown
+	case state == SkippedState:
 		err = fmt.Errorf("%w: %s", errSkipped, p.randomEntry(skippedMessages))
+	default:
+		// Other states carry no simulated error.
 	}
 
 	status := &containerStatus{
@@ -93,29 +101,54 @@ func (p *PreviewData) AddFromState(state State) {
 		state:          state,
 	}
 	if state == UpdatedState {
+		status.gitRepo = "https://github.com/org/app.git"
 		status.gitRef = "v1.2.4"
 		status.changelog = "https://github.com/org/app/releases/tag/v1.2.4"
+		status.source = "https://github.com/org/app"
+		status.imageURL = "https://github.com/org/app/pkgs/container/app"
+		status.documentation = "https://github.com/org/app#readme"
 		status.currentImageVersion = "1.2.3"
 		status.latestImageVersion = "1.2.4"
 		status.currentImageRevision = "1111111111"
 		status.latestImageRevision = "2222222222"
 	}
 
+	if inCooldown {
+		// Watchtower records a container that a cooldown holds back with its
+		// running image as the latest.
+		status.newImage = status.oldImage
+		status.cooldownAge = previewImageAge
+		status.cooldownDelay = previewCooldown
+		status.cooldownRemaining = previewEligibleIn
+		status.cooldownEligibleAt = p.lastTime.Add(previewEligibleAfter)
+	}
+
+	var category *[]report.ContainerReport
+
 	switch state {
-	case ScannedState:
-		p.report.scanned = append(p.report.scanned, status)
 	case UpdatedState:
-		p.report.updated = append(p.report.updated, status)
+		category = &p.report.updated
 	case FailedState:
-		p.report.failed = append(p.report.failed, status)
+		category = &p.report.failed
 	case SkippedState:
-		p.report.skipped = append(p.report.skipped, status)
+		category = &p.report.skipped
 	case RestartedState:
-		p.report.restarted = append(p.report.restarted, status)
+		category = &p.report.restarted
 	case StaleState:
-		p.report.stale = append(p.report.stale, status)
+		category = &p.report.stale
 	case FreshState:
-		p.report.fresh = append(p.report.fresh, status)
+		category = &p.report.fresh
+	default:
+		// A state the preview does not know joins no list.
+	}
+
+	if category != nil {
+		*category = append(*category, status)
+
+		// Watchtower's scanned list holds every container it did not skip.
+		if state != SkippedState {
+			p.report.scanned = append(p.report.scanned, status)
+		}
 	}
 
 	p.containerCount++
@@ -232,20 +265,12 @@ func (p *PreviewData) dataForMessage(msg, name, image string) map[string]any {
 			"image_id":   oldID,
 			"error":      "cannot verify image usage",
 		}
-	case "Container updated":
-		return map[string]any{
-			"container": name,
-			"image":     image,
-			"old_id":    oldID,
-			"new_id":    newID,
-		}
-	case "Detected multiple Watchtower instances - initiating cleanup":
-		return map[string]any{"count": previewInstanceCount}
 	case "Successfully removed all excess Watchtower containers":
 		return map[string]any{"removed_instances": previewRemovedInstances}
 	case "Image is within cooldown period - not eligible for update":
 		return map[string]any{
 			"image":       image,
+			"image_age":   previewImageAge,
 			"cooldown":    previewCooldown,
 			"eligible_in": previewEligibleIn,
 			"eligible_at": p.lastTime.Add(previewEligibleAfter).Format(time.RFC3339),

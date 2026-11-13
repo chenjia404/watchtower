@@ -299,14 +299,16 @@ To use Mike for local development and testing of versioned documentation:
      To build the documentation and commit the built files to a local Git branch (e.g., gh-pages) without pushing to a remote repository:
 
      ```bash
-     mike deploy <version> --config-file build/mkdocs/mkdocs.yaml
+     mike deploy VERSION --config-file build/mkdocs/mkdocs.yaml
      ```
 
-     Replace `<version>` with the desired version identifier (e.g., `1.0.0`, `dev`). You can also specify aliases:
+     Replace *`VERSION`* with the desired version identifier, such as `1.0.0` or `dev`. You can also specify aliases:
 
      ```bash
-     mike deploy <version> <alias> --config-file build/mkdocs/mkdocs.yaml
+     mike deploy VERSION ALIAS --config-file build/mkdocs/mkdocs.yaml
      ```
+
+     Replace *`ALIAS`* with the alias to point at that version, such as `latest`.
 
      Use `--update-aliases` to move an alias from another version if needed.
 
@@ -432,7 +434,7 @@ The template preview is integrated into `docs/notifications/template-preview/ind
 #### Workflow Process
 
 1. **Checkout**: Full repository with history for versioning
-2. **Go Setup**: Installs Go 1.26.x for WASM compilation
+2. **Go Setup**: Installs Go 1.27.x for WASM compilation
 3. **Template Preview Build**: Executes `scripts/build-tplprev.sh`
 4. **Python Setup**: Configures Python with pip caching
 5. **MkDocs Installation**: Installs dependencies from `docs-requirements.txt`
@@ -462,7 +464,7 @@ The template preview is integrated into `docs/notifications/template-preview/ind
 ### Prerequisites
 
 - Python 3.x with pip
-- Go 1.26.x or later
+- Go 1.27.x or later
 - Git with full repository history
 
 ### Local Development
@@ -528,7 +530,7 @@ The documentation is automatically deployed via GitHub Actions. Manual deploymen
 
 #### Common Issues
 
-- **WASM Build Failures**: Ensure Go version matches CI (1.26.x)
+- **WASM Build Failures**: Ensure Go version matches CI (1.27.x)
 - **Missing Dependencies**: Clear pip cache and reinstall
 - **Version Conflicts**: Check Mike version aliases with `mike list`
 

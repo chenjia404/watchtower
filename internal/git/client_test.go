@@ -16,17 +16,18 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
-	dockerImage "github.com/moby/moby/api/types/image"
-
-	"github.com/nicholas-fedor/watchtower/internal/compose"
-	gitPkg "github.com/nicholas-fedor/watchtower/pkg/container/git"
-	"github.com/nicholas-fedor/watchtower/pkg/container/oci"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
-	mockTypes "github.com/nicholas-fedor/watchtower/pkg/types/mocks"
+	composeLabels "github.com/nicholas-fedor/watchtower/internal/compose/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container"
+	"github.com/nicholas-fedor/watchtower/internal/container/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container/oci"
+	"github.com/nicholas-fedor/watchtower/internal/container/provenance"
+	"github.com/nicholas-fedor/watchtower/internal/git/provider"
+	"github.com/nicholas-fedor/watchtower/internal/git/semver"
+	gitConfig "github.com/nicholas-fedor/watchtower/internal/settings/config/git"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/containerfixture"
+	"github.com/nicholas-fedor/watchtower/internal/testutil/modelfixture"
 )
 
 type stubLister struct {
@@ -69,39 +70,72 @@ func TestCheckContainer_RejectedComposeStampRetries(t *testing.T) {
 	client.RejectApply(ApplyStampKeyFrom(worker), current, otherPrevious, "")
 	client.RejectApply(ApplyStampKeyFrom(other), current, previous, "")
 
-	got, err := CheckContainer(t.Context(), client, api, types.UpdateParams{})
+	got, err := CheckContainer(t.Context(), client, api, gitConfig.Defaults{})
 	require.NoError(t, err)
 	assert.True(t, got.Stale)
 	assert.Equal(t, current, got.Commit)
 
 	client.AcceptApply(ApplyStampKeyFrom(api), current)
 
-	got, err = CheckContainer(t.Context(), client, api, types.UpdateParams{})
+	got, err = CheckContainer(t.Context(), client, api, gitConfig.Defaults{})
 	require.NoError(t, err)
 	assert.False(t, got.Stale)
 
-	got, err = CheckContainer(t.Context(), client, worker, types.UpdateParams{})
+	got, err = CheckContainer(t.Context(), client, worker, gitConfig.Defaults{})
 	require.NoError(t, err)
 	assert.True(t, got.Stale)
 
-	got, err = CheckContainer(t.Context(), client, other, types.UpdateParams{})
+	got, err = CheckContainer(t.Context(), client, other, gitConfig.Defaults{})
 	require.NoError(t, err)
 	assert.True(t, got.Stale)
 }
 
-func labeledComposeMember(t *testing.T, project, service, number, dir, files, commit string) types.Container {
+func labeledComposeMember(t *testing.T, project, service, number, dir, files, commit string) *container.Container {
 	t.Helper()
 
-	return labeledContainer(t, map[string]string{
-		gitPkg.RepoLabel:                "https://example.com/org/app.git",
-		gitPkg.RefLabel:                 "main",
-		gitPkg.LastCommitLabel:          commit,
-		gitPkg.ComposeDirLabel:          dir,
-		compose.ComposeProjectLabel:     project,
-		compose.ComposeServiceLabel:     service,
-		compose.ComposeContainerNumber:  number,
-		compose.ComposeConfigFilesLabel: files,
+	return labeledContainer(map[string]string{
+		labels.GitRepo:                        "https://example.com/org/app.git",
+		labels.GitRef:                         "main",
+		labels.GitLastCommit:                  commit,
+		labels.ComposeDir:                     dir,
+		composeLabels.ComposeProjectLabel:     project,
+		composeLabels.ComposeServiceLabel:     service,
+		composeLabels.ComposeContainerNumber:  number,
+		composeLabels.ComposeConfigFilesLabel: files,
 	})
+}
+
+// TestClient_UnrestartedBuild checks that a recorded no-restart build is found
+// only for the same container and commit.
+func TestClient_UnrestartedBuild(t *testing.T) {
+	t.Parallel()
+
+	const (
+		commit = "0123456789abcdef0123456789abcdef01234567"
+		image  = container.ImageID("sha256:built")
+	)
+
+	client := testClient(t, nil)
+	assert.Empty(t, client.UnrestartedBuild("app", commit), "nothing recorded yet")
+
+	client.RecordUnrestartedBuild("app", commit, image)
+
+	assert.Equal(t, image, client.UnrestartedBuild("app", commit))
+	assert.Equal(t, image, client.UnrestartedBuild("app", "0123456789AB"), "a short or uppercase SHA names the same commit")
+	assert.Empty(t, client.UnrestartedBuild("app", "fedcba9876543210fedcba9876543210fedcba98"), "the remote advanced")
+	assert.Empty(t, client.UnrestartedBuild("other", commit), "another container")
+	assert.Empty(t, client.UnrestartedBuild("app", ""))
+
+	client.RecordUnrestartedBuild("app", "fedcba9876543210fedcba9876543210fedcba98", "sha256:newer")
+	assert.Empty(t, client.UnrestartedBuild("app", commit), "a newer build replaces the record")
+
+	client.RecordUnrestartedBuild("skipped", commit, "")
+	assert.Empty(t, client.UnrestartedBuild("skipped", commit), "an empty image is not recorded")
+
+	var nilClient *Client
+
+	nilClient.RecordUnrestartedBuild("app", commit, image)
+	assert.Empty(t, nilClient.UnrestartedBuild("app", commit))
 }
 
 func TestCheck_NoStampIsNotStale(t *testing.T) {
@@ -158,7 +192,7 @@ func TestCheck_RejectsUnsafeRef(t *testing.T) {
 		Repo: "https://example.com/org/app.git",
 		Ref:  "foo..bar",
 	})
-	require.ErrorIs(t, err, ErrInvalidRef)
+	require.ErrorIs(t, err, errInvalidRef)
 }
 
 func TestCheck_BranchSHACompare(t *testing.T) {
@@ -256,7 +290,7 @@ func TestCheck_MissingRef(t *testing.T) {
 		Repo: "https://example.com/org/app.git",
 		Ref:  "missing",
 	})
-	require.ErrorIs(t, err, ErrRefNotFound)
+	require.ErrorIs(t, err, errRefNotFound)
 }
 
 func TestCheck_TagPolicyIgnoresNonSemver(t *testing.T) {
@@ -271,7 +305,7 @@ func TestCheck_TagPolicyIgnoresNonSemver(t *testing.T) {
 
 	patch, err := client.Check(t.Context(), CheckRequest{
 		Repo:    "https://example.com/org/app.git",
-		Policy:  types.GitPolicyPatch,
+		Policy:  semver.PolicyPatch,
 		LastTag: "v1.2.3",
 	})
 	require.NoError(t, err)
@@ -281,7 +315,7 @@ func TestCheck_TagPolicyIgnoresNonSemver(t *testing.T) {
 
 	none, err := client.Check(t.Context(), CheckRequest{
 		Repo:    "https://example.com/org/app.git",
-		Policy:  types.GitPolicyPatch,
+		Policy:  semver.PolicyPatch,
 		LastTag: "v1.2.4",
 	})
 	require.NoError(t, err)
@@ -332,7 +366,7 @@ func TestCheck_TagPolicyKnownCommitIsBaseline(t *testing.T) {
 
 		got, err := client.Check(t.Context(), CheckRequest{
 			Repo:       "https://example.com/org/app.git",
-			Policy:     types.GitPolicyPatch,
+			Policy:     semver.PolicyPatch,
 			LastCommit: "def2222",
 		})
 		require.NoError(t, err)
@@ -346,7 +380,7 @@ func TestCheck_TagPolicyKnownCommitIsBaseline(t *testing.T) {
 
 		got, err := client.Check(t.Context(), CheckRequest{
 			Repo:       "https://example.com/org/app.git",
-			Policy:     types.GitPolicyPatch,
+			Policy:     semver.PolicyPatch,
 			LastTag:    "nightly",
 			LastCommit: "def2222",
 		})
@@ -366,7 +400,7 @@ func TestCheck_TagPolicyKnownCommitIsBaseline(t *testing.T) {
 		})
 		got, err := wider.Check(t.Context(), CheckRequest{
 			Repo:       "https://example.com/org/app.git",
-			Policy:     types.GitPolicyPatch,
+			Policy:     semver.PolicyPatch,
 			LastCommit: "abc1111",
 		})
 		require.NoError(t, err)
@@ -380,7 +414,7 @@ func TestCheck_TagPolicyKnownCommitIsBaseline(t *testing.T) {
 
 		got, err := client.Check(t.Context(), CheckRequest{
 			Repo:       "https://example.com/org/app.git",
-			Policy:     types.GitPolicyPatch,
+			Policy:     semver.PolicyPatch,
 			LastCommit: "abc1111",
 		})
 		require.NoError(t, err)
@@ -394,7 +428,7 @@ func TestCheck_TagPolicyKnownCommitIsBaseline(t *testing.T) {
 
 		got, err := client.Check(t.Context(), CheckRequest{
 			Repo:    "https://example.com/org/app.git",
-			Policy:  types.GitPolicyMajor,
+			Policy:  semver.PolicyMajor,
 			LastTag: "nightly",
 		})
 		require.NoError(t, err)
@@ -438,11 +472,11 @@ func TestLookupAPIHostMatch(t *testing.T) {
 	t.Parallel()
 
 	client := testClient(t, nil)
-	client.opts.Hosts = map[string]string{"git.example.com": types.GitHostGitea}
+	client.opts.Hosts = map[string]string{"git.example.com": provider.Gitea}
 
 	kind, origin, ok := client.lookupAPI(t.Context(), "git.example.com", "https://git.example.com:3000/gitea")
 	require.True(t, ok)
-	assert.Equal(t, types.GitHostGitea, kind)
+	assert.Equal(t, provider.Gitea, kind)
 	assert.Equal(t, "git.example.com:3000", origin.Host)
 
 	_, _, ok = client.lookupAPI(t.Context(), "git.example.com", "https://evil.example")
@@ -459,7 +493,7 @@ func TestCheck_TagPolicyNoStampSelectsHighest(t *testing.T) {
 
 	got, err := client.Check(t.Context(), CheckRequest{
 		Repo:   "https://example.com/org/app.git",
-		Policy: types.GitPolicyMajor,
+		Policy: semver.PolicyMajor,
 	})
 	require.NoError(t, err)
 	assert.False(t, got.Stale)
@@ -479,7 +513,7 @@ func TestCheck_TagPolicyNoStampFallsBackToRef(t *testing.T) {
 	got, err := client.Check(t.Context(), CheckRequest{
 		Repo:   "https://example.com/org/app.git",
 		Ref:    "main",
-		Policy: types.GitPolicyPatch,
+		Policy: semver.PolicyPatch,
 	})
 	require.NoError(t, err)
 	assert.False(t, got.Stale)
@@ -495,7 +529,7 @@ func TestCheck_TagPolicyListError(t *testing.T) {
 
 	_, err := client.Check(t.Context(), CheckRequest{
 		Repo:   "https://example.com/org/app.git",
-		Policy: types.GitPolicyPatch,
+		Policy: semver.PolicyPatch,
 	})
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "ls-remote tags")
@@ -610,7 +644,7 @@ func TestClone(t *testing.T) {
 		var client *Client
 
 		_, err := client.Clone(t.Context(), "https://example.com/org/app.git", CheckResult{})
-		require.ErrorIs(t, err, ErrCloneFailed)
+		require.ErrorIs(t, err, errCloneFailed)
 		assert.ErrorContains(t, err, "client is nil")
 	})
 
@@ -639,7 +673,7 @@ func TestClone(t *testing.T) {
 			Kind:   kindBranch,
 			Ref:    "main",
 		})
-		require.ErrorIs(t, err, ErrCloneFailed)
+		require.ErrorIs(t, err, errCloneFailed)
 	})
 }
 
@@ -794,11 +828,9 @@ func TestCheckContainer(t *testing.T) {
 	t.Run("not associated", func(t *testing.T) {
 		t.Parallel()
 
-		c := mockTypes.NewMockContainer(t)
-		c.EXPECT().GetLabel(mock.Anything).Return("", false)
-		c.EXPECT().ImageName().Return("nginx:latest")
+		c := modelfixture.ContainerWithoutImageInfo(containerfixture.WithImageName("nginx:latest"))
 
-		got, err := CheckContainer(t.Context(), testClient(t, nil), c, types.UpdateParams{})
+		got, err := CheckContainer(t.Context(), testClient(t, nil), c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.Equal(t, CheckResult{}, got)
 	})
@@ -806,14 +838,14 @@ func TestCheckContainer(t *testing.T) {
 	t.Run("uses repo label and stamp", func(t *testing.T) {
 		t.Parallel()
 
-		c := labeledContainer(t, map[string]string{
-			gitPkg.RepoLabel:       "https://example.com/org/app.git",
-			gitPkg.RefLabel:        "main",
-			gitPkg.LastCommitLabel: "old",
+		c := labeledContainer(map[string]string{
+			labels.GitRepo:       "https://example.com/org/app.git",
+			labels.GitRef:        "main",
+			labels.GitLastCommit: "old",
 		})
 
 		client := testClient(t, []RemoteRef{{Name: "refs/heads/main", Hash: "newsha"}})
-		got, err := CheckContainer(t.Context(), client, c, types.UpdateParams{})
+		got, err := CheckContainer(t.Context(), client, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.True(t, got.Stale)
 		assert.Equal(t, "newsha", got.Commit)
@@ -822,13 +854,29 @@ func TestCheckContainer(t *testing.T) {
 	t.Run("invalid policy is fail-closed", func(t *testing.T) {
 		t.Parallel()
 
-		c := labeledContainer(t, map[string]string{
-			gitPkg.RepoLabel:         "https://example.com/org/app.git",
-			gitPkg.SemverPolicyLabel: "nightly",
+		c := labeledContainer(map[string]string{
+			labels.GitRepo:         "https://example.com/org/app.git",
+			labels.GitSemverPolicy: "nightly",
 		})
 
-		got, err := CheckContainer(t.Context(), testClient(t, nil), c, types.UpdateParams{})
-		require.ErrorIs(t, err, ErrInvalidPolicy)
+		got, err := CheckContainer(t.Context(), testClient(t, nil), c, gitConfig.Defaults{})
+		require.ErrorIs(t, err, semver.ErrInvalidPolicy)
+		require.EqualError(t, err, "invalid git semver policy: nightly")
+		assert.Equal(t, CheckResult{}, got)
+	})
+
+	t.Run("invalid policy label on a mapped image is fail-closed", func(t *testing.T) {
+		t.Parallel()
+
+		c := labeledContainer(map[string]string{labels.GitSemverPolicy: "nightly"})
+		defaults := gitConfig.Defaults{
+			Images: map[string]gitConfig.Image{
+				"app:latest": {Repo: "https://example.com/org/app.git", Policy: semver.PolicyPatch},
+			},
+		}
+
+		got, err := CheckContainer(t.Context(), testClient(t, nil), c, defaults)
+		require.ErrorIs(t, err, semver.ErrInvalidPolicy)
 		assert.Equal(t, CheckResult{}, got)
 	})
 
@@ -836,13 +884,14 @@ func TestCheckContainer(t *testing.T) {
 		t.Parallel()
 
 		rawHost := "https://user:secret@git.example.com?token=secret=bad"
-		c := labeledContainer(t, map[string]string{
-			gitPkg.RepoLabel: "https://example.com/org/app.git",
-			gitPkg.HostLabel: rawHost,
+		c := labeledContainer(map[string]string{
+			labels.GitRepo: "https://example.com/org/app.git",
+			labels.GitHost: rawHost,
 		})
 
-		got, err := CheckContainer(t.Context(), testClient(t, nil), c, types.UpdateParams{})
-		require.ErrorIs(t, err, ErrInvalidHost)
+		got, err := CheckContainer(t.Context(), testClient(t, nil), c, gitConfig.Defaults{})
+		require.ErrorIs(t, err, provenance.ErrInvalidHost)
+		require.EqualError(t, err, "invalid git-host: host=type mappings are not supported")
 		assert.NotContains(t, err.Error(), "secret")
 		assert.NotContains(t, err.Error(), rawHost)
 		assert.Equal(t, CheckResult{}, got)
@@ -851,26 +900,26 @@ func TestCheckContainer(t *testing.T) {
 	t.Run("no stamp is not stale and is remembered", func(t *testing.T) {
 		t.Parallel()
 
-		c := labeledContainer(t, map[string]string{
-			gitPkg.RepoLabel: "https://example.com/org/app.git",
-			gitPkg.RefLabel:  "main",
+		c := labeledContainer(map[string]string{
+			labels.GitRepo: "https://example.com/org/app.git",
+			labels.GitRef:  "main",
 		})
 
 		lister := &mutableLister{refs: []RemoteRef{{Name: "refs/heads/main", Hash: "aaa111"}}}
 		client := testClient(t, nil)
 		client.lister = lister
 
-		first, err := CheckContainer(t.Context(), client, c, types.UpdateParams{})
+		first, err := CheckContainer(t.Context(), client, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.False(t, first.Stale)
 		assert.Equal(t, "aaa111", first.Commit)
 
-		second, err := CheckContainer(t.Context(), client, c, types.UpdateParams{})
+		second, err := CheckContainer(t.Context(), client, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.False(t, second.Stale)
 
 		lister.refs = []RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}}
-		third, err := CheckContainer(t.Context(), client, c, types.UpdateParams{})
+		third, err := CheckContainer(t.Context(), client, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.True(t, third.Stale)
 		assert.Equal(t, "bbb222", third.Commit)
@@ -879,18 +928,18 @@ func TestCheckContainer(t *testing.T) {
 	t.Run("oci revision is a baseline", func(t *testing.T) {
 		t.Parallel()
 
-		c := labeledImageContainer(t, map[string]string{
-			gitPkg.RepoLabel: "https://example.com/org/app.git",
-			gitPkg.RefLabel:  "main",
-		}, "app:latest", ociImage("aaa111", ""))
+		c := labeledImageContainer(map[string]string{
+			labels.GitRepo: "https://example.com/org/app.git",
+			labels.GitRef:  "main",
+		}, "app:latest", ociImageLabels("aaa111", ""))
 
 		client := testClient(t, []RemoteRef{{Name: "refs/heads/main", Hash: "aaa111"}})
-		got, err := CheckContainer(t.Context(), client, c, types.UpdateParams{})
+		got, err := CheckContainer(t.Context(), client, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.False(t, got.Stale)
 
 		staleClient := testClient(t, []RemoteRef{{Name: "refs/heads/main", Hash: "bbb222"}})
-		stale, err := CheckContainer(t.Context(), staleClient, c, types.UpdateParams{})
+		stale, err := CheckContainer(t.Context(), staleClient, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.True(t, stale.Stale)
 		assert.Equal(t, "bbb222", stale.Commit)
@@ -899,15 +948,21 @@ func TestCheckContainer(t *testing.T) {
 	t.Run("git shortsha image tag is a baseline", func(t *testing.T) {
 		t.Parallel()
 
-		c := labeledImageContainer(t, map[string]string{
-			gitPkg.RepoLabel: "https://example.com/org/app.git",
-			gitPkg.RefLabel:  "main",
+		c := labeledImageContainer(map[string]string{
+			labels.GitRepo: "https://example.com/org/app.git",
+			labels.GitRef:  "main",
 		}, "app:git-aaa111bbbbcc", nil)
 
 		client := testClient(t, []RemoteRef{{Name: "refs/heads/main", Hash: "aaa111bbbbccdddd"}})
-		got, err := CheckContainer(t.Context(), client, c, types.UpdateParams{})
+		got, err := CheckContainer(t.Context(), client, c, gitConfig.Defaults{})
 		require.NoError(t, err)
 		assert.False(t, got.Stale)
+
+		staleClient := testClient(t, []RemoteRef{{Name: "refs/heads/main", Hash: "bbb222cccc"}})
+		stale, err := CheckContainer(t.Context(), staleClient, c, gitConfig.Defaults{})
+		require.NoError(t, err)
+		assert.True(t, stale.Stale)
+		assert.Equal(t, "bbb222cccc", stale.Commit)
 	})
 }
 
@@ -919,75 +974,67 @@ func (m *mutableLister) List(context.Context, string) ([]RemoteRef, error) {
 	return m.refs, nil
 }
 
-// labeledContainer returns a container whose GetLabel values come from labels.
+// labeledContainer returns a container with the given labels that runs
+// app:latest. Its image info is missing, so no OCI annotations apply.
 //
 // Parameters:
-//   - t: Test handle.
-//   - labels: Label key to value map.
+//   - containerLabels: Label key to value map.
 //
 // Returns:
-//   - types.Container: Mock container.
-func labeledContainer(t *testing.T, labels map[string]string) types.Container {
-	t.Helper()
-
-	return labeledImageContainer(t, labels, "app:latest", nil)
+//   - *container.Container: Container built from inspect data.
+func labeledContainer(containerLabels map[string]string) *container.Container {
+	return labeledImageContainer(containerLabels, "app:latest", nil)
 }
 
-// labeledImageContainer returns a container with labels, image name, and optional inspect data.
+// labeledImageContainer returns a container with labels and an image name.
 //
 // Parameters:
-//   - t: Test handle.
-//   - labels: Label key to value map.
-//   - imageName: ImageName() result.
-//   - info: Image inspect response, or nil when image metadata is absent.
+//   - containerLabels: Label key to value map.
+//   - imageName: Image reference the container runs.
+//   - imageLabels: The image's config labels, or nil when its image info is
+//     missing.
 //
 // Returns:
-//   - types.Container: Mock container.
+//   - *container.Container: Container built from inspect data.
 func labeledImageContainer(
-	t *testing.T,
-	labels map[string]string,
+	containerLabels map[string]string,
 	imageName string,
-	info *dockerImage.InspectResponse,
-) types.Container {
-	t.Helper()
-
-	c := mockTypes.NewMockContainer(t)
-	c.EXPECT().GetLabel(mock.Anything).RunAndReturn(func(key string) (string, bool) {
-		value, ok := labels[key]
-
-		return value, ok
-	}).Maybe()
-	c.EXPECT().ImageName().Return(imageName).Maybe()
-	c.EXPECT().HasImageInfo().Return(info != nil).Maybe()
-
-	if info != nil {
-		c.EXPECT().ImageInfo().Return(info).Maybe()
+	imageLabels map[string]string,
+) *container.Container {
+	if imageLabels == nil {
+		return modelfixture.ContainerWithoutImageInfo(
+			containerfixture.WithLabels(containerLabels),
+			containerfixture.WithImageName(imageName),
+		)
 	}
 
-	return c
+	return modelfixture.Container(
+		containerfixture.WithLabels(containerLabels),
+		containerfixture.WithImageName(imageName),
+		containerfixture.WithImageLabels(imageLabels),
+	)
 }
 
-// ociImage returns image inspect data with optional OCI revision and version labels.
+// ociImageLabels returns image labels with optional OCI revision and version
+// annotations.
 //
 // Parameters:
 //   - revision: org.opencontainers.image.revision value, or empty.
 //   - version: org.opencontainers.image.version value, or empty.
 //
 // Returns:
-//   - *dockerImage.InspectResponse: Inspect payload with those labels.
-func ociImage(revision, version string) *dockerImage.InspectResponse {
-	cfg := &dockerspec.DockerOCIImageConfig{}
-
-	cfg.Labels = map[string]string{}
+//   - map[string]string: Image config labels with those annotations.
+func ociImageLabels(revision, version string) map[string]string {
+	imageLabels := map[string]string{}
 	if revision != "" {
-		cfg.Labels[oci.RevisionLabel] = revision
+		imageLabels[oci.RevisionLabel] = revision
 	}
 
 	if version != "" {
-		cfg.Labels[oci.VersionLabel] = version
+		imageLabels[oci.VersionLabel] = version
 	}
 
-	return &dockerImage.InspectResponse{Config: cfg}
+	return imageLabels
 }
 
 func TestGitHubAPIWithRewrittenClient(t *testing.T) {
@@ -1061,15 +1108,15 @@ func githubTagsAt(ctx context.Context, client *Client, base, owner, repo string)
 func TestProviderKindUnknownUsesGoGit(t *testing.T) {
 	t.Parallel()
 
-	assert.Empty(t, types.ResolveGitHostKind("git.unknown.example", nil))
-	assert.Equal(t, types.GitHostGitea, types.ResolveGitHostKind("git.example.com", map[string]string{
-		"git.example.com": types.GitHostForgejo,
+	assert.Empty(t, provider.ResolveHostKind("git.unknown.example", nil))
+	assert.Equal(t, provider.Gitea, provider.ResolveHostKind("git.example.com", map[string]string{
+		"git.example.com": provider.Forgejo,
 	}))
-	assert.Equal(t, types.GitHostGitHub, types.ResolveGitHostKind("github.com", nil))
-	assert.Equal(t, types.GitHostGitLab, types.ResolveGitHostKind("gitlab.com", nil))
-	assert.Equal(t, types.GitHostGitea, types.ResolveGitHostKind("codeberg.org", nil))
-	assert.Equal(t, types.GitHostGitHub, types.ResolveGitHostKind("github.company.com", map[string]string{
-		"github.company.com": types.GitHostGitHub,
+	assert.Equal(t, provider.GitHub, provider.ResolveHostKind("github.com", nil))
+	assert.Equal(t, provider.GitLab, provider.ResolveHostKind("gitlab.com", nil))
+	assert.Equal(t, provider.Gitea, provider.ResolveHostKind("codeberg.org", nil))
+	assert.Equal(t, provider.GitHub, provider.ResolveHostKind("github.company.com", map[string]string{
+		"github.company.com": provider.GitHub,
 	}))
 }
 
@@ -1092,7 +1139,7 @@ func TestClassifyHostsDetectsProviders(t *testing.T) {
 		client.http = rewriteHostClient(srv)
 
 		got := client.ClassifyHosts(t.Context(), []url.URL{httpsOrigin("git.example.com")})
-		assert.Equal(t, types.GitHostGitea, got["git.example.com"])
+		assert.Equal(t, provider.Gitea, got["git.example.com"])
 	})
 
 	t.Run("gitlab", func(t *testing.T) {
@@ -1115,7 +1162,7 @@ func TestClassifyHostsDetectsProviders(t *testing.T) {
 		client.http = rewriteHostClient(srv)
 
 		got := client.ClassifyHosts(t.Context(), []url.URL{httpsOrigin("gitlab.internal")})
-		assert.Equal(t, types.GitHostGitLab, got["gitlab.internal"])
+		assert.Equal(t, provider.GitLab, got["gitlab.internal"])
 	})
 
 	t.Run("github enterprise", func(t *testing.T) {
@@ -1135,7 +1182,7 @@ func TestClassifyHostsDetectsProviders(t *testing.T) {
 		client.http = rewriteHostClient(srv)
 
 		got := client.ClassifyHosts(t.Context(), []url.URL{httpsOrigin("github.company.com")})
-		assert.Equal(t, types.GitHostGitHub, got["github.company.com"])
+		assert.Equal(t, provider.GitHub, got["github.company.com"])
 	})
 
 	t.Run("path prefix", func(t *testing.T) {
@@ -1158,9 +1205,9 @@ func TestClassifyHostsDetectsProviders(t *testing.T) {
 
 		origin := url.URL{Scheme: "https", Host: "git.example.com", Path: "/gitlab"}
 		got := client.ClassifyHosts(t.Context(), []url.URL{origin})
-		assert.Equal(t, types.GitHostGitLab, got["git.example.com"])
+		assert.Equal(t, provider.GitLab, got["git.example.com"])
 		assert.Equal(t, "https://git.example.com/gitlab/api/v4/projects/group%2Fapp/repository/commits/main",
-			joinEscaped(client.gitlabAPI("git.example.com"), "projects", "group/app", "repository", "commits", "main").String())
+			joinEscaped(client.gitlabAPIAt(url.URL{}, "git.example.com"), "projects", "group/app", "repository", "commits", "main").String())
 	})
 
 	t.Run("unauthorized without fingerprint", func(t *testing.T) {
@@ -1213,8 +1260,8 @@ func TestGitHubAPIURL(t *testing.T) {
 	nop := zerolog.Nop()
 	client := New(&nop, Options{})
 
-	assert.Equal(t, "https://api.github.com/repos/org/app", client.githubAPI("github.com", "repos", "org", "app").String())
-	assert.Equal(t, "https://github.company.com/api/v3/repos/org/app", client.githubAPI("github.company.com", "repos", "org", "app").String())
+	assert.Equal(t, "https://api.github.com/repos/org/app", client.githubAPIAt(url.URL{}, "github.com", "repos", "org", "app").String())
+	assert.Equal(t, "https://github.company.com/api/v3/repos/org/app", client.githubAPIAt(url.URL{}, "github.company.com", "repos", "org", "app").String())
 }
 
 func httpsOrigin(host string) url.URL {

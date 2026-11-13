@@ -5,7 +5,7 @@
 Watchtower is released as a container image, which makes getting started as simple as pulling the `nickfedor/watchtower` image.
 
 !!! Note
-    If you are using an ARM-based system, then remember to pull the appropriate `nickfedor/watchtower:armhf-<tag>` image from [Docker Hub](https://hub.docker.com/r/nickfedor/watchtower/tags/){target="_blank" rel="noopener noreferrer"}.
+    If you are using an ARM-based system, then remember to pull the appropriate `nickfedor/watchtower:armhf-TAG` image, where *`TAG`* is the release you want, from [Docker Hub](https://hub.docker.com/r/nickfedor/watchtower/tags/){target="_blank" rel="noopener noreferrer"}.
 
 ### Docker Socket Requirement
 
@@ -54,12 +54,14 @@ or by mounting the host's docker config file into the container (at the root of 
 ```bash
 docker run -d \
   --name watchtower \
-  -e REPO_USER=username \
-  -e REPO_PASS=password \
+  -e REPO_USER=USERNAME \
+  -e REPO_PASS=PASSWORD \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --restart unless-stopped \
   nickfedor/watchtower container_to_watch --debug
 ```
+
+Replace *`USERNAME`* and *`PASSWORD`* with your registry user name and password.
 
 Also check out [this Stack Overflow answer](https://stackoverflow.com/a/30494145/7872793) for more options on how to pass environment variables.
 
@@ -71,7 +73,7 @@ Instead you can run `docker login` to store your credentials in `$HOME/.docker/c
 ```bash
 docker run -d \
   --name watchtower \
-  -v $HOME/.docker/config.json:/config.json \
+  -v "$HOME/.docker/config.json:/config.json" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --restart unless-stopped \
   nickfedor/watchtower container_to_watch --debug
@@ -93,10 +95,9 @@ Here is a complete docker-compose.yml file that starts up a docker container fro
 Note the command argument changing the interval to 30s rather than the default 24 hours.
 
 ```yaml
-version: "3"
 services:
   cavo:
-    image: ghcr.io/<org>/<image>:<tag>
+    image: ghcr.io/OWNER/IMAGE:TAG
     ports:
       - "443:3443"
       - "80:3080"
@@ -107,3 +108,9 @@ services:
       - /root/.docker/config.json:/config.json
     command: --interval 30
 ```
+
+Replace the following:
+
+- *`OWNER`*: the GitHub user or organization that owns the package
+- *`IMAGE`*: the name of the private image
+- *`TAG`*: the image tag

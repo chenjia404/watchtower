@@ -7,9 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/nicholas-fedor/watchtower/internal/api/config"
-	mockContainer "github.com/nicholas-fedor/watchtower/pkg/container/mocks"
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	mockRoutes "github.com/nicholas-fedor/watchtower/internal/api/routes/mocks"
+	"github.com/nicholas-fedor/watchtower/internal/container"
 )
 
 func TestRegisterContainersRoute_NilClient(t *testing.T) {
@@ -17,7 +16,7 @@ func TestRegisterContainersRoute_NilClient(t *testing.T) {
 		app := testApp()
 		auth := testAuthMiddleware()
 
-		opts := config.Options{
+		opts := Options{
 			EnableContainersAPI: true,
 			Client:              nil,
 			UnblockHTTPAPI:      true,
@@ -38,7 +37,7 @@ func TestRegisterContainersRoute_NilClient(t *testing.T) {
 		app := testApp()
 		auth := testAuthMiddleware()
 
-		opts := config.Options{
+		opts := Options{
 			EnableContainersAPI: true,
 			Client:              nil,
 			UnblockHTTPAPI:      true,
@@ -58,10 +57,10 @@ func TestRegisterContainersRoute_NilClient(t *testing.T) {
 	t.Run("with client registers routes", func(t *testing.T) {
 		app := testApp()
 		auth := testAuthMiddleware()
-		mockClient := mockContainer.NewMockClient(t)
-		mockClient.EXPECT().ListContainers(mock.Anything).Return([]types.Container{}, nil).Maybe()
+		mockClient := mockRoutes.NewMockClient(t)
+		mockClient.EXPECT().ListContainers(mock.Anything).Return([]*container.Container{}, nil).Maybe()
 
-		opts := config.Options{
+		opts := Options{
 			EnableContainersAPI: true,
 			Client:              mockClient,
 			UnblockHTTPAPI:      true,

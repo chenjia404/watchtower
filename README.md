@@ -7,9 +7,7 @@
   <br/><br/>
 
   [![All Contributors](https://img.shields.io/github/all-contributors/nicholas-fedor/watchtower)](#contributors)
-  [![CircleCI](https://dl.circleci.com/status-badge/img/gh/nicholas-fedor/watchtower/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/nicholas-fedor/watchtower/tree/main)
   [![codecov](https://codecov.io/gh/nicholas-fedor/watchtower/branch/main/graph/badge.svg)](https://codecov.io/gh/nicholas-fedor/watchtower)
-  [![Codacy Badge](https://app.codacy.com/project/badge/Grade/1c48cfb7646d4009aa8c6f71287670b8)](https://www.codacy.com/gh/nicholas-fedor/watchtower/dashboard?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=nicholas-fedor/watchtower&amp;utm_campaign=Badge_Grade)
   [![Pulls from DockerHub](https://img.shields.io/docker/pulls/nickfedor/watchtower.svg)](https://hub.docker.com/r/nickfedor/watchtower)
   [![GoDoc](https://godoc.org/github.com/nicholas-fedor/watchtower?status.svg)](https://godoc.org/github.com/nicholas-fedor/watchtower)
   [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/nicholas-fedor/watchtower)
@@ -214,6 +212,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://justinmontgomery.com"><img src="https://avatars.githubusercontent.com/u/1500269?v=4?s=100" width="100px;" alt="Justin Montgomery"/><br /><sub><b>Justin Montgomery</b></sub></a><br /><a href="https://github.com/nicholas-fedor/watchtower/issues?q=author%3Ajmooo" title="Bug reports">🐛</a> <a href="https://github.com/nicholas-fedor/watchtower/commits?author=jmooo" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/shawly"><img src="https://avatars.githubusercontent.com/u/6448794?v=4?s=100" width="100px;" alt="shawly"/><br /><sub><b>shawly</b></sub></a><br /><a href="https://github.com/nicholas-fedor/watchtower/commits?author=shawly" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://notainutilis.fr"><img src="https://avatars.githubusercontent.com/u/9675966?v=4?s=100" width="100px;" alt="Nota Inutilis"/><br /><sub><b>Nota Inutilis</b></sub></a><br /><a href="https://github.com/nicholas-fedor/watchtower/commits?author=NotaInutilis" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://rooty.name"><img src="https://avatars.githubusercontent.com/u/6276644?v=4?s=100" width="100px;" alt="Stan"/><br /><sub><b>Stan</b></sub></a><br /><a href="https://github.com/nicholas-fedor/watchtower/commits?author=rooty0" title="Code">💻</a> <a href="https://github.com/nicholas-fedor/watchtower/commits?author=rooty0" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

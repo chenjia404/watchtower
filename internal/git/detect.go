@@ -9,23 +9,23 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/nicholas-fedor/watchtower/pkg/types"
+	"github.com/nicholas-fedor/watchtower/internal/git/provider"
 )
 
 const probeBodyLimit = 64 << 10
 
 // knownAPI is a confirmed REST fingerprint for one hosted Git product.
 type knownAPI struct {
+	match func(apiProbe) bool
 	kind  string
 	paths [][]string
-	match func(apiProbe) bool
 }
 
 // apiProbe is the closed HTTP result of one fingerprint request.
 type apiProbe struct {
-	Status int
 	Header http.Header
 	Body   []byte
+	Status int
 }
 
 // knownAPIs is the canonical map of product → version/metadata endpoints.
@@ -33,17 +33,17 @@ type apiProbe struct {
 // payload or headers. Status codes alone are not enough.
 var knownAPIs = []knownAPI{
 	{
-		kind:  types.GitHostGitea,
+		kind:  provider.Gitea,
 		paths: [][]string{{"api", "v1", "version"}},
 		match: matchGiteaAPI,
 	},
 	{
-		kind:  types.GitHostGitLab,
+		kind:  provider.GitLab,
 		paths: [][]string{{"api", "v4", "metadata"}, {"api", "v4", "version"}},
 		match: matchGitLabAPI,
 	},
 	{
-		kind:  types.GitHostGitHub,
+		kind:  provider.GitHub,
 		paths: [][]string{{"api", "v3"}},
 		match: matchGitHubAPI,
 	},
@@ -80,7 +80,7 @@ func (c *Client) ClassifyHosts(ctx context.Context, origins []url.URL) map[strin
 		c.origins[host] = origin
 
 		// Built-in public hosts are already classified.
-		if types.ResolveGitHostKind(host, nil) != "" {
+		if provider.ResolveHostKind(host, nil) != "" {
 			continue
 		}
 

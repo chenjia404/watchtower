@@ -9,11 +9,13 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/helmet"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
-	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
 	"github.com/rs/zerolog"
 
-	fiberzerolog "github.com/gofiber/contrib/v3/zerolog"
+	fiberZerolog "github.com/gofiber/contrib/v3/zerolog"
+	fiberRecover "github.com/gofiber/fiber/v3/middleware/recover"
+
+	"github.com/nicholas-fedor/watchtower/internal/observability/logging"
 )
 
 const (
@@ -21,36 +23,34 @@ const (
 	bodyLimit = 1 << 20
 
 	// readTimeout defines the maximum duration for reading the entire request,
-	// including the body.
+	// including the body. Graceful shutdown waits for open connections, so
+	// keep-alive connections need a read and an idle bound to close within
+	// shutdownGracePeriod.
 	readTimeout = 10 * time.Second
 
 	// idleTimeout defines the maximum amount of time to wait for the next
 	// request when keep-alives are enabled.
 	idleTimeout = 30 * time.Second
 
-	// defaultRateLimitPerMinute is the fallback rate limit when a
-	// non-positive value is provided.
-	defaultRateLimitPerMinute = 60
-
 	// corsMaxAge is the maximum duration (in seconds) that browsers may cache
 	// CORS preflight results.
 	corsMaxAge = 3600
 )
 
-// ShutdownGracePeriod defines the maximum duration allowed for the server to
+// shutdownGracePeriod defines the maximum duration allowed for the server to
 // shut down gracefully.
-const ShutdownGracePeriod = 5 * time.Second
+const shutdownGracePeriod = 5 * time.Second
 
-// ProxyConfig holds configuration for reverse proxy support.
-type ProxyConfig struct {
-	// TrustedProxies is a list of trusted proxy IPs/CIDRs.
-	TrustedProxies []string
+// proxyConfig holds configuration for reverse proxy support.
+type proxyConfig struct {
 	// ProxyHeader is the header for the real client IP (e.g. X-Forwarded-For).
 	ProxyHeader string
+	// TrustedProxies is a list of trusted proxy IPs/CIDRs.
+	TrustedProxies []string
 }
 
-// CORSConfig holds configuration for CORS middleware.
-type CORSConfig struct {
+// corsConfig holds configuration for CORS middleware.
+type corsConfig struct {
 	// AllowedOrigins is a list of origins allowed to make cross-origin requests.
 	// Use ["*"] to allow all origins.
 	AllowedOrigins []string
@@ -60,31 +60,29 @@ type CORSConfig struct {
 	AllowedHeaders []string
 }
 
-// New creates a new Fiber-based API application with the configured middleware
+// newApp creates a new Fiber-based API application with the configured middleware
 // stack and lifecycle hooks.
 //
 // Parameters:
 //   - log: Logger for Fiber middleware and server lifecycle messages.
-//   - rateLimitPerMinute: Maximum requests per minute per IP. Values <= 0 fall
-//     back to defaultRateLimitPerMinute (60).
+//   - rateLimitPerMinute: Maximum requests per minute per IP. It must be at
+//     least 1, which loading the configuration guarantees.
 //   - proxyCfg: Reverse proxy configuration.
 //   - corsCfg: CORS middleware configuration.
 //   - noStartupMessage: When true, suppresses the HTTP API startup log entries.
 //
 // Returns:
 //   - *fiber.App: Configured Fiber application.
-func New(
+func newApp(
 	log *zerolog.Logger,
 	rateLimitPerMinute int,
-	proxyCfg ProxyConfig,
-	corsCfg CORSConfig,
+	proxyCfg proxyConfig,
+	corsCfg corsConfig,
 	noStartupMessage bool,
 ) *fiber.App {
-	rateLimit := rateLimitPerMinute
-	if rateLimit <= 0 {
-		rateLimit = defaultRateLimitPerMinute
-	}
-
+	// WriteTimeout stays unset because a server-wide write deadline would cut
+	// off event streams and long synchronous updates. Route timeouts bound
+	// each handler instead.
 	fiberCfg := fiber.Config{
 		BodyLimit:     bodyLimit,
 		ReadTimeout:   readTimeout,
@@ -122,7 +120,7 @@ func New(
 	}
 
 	middlewares := []any{
-		recover.New(),
+		fiberRecover.New(),
 		helmet.New(),
 	}
 
@@ -150,26 +148,26 @@ func New(
 
 	middlewares = append(middlewares,
 		requestid.New(),
-		fiberzerolog.New(fiberzerolog.Config{
+		fiberZerolog.New(fiberZerolog.Config{
 			Logger: &requestLog,
 			// Structured access fields: status/method/path (prior stream shape) plus
 			// ip/latency/error and request ID for correlation with requestid middleware.
 			// Messages/Levels omit so contrib defaults apply (5xx Error, 4xx Warn, else Info).
 			Fields: []string{
-				fiberzerolog.FieldStatus,
-				fiberzerolog.FieldMethod,
-				fiberzerolog.FieldPath,
-				fiberzerolog.FieldIP,
-				fiberzerolog.FieldLatency,
-				fiberzerolog.FieldError,
-				fiberzerolog.FieldRequestID,
+				fiberZerolog.FieldStatus,
+				fiberZerolog.FieldMethod,
+				fiberZerolog.FieldPath,
+				fiberZerolog.FieldIP,
+				fiberZerolog.FieldLatency,
+				fiberZerolog.FieldError,
+				fiberZerolog.FieldRequestID,
 			},
 		}),
 		compress.New(compress.Config{
 			Level: compress.LevelBestSpeed,
 		}),
 		limiter.New(limiter.Config{
-			Max:               rateLimit,
+			Max:               rateLimitPerMinute,
 			Expiration:        time.Minute,
 			LimiterMiddleware: limiter.SlidingWindow{},
 			KeyGenerator:      func(c fiber.Ctx) string { return c.IP() },
@@ -189,13 +187,13 @@ func New(
 				Str("host", data.Host).
 				Str("port", data.Port).
 				Bool("tls", data.TLS).
-				Msg("Starting HTTP API server")
+				Msg(logging.StartingAPIServer)
 
 			log.Info().
 				Str("host", data.Host).
 				Str("port", data.Port).
 				Bool("tls", data.TLS).
-				Msg("HTTP API server is enabled")
+				Msg(logging.APIServerEnabled)
 		}
 
 		return nil
